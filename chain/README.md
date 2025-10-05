@@ -18,7 +18,7 @@ _To run this example, you must first install [Rust](https://www.rust-lang.org/to
 #### Create Artifacts
 
 ```bash
-cargo run --bin setup -- generate --peers 5 --bootstrappers 1 --worker-threads 3 --log-level info --message-backlog 16384 --mailbox-size 16384 --deque-size 10 --output test local --start-port 3000
+cargo run --bin setup -- generate --peers 4 --bootstrappers 1 --worker-threads 3 --log-level info --message-backlog 16384 --mailbox-size 16384 --deque-size 10 --output test local --start-port 3000
 ```
 
 _If setup succeeds, you should see the following output:_
@@ -28,20 +28,17 @@ _If setup succeeds, you should see the following output:_
 2025-05-02T14:47:55.907805Z  INFO setup: wrote peer configuration file path="4cf00f5c66ed27ba3e753f6a8b989b306eae5ce2d3f3c2db105aae2123a012c8.yaml"
 2025-05-02T14:47:55.908022Z  INFO setup: wrote peer configuration file path="95ce6a717dfc7b7dc8dcded623c4bc5ce7a6b4e9c986e923baa3acc5078d7a0f.yaml"
 2025-05-02T14:47:55.908239Z  INFO setup: wrote peer configuration file path="f79141801d52e8a1a7f16b639038032f1a402707ad51f6d7aa94098c8f07e068.yaml"
-2025-05-02T14:47:55.908458Z  INFO setup: wrote peer configuration file path="f79a65c60ac706e67dd964cf4cde9b804c89c15c330f00c9b0adc2ef51d6616c.yaml"
-2025-05-02T14:47:55.908669Z  INFO setup: wrote peer configuration file path="fa6fffb46bb3aceecde1324ac31d8cfddda6c0857a63567796ff8507fef1a965.yaml"
+2025-05-02T14:47:55.908458Z  INFO setup: wrote peer configuration file path="fa6fffb46bb3aceecde1324ac31d8cfddda6c0857a63567796ff8507fef1a965.yaml"
 2025-05-02T14:47:55.908677Z  INFO setup: setup complete bootstrappers=["fa6fffb46bb3aceecde1324ac31d8cfddda6c0857a63567796ff8507fef1a965"]
 To start validators, run:
 4cf00f5c66ed27ba3e753f6a8b989b306eae5ce2d3f3c2db105aae2123a012c8: cargo run --bin validator -- --peers=<your-path>/test/peers.yaml --config=<your-path>/test/4cf00f5c66ed27ba3e753f6a8b989b306eae5ce2d3f3c2db105aae2123a012c8.yaml
 95ce6a717dfc7b7dc8dcded623c4bc5ce7a6b4e9c986e923baa3acc5078d7a0f: cargo run --bin validator -- --peers=<your-path>/test/peers.yaml --config=<your-path>/test/95ce6a717dfc7b7dc8dcded623c4bc5ce7a6b4e9c986e923baa3acc5078d7a0f.yaml
 f79141801d52e8a1a7f16b639038032f1a402707ad51f6d7aa94098c8f07e068: cargo run --bin validator -- --peers=<your-path>/test/peers.yaml --config=<your-path>/test/f79141801d52e8a1a7f16b639038032f1a402707ad51f6d7aa94098c8f07e068.yaml
-f79a65c60ac706e67dd964cf4cde9b804c89c15c330f00c9b0adc2ef51d6616c: cargo run --bin validator -- --peers=<your-path>/test/peers.yaml --config=<your-path>/test/f79a65c60ac706e67dd964cf4cde9b804c89c15c330f00c9b0adc2ef51d6616c.yaml
 fa6fffb46bb3aceecde1324ac31d8cfddda6c0857a63567796ff8507fef1a965: cargo run --bin validator -- --peers=<your-path>/test/peers.yaml --config=<your-path>/test/fa6fffb46bb3aceecde1324ac31d8cfddda6c0857a63567796ff8507fef1a965.yaml
 To view metrics, run:
 4cf00f5c66ed27ba3e753f6a8b989b306eae5ce2d3f3c2db105aae2123a012c8: curl http://localhost:3001/metrics
 95ce6a717dfc7b7dc8dcded623c4bc5ce7a6b4e9c986e923baa3acc5078d7a0f: curl http://localhost:3003/metrics
 f79141801d52e8a1a7f16b639038032f1a402707ad51f6d7aa94098c8f07e068: curl http://localhost:3005/metrics
-f79a65c60ac706e67dd964cf4cde9b804c89c15c330f00c9b0adc2ef51d6616c: curl http://localhost:3007/metrics
 fa6fffb46bb3aceecde1324ac31d8cfddda6c0857a63567796ff8507fef1a965: curl http://localhost:3009/metrics
 ```
 
@@ -54,6 +51,23 @@ cargo run --bin validator -- --peers=<your-path>/test/peers.yaml --config=<your-
 ```
 
 _It is necessary to start at least one bootstrapper for any other peers to connect (used to exchange IPs to dial, not as a relay)._
+
+##### Configurable Engine Instances
+
+By default, each validator runs 2 engine instances for parallel processing. You can configure the number of engines using the `--engines` flag:
+
+```bash
+# Single engine (minimal resource usage)
+cargo run --bin validator -- --peers=<your-path>/test/peers.yaml --config=<your-path>/test/config.yaml --engines 1
+
+# Default (2 engines)
+cargo run --bin validator -- --peers=<your-path>/test/peers.yaml --config=<your-path>/test/config.yaml
+
+# Multiple engines, e.g., 5 (up to 100)
+cargo run --bin validator -- --peers=<your-path>/test/peers.yaml --config=<your-path>/test/config.yaml --engines 5
+```
+
+_More engines provide lower end-to-end latency but consume more resources. Each engine runs independently with its own channels and partition. The optimal number depends on your system resources (CPU cores, memory, file descriptors) and network capacity._
 
 #### Debugging
 

@@ -30,13 +30,6 @@ const RESOLVER_CHANNEL: u32 = 2;
 const BROADCASTER_CHANNEL: u32 = 3;
 const BACKFILL_BY_DIGEST_CHANNEL: u32 = 4;
 
-// Secondary engine channels
-const PENDING_CHANNEL_2: u32 = 10;
-const RECOVERED_CHANNEL_2: u32 = 11;
-const RESOLVER_CHANNEL_2: u32 = 12;
-const BROADCASTER_CHANNEL_2: u32 = 13;
-const BACKFILL_BY_DIGEST_CHANNEL_2: u32 = 14;
-
 const LEADER_TIMEOUT: Duration = Duration::from_secs(1);
 const NOTARIZATION_TIMEOUT: Duration = Duration::from_secs(2);
 const NULLIFY_RETRY: Duration = Duration::from_secs(10);
@@ -57,6 +50,7 @@ fn main() {
         .arg(Arg::new("hosts").long("hosts").required(false))
         .arg(Arg::new("peers").long("peers").required(false))
         .arg(Arg::new("config").long("config").required(true))
+        .arg(Arg::new("engines").long("engines").value_name("COUNT").help("Number of engine instances to start").default_value("2"))
         .get_matches();
 
     // Load ip file
@@ -66,6 +60,14 @@ fn main() {
         hosts_file.is_some() || peers_file.is_some(),
         "Either --hosts or --peers must be provided"
     );
+
+    // Parse engines count
+    let engines_count: usize = matches.get_one::<String>("engines")
+        .unwrap()
+        .parse()
+        .expect("Invalid engines count");
+    assert!(engines_count > 0, "Number of engines must be at least 1");
+    assert!(engines_count <= 100, "Number of engines cannot exceed 100");
 
     // Load config
     let config_file = matches.get_one::<String>("config").unwrap();
@@ -177,6 +179,7 @@ fn main() {
             ?identity,
             ?ip,
             port = config.port,
+            engines_count,
             "loaded config"
         );
 
@@ -199,50 +202,30 @@ fn main() {
         // Provide authorized peers
         oracle.register(0, peers.clone()).await;
 
-        // Register pending channel (engine_1)
+        // Register channels for all engines dynamically
         let pending_limit = Quota::per_second(NonZeroU32::new(128).unwrap());
-        let pending_1 = network.register(PENDING_CHANNEL, pending_limit, config.message_backlog);
-
-        // Register recovered channel (engine_1)
         let recovered_limit = Quota::per_second(NonZeroU32::new(128).unwrap());
-        let recovered_1 =
-            network.register(RECOVERED_CHANNEL, recovered_limit, config.message_backlog);
-
-        // Register resolver channel (engine_1)
         let resolver_limit = Quota::per_second(NonZeroU32::new(128).unwrap());
-        let resolver_1 = network.register(RESOLVER_CHANNEL, resolver_limit, config.message_backlog);
-
-        // Register broadcast channel (engine_1)
         let broadcaster_limit = Quota::per_second(NonZeroU32::new(8).unwrap());
-        let broadcaster_1 = network.register(
-            BROADCASTER_CHANNEL,
-            broadcaster_limit,
-            config.message_backlog,
-        );
-
-        // Register backfill channel (engine_1)
         let backfill_quota = Quota::per_second(NonZeroU32::new(8).unwrap());
-        let backfill_1 = network.register(
-            BACKFILL_BY_DIGEST_CHANNEL,
-            backfill_quota,
-            config.message_backlog,
-        );
 
-        // Register channels for engine_2
-        let pending_2 = network.register(PENDING_CHANNEL_2, pending_limit, config.message_backlog);
-        let recovered_2 =
-            network.register(RECOVERED_CHANNEL_2, recovered_limit, config.message_backlog);
-        let resolver_2 = network.register(RESOLVER_CHANNEL_2, resolver_limit, config.message_backlog);
-        let broadcaster_2 = network.register(
-            BROADCASTER_CHANNEL_2,
-            broadcaster_limit,
-            config.message_backlog,
-        );
-        let backfill_2 = network.register(
-            BACKFILL_BY_DIGEST_CHANNEL_2,
-            backfill_quota,
-            config.message_backlog,
-        );
+        let mut engine_channels = Vec::new();
+        for i in 0..engines_count {
+            let base_channel = if i == 0 { 0 } else { i as u32 * 10 };
+            let pending_channel = base_channel + PENDING_CHANNEL;
+            let recovered_channel = base_channel + RECOVERED_CHANNEL;
+            let resolver_channel = base_channel + RESOLVER_CHANNEL;
+            let broadcaster_channel = base_channel + BROADCASTER_CHANNEL;
+            let backfill_channel = base_channel + BACKFILL_BY_DIGEST_CHANNEL;
+
+            let pending = network.register(pending_channel, pending_limit, config.message_backlog);
+            let recovered = network.register(recovered_channel, recovered_limit, config.message_backlog);
+            let resolver = network.register(resolver_channel, resolver_limit, config.message_backlog);
+            let broadcaster = network.register(broadcaster_channel, broadcaster_limit, config.message_backlog);
+            let backfill = network.register(backfill_channel, backfill_quota, config.message_backlog);
+
+            engine_channels.push((pending, recovered, resolver, broadcaster, backfill));
+        }
 
         // Create network
         let p2p = network.start();
@@ -253,66 +236,49 @@ fn main() {
             indexer = Some(Client::new(&uri, identity));
         }
 
-        // Create engine_1
-        let config_1 = engine::Config {
-            blocker: oracle.clone(),
-            partition_prefix: "engine_1".to_string(),
-            blocks_freezer_table_initial_size: BLOCKS_FREEZER_TABLE_INITIAL_SIZE,
-            finalized_freezer_table_initial_size: FINALIZED_FREEZER_TABLE_INITIAL_SIZE,
-            signer: signer.clone(),
-            polynomial: polynomial.clone(),
-            share: share.clone(),
-            participants: peers.clone(),
-            mailbox_size: config.mailbox_size,
-            deque_size: config.deque_size,
-            backfill_quota,
-            leader_timeout: LEADER_TIMEOUT,
-            notarization_timeout: NOTARIZATION_TIMEOUT,
-            nullify_retry: NULLIFY_RETRY,
-            activity_timeout: ACTIVITY_TIMEOUT,
-            skip_timeout: SKIP_TIMEOUT,
-            fetch_timeout: FETCH_TIMEOUT,
-            max_fetch_count: MAX_FETCH_COUNT,
-            max_fetch_size: MAX_FETCH_SIZE,
-            fetch_concurrent: FETCH_CONCURRENT,
-            fetch_rate_per_peer: resolver_limit,
-            indexer: indexer.clone(),
-        };
-        let engine_1 = engine::Engine::new(context.with_label("engine_1"), config_1).await;
-
-        // Create engine_2
-        let config_2 = engine::Config {
-            blocker: oracle,
-            partition_prefix: "engine_2".to_string(),
-            blocks_freezer_table_initial_size: BLOCKS_FREEZER_TABLE_INITIAL_SIZE,
-            finalized_freezer_table_initial_size: FINALIZED_FREEZER_TABLE_INITIAL_SIZE,
-            signer,
-            polynomial,
-            share,
-            participants: peers,
-            mailbox_size: config.mailbox_size,
-            deque_size: config.deque_size,
-            backfill_quota,
-            leader_timeout: LEADER_TIMEOUT,
-            notarization_timeout: NOTARIZATION_TIMEOUT,
-            nullify_retry: NULLIFY_RETRY,
-            activity_timeout: ACTIVITY_TIMEOUT,
-            skip_timeout: SKIP_TIMEOUT,
-            fetch_timeout: FETCH_TIMEOUT,
-            max_fetch_count: MAX_FETCH_COUNT,
-            max_fetch_size: MAX_FETCH_SIZE,
-            fetch_concurrent: FETCH_CONCURRENT,
-            fetch_rate_per_peer: resolver_limit,
-            indexer,
-        };
-        let engine_2 = engine::Engine::new(context.with_label("engine_2"), config_2).await;
+        // Create engines dynamically
+        let mut engines = Vec::new();
+        for i in 0..engines_count {
+            let engine_config = engine::Config {
+                blocker: oracle.clone(),
+                partition_prefix: format!("engine_{}", i + 1),
+                blocks_freezer_table_initial_size: BLOCKS_FREEZER_TABLE_INITIAL_SIZE,
+                finalized_freezer_table_initial_size: FINALIZED_FREEZER_TABLE_INITIAL_SIZE,
+                signer: signer.clone(),
+                polynomial: polynomial.clone(),
+                share: share.clone(),
+                participants: peers.clone(),
+                mailbox_size: config.mailbox_size,
+                deque_size: config.deque_size,
+                backfill_quota,
+                leader_timeout: LEADER_TIMEOUT,
+                notarization_timeout: NOTARIZATION_TIMEOUT,
+                nullify_retry: NULLIFY_RETRY,
+                activity_timeout: ACTIVITY_TIMEOUT,
+                skip_timeout: SKIP_TIMEOUT,
+                fetch_timeout: FETCH_TIMEOUT,
+                max_fetch_count: MAX_FETCH_COUNT,
+                max_fetch_size: MAX_FETCH_SIZE,
+                fetch_concurrent: FETCH_CONCURRENT,
+                fetch_rate_per_peer: resolver_limit,
+                indexer: indexer.clone(),
+            };
+            let engine = engine::Engine::new(context.with_label(&format!("engine_{}", i + 1)), engine_config).await;
+            engines.push(engine);
+        }
 
         // Start engines
-        let engine_1 = engine_1.start(pending_1, recovered_1, resolver_1, broadcaster_1, backfill_1);
-        let engine_2 = engine_2.start(pending_2, recovered_2, resolver_2, broadcaster_2, backfill_2);
+        let mut started_engines = Vec::new();
+        for (_i, engine) in engines.into_iter().enumerate() {
+            let (pending, recovered, resolver, broadcaster, backfill) = engine_channels.remove(0);
+            let started_engine = engine.start(pending, recovered, resolver, broadcaster, backfill);
+            started_engines.push(started_engine);
+        }
 
         // Wait for any task to error
-        if let Err(e) = try_join_all(vec![p2p, engine_1, engine_2]).await {
+        let mut all_tasks = vec![p2p];
+        all_tasks.extend(started_engines);
+        if let Err(e) = try_join_all(all_tasks).await {
             error!(?e, "task failed");
         }
     });
