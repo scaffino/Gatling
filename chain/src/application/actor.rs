@@ -29,6 +29,7 @@ pub struct Actor<R: Rng + Spawner + Metrics + Clock> {
     context: R,
     hasher: Sha256,
     mailbox: mpsc::Receiver<Message>,
+    engine_id: String,
 }
 
 impl<R: Rng + Spawner + Metrics + Clock> Actor<R> {
@@ -40,6 +41,7 @@ impl<R: Rng + Spawner + Metrics + Clock> Actor<R> {
                 context,
                 hasher: Sha256::new(),
                 mailbox,
+                engine_id: config.engine_id,
             },
             Supervisor::new(config.polynomial, config.participants, config.share),
             Mailbox::new(sender),
@@ -82,6 +84,7 @@ impl<R: Rng + Spawner + Metrics + Clock> Actor<R> {
                     // continue processing other messages)
                     self.context.with_label("propose").spawn({
                         let built = built.clone();
+                        let engine_id = self.engine_id.clone();
                         move |context| async move {
                             let response_closed = OneshotClosedFut::new(&mut response);
                             select! {
@@ -103,11 +106,11 @@ impl<R: Rng + Spawner + Metrics + Clock> Actor<R> {
 
                                     // Send the digest to the consensus
                                     let result = response.send(digest);
-                                    info!(view, ?digest, success=result.is_ok(), "proposed new block");
+                                    info!(engine_id=%engine_id, view, ?digest, success=result.is_ok(), "proposed new block");
                                 },
                                 _ = response_closed => {
                                     // The response was cancelled
-                                    warn!(view, "propose aborted");
+                                    warn!(engine_id=%engine_id, view, "propose aborted");
                                 }
                             }
                         }
@@ -116,12 +119,15 @@ impl<R: Rng + Spawner + Metrics + Clock> Actor<R> {
                 Message::Broadcast { payload } => {
                     // Check if the last built is equal
                     let Some(built) = built.lock().unwrap().clone() else {
-                        warn!(?payload, "missing block to broadcast");
+                        let engine_id = self.engine_id.clone();
+                        warn!(engine_id=%engine_id, ?payload, "missing block to broadcast");
                         continue;
                     };
 
                     // Send the block to the syncer
+                    let engine_id = self.engine_id.clone();
                     debug!(
+                        engine_id=%engine_id,
                         ?payload,
                         view = built.0,
                         height = built.1.height,
@@ -146,6 +152,7 @@ impl<R: Rng + Spawner + Metrics + Clock> Actor<R> {
                     // continue processing other messages)
                     self.context.with_label("verify").spawn({
                         let mut marshal = marshal.clone();
+                        let engine_id = self.engine_id.clone();
                         move |context| async move {
                             let requester =
                                 try_join(parent_request, marshal.subscribe(None, payload).await);
@@ -182,7 +189,7 @@ impl<R: Rng + Spawner + Metrics + Clock> Actor<R> {
                                 },
                                 _ = response_closed => {
                                     // The response was cancelled
-                                    warn!(view, "verify aborted");
+                                    warn!(engine_id=%engine_id, view, "verify aborted");
                                 }
                             }
                         }
@@ -192,7 +199,9 @@ impl<R: Rng + Spawner + Metrics + Clock> Actor<R> {
                     // In an application that maintains state, you would compute the state transition function here.
                     //
                     // After an unclean shutdown, it is possible that the application may be asked to process a block it has already seen (which it can simply ignore).
+                    let engine_id = self.engine_id.clone();
                     info!(
+                        engine_id=%engine_id,
                         height = block.height,
                         digest = ?block.commitment(),
                         "processed block"

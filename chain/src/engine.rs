@@ -118,6 +118,7 @@ impl<
                 polynomial: cfg.polynomial,
                 share: cfg.share,
                 mailbox_size: cfg.mailbox_size,
+                engine_id: cfg.partition_prefix.clone(),
             },
         );
 

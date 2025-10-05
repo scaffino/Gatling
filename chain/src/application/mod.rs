@@ -23,4 +23,7 @@ pub struct Config {
     /// Number of messages from consensus to hold in our backlog
     /// before blocking.
     pub mailbox_size: usize,
+
+    /// Identifier for the engine instance (for logging/telemetry).
+    pub engine_id: String,
 }
