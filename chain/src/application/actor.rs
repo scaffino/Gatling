@@ -15,8 +15,14 @@ use futures::StreamExt;
 use futures::{channel::mpsc, future::try_join};
 use futures::{future, future::Either};
 use rand::Rng;
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use tracing::{debug, info, warn};
+
+// Metrics
+use prometheus_client::metrics::counter::Counter as PromCounter;
+use prometheus_client::metrics::histogram::Histogram as PromHistogram;
+use prometheus_client::metrics::histogram::exponential_buckets;
 
 /// Genesis message to use during initialization.
 const GENESIS: &[u8] = b"commonware is neat";
@@ -30,18 +36,41 @@ pub struct Actor<R: Rng + Spawner + Metrics + Clock> {
     hasher: Sha256,
     mailbox: mpsc::Receiver<Message>,
     engine_id: String,
+    // Custom Prometheus metrics
+    finalized_blocks_counter: PromCounter<u64>,
+    block_latency_ms_histogram: PromHistogram,
+    // Track finalized blocks we've already recorded to avoid double-counting
+    finalized_seen: HashSet<Vec<u8>>,
 }
 
 impl<R: Rng + Spawner + Metrics + Clock> Actor<R> {
     /// Create a new application actor.
     pub fn new(context: R, config: Config) -> (Self, Supervisor, Mailbox) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
+        // Create metrics and register with runtime registry
+        // Counter for finalized blocks
+        let finalized_blocks_counter = PromCounter::<u64>::default();
+        // Histogram for block proposal-to-finalization latency (ms)
+        // Buckets roughly from 1ms up to ~32s
+        let buckets = exponential_buckets(1.0, 2.0, 16);
+        let block_latency_ms_histogram = PromHistogram::new(buckets);
+
+        // Metric names are prefixed by engine id to distinguish multiple engines per validator
+        let finalized_name = format!("{}{}", config.engine_id, "_finalized_blocks_total");
+        let latency_name = format!("{}{}", config.engine_id, "_block_finalization_latency_ms");
+
+        // Register the metrics so they appear on the /metrics endpoint
+        context.register(&finalized_name, "Total number of finalized blocks", finalized_blocks_counter.clone());
+        context.register(&latency_name, "Block proposal-to-finalization latency in milliseconds", block_latency_ms_histogram.clone());
         (
             Self {
                 context,
                 hasher: Sha256::new(),
                 mailbox,
                 engine_id: config.engine_id,
+                finalized_blocks_counter,
+                block_latency_ms_histogram,
+                finalized_seen: HashSet::new(),
             },
             Supervisor::new(config.polynomial, config.participants, config.share),
             Mailbox::new(sender),
@@ -200,6 +229,15 @@ impl<R: Rng + Spawner + Metrics + Clock> Actor<R> {
                     //
                     // After an unclean shutdown, it is possible that the application may be asked to process a block it has already seen (which it can simply ignore).
                     let engine_id = self.engine_id.clone();
+                    // Record metrics for finalized block only once per unique block digest
+                    let digest = block.digest();
+                    if self.finalized_seen.insert(digest.to_vec()) {
+                        // Use block.timestamp as proposal time and current epoch as finalization time
+                        self.finalized_blocks_counter.inc();
+                        let now_ms = self.context.current().epoch_millis();
+                        let latency_ms = now_ms.saturating_sub(block.timestamp);
+                        self.block_latency_ms_histogram.observe(latency_ms as f64);
+                    }
                     info!(
                         engine_id=%engine_id,
                         height = block.height,

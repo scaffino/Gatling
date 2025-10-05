@@ -42,6 +42,30 @@ f79141801d52e8a1a7f16b639038032f1a402707ad51f6d7aa94098c8f07e068: curl http://lo
 fa6fffb46bb3aceecde1324ac31d8cfddda6c0857a63567796ff8507fef1a965: curl http://localhost:3009/metrics
 ```
 
+#### Custom metrics quick reference
+
+- Show finalized blocks counter:
+```bash
+curl -s http://localhost:3003/metrics | grep -v '^#' | grep 'finalized_blocks_total'
+```
+
+- Show block latency histogram (all series: buckets, sum, count):
+```bash
+curl -s http://localhost:3003/metrics | grep -v '^#' | grep 'block_finalization_latency_ms'
+```
+
+- If you run multiple engines and want just one, add its id (e.g., engine_1):
+```bash
+curl -s http://localhost:3003/metrics | grep -v '^#' | grep 'engine_1_.*finalized_blocks_total'
+curl -s http://localhost:3003/metrics | grep -v '^#' | grep 'engine_1_.*block_finalization_latency_ms'
+```
+
+- Live watch (every 1s):
+```bash
+watch -n 1 "curl -s http://localhost:3003/metrics | grep -v '^#' | grep 'finalized_blocks_total'"
+watch -n 1 "curl -s http://localhost:3003/metrics | grep -v '^#' | grep 'block_finalization_latency_ms'"
+```
+
 #### Start Validators
 
 Run the emitted start commands in separate terminals:
