@@ -1,12 +1,14 @@
 //! Common types used throughout `alto`.
 
 mod block;
-pub use block::{Block, Finalized, Notarized};
+pub use block::{Block, Finalized, Notarized, MAX_BLOCK_TRANSACTIONS};
 mod consensus;
 use commonware_utils::hex;
 pub use consensus::{
     leader_index, Activity, Evaluation, Finalization, Identity, Notarization, Seed, Signature,
 };
+mod transaction;
+pub use transaction::Transaction;
 pub mod wasm;
 
 pub const NAMESPACE: &[u8] = b"_ALTO";
@@ -61,7 +63,7 @@ mod tests {
 
         // Create a block
         let digest = Sha256::hash(b"hello world");
-        let block = Block::new(digest, 10, 100);
+        let block = Block::new(digest, 10, 100, Vec::new());
         let proposal = Proposal::new(11, 8, block.digest());
 
         // Create a notarization
@@ -101,7 +103,7 @@ mod tests {
 
         // Create a block
         let digest = Sha256::hash(b"hello world");
-        let block = Block::new(digest, 10, 100);
+        let block = Block::new(digest, 10, 100, Vec::new());
         let proposal = Proposal::new(11, 8, block.digest());
 
         // Create a finalization

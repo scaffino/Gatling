@@ -1,11 +1,14 @@
 use bytes::{Buf, BufMut};
-use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, Write};
+use commonware_codec::{varint::UInt, EncodeSize, Error, RangeCfg, Read, ReadExt, Write};
 use commonware_consensus::threshold_simplex::types::{Finalization, Notarization};
 use commonware_cryptography::{
     bls12381::primitives::variant::{MinSig, Variant},
     sha256::Digest,
     Committable, Digestible, Hasher, Sha256,
 };
+use crate::Transaction;
+
+pub const MAX_BLOCK_TRANSACTIONS: usize = 100;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Block {
@@ -18,25 +21,33 @@ pub struct Block {
     /// The timestamp of the block (in milliseconds since the Unix epoch).
     pub timestamp: u64,
 
+    /// Transactions included in this block.
+    pub transactions: Vec<Transaction>,
+
     /// Pre-computed digest of the block.
     digest: Digest,
 }
 
 impl Block {
-    fn compute_digest(parent: &Digest, height: u64, timestamp: u64) -> Digest {
+    fn compute_digest(parent: &Digest, height: u64, timestamp: u64, transactions: &[Transaction]) -> Digest {
         let mut hasher = Sha256::new();
         hasher.update(parent);
         hasher.update(&height.to_be_bytes());
         hasher.update(&timestamp.to_be_bytes());
+        for transaction in transactions {
+            hasher.update(&transaction.digest());
+        }
         hasher.finalize()
     }
 
-    pub fn new(parent: Digest, height: u64, timestamp: u64) -> Self {
-        let digest = Self::compute_digest(&parent, height, timestamp);
+    pub fn new(parent: Digest, height: u64, timestamp: u64, transactions: Vec<Transaction>) -> Self {
+        assert!(transactions.len() <= MAX_BLOCK_TRANSACTIONS);
+        let digest = Self::compute_digest(&parent, height, timestamp, &transactions);
         Self {
             parent,
             height,
             timestamp,
+            transactions,
             digest,
         }
     }
@@ -47,6 +58,7 @@ impl Write for Block {
         self.parent.write(writer);
         UInt(self.height).write(writer);
         UInt(self.timestamp).write(writer);
+        self.transactions.write(writer);
     }
 }
 
@@ -57,14 +69,18 @@ impl Read for Block {
         let parent = Digest::read(reader)?;
         let height = UInt::read(reader)?.into();
         let timestamp = UInt::read(reader)?.into();
+        let transactions = Vec::<Transaction>::read_cfg(
+            reader,
+            &(RangeCfg::from(0..=MAX_BLOCK_TRANSACTIONS), ()),
+        )?;
 
         // Pre-compute the digest
-        let digest = Self::compute_digest(&parent, height, timestamp);
+        let digest = Self::compute_digest(&parent, height, timestamp, &transactions);
         Ok(Self {
             parent,
             height,
             timestamp,
-
+            transactions,
             digest,
         })
     }
@@ -75,6 +91,7 @@ impl EncodeSize for Block {
         self.parent.encode_size()
             + UInt(self.height).encode_size()
             + UInt(self.timestamp).encode_size()
+            + self.transactions.encode_size()
     }
 }
 

@@ -1,4 +1,4 @@
-use alto_types::Block;
+use alto_types::{Block, Transaction};
 use commonware_consensus::{
     threshold_simplex::types::{Context, View},
     Automaton, Relay, Reporter,
@@ -31,6 +31,9 @@ pub enum Message {
     Finalized {
         block: Block,
     },
+    SubmitTransaction {
+        transaction: Transaction,
+    },
 }
 
 /// Mailbox for the application.
@@ -42,6 +45,14 @@ pub struct Mailbox {
 impl Mailbox {
     pub(super) fn new(sender: mpsc::Sender<Message>) -> Self {
         Self { sender }
+    }
+
+    /// Submit a transaction to the mempool.
+    pub async fn submit_transaction(&mut self, transaction: Transaction) -> Result<(), String> {
+        self.sender
+            .send(Message::SubmitTransaction { transaction })
+            .await
+            .map_err(|_| "Failed to send transaction".to_string())
     }
 }
 

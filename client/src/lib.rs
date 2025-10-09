@@ -1,6 +1,7 @@
 //! Client for interacting with `alto`.
 
-use alto_types::Identity;
+use alto_types::{Identity, Transaction};
+use commonware_codec::Encode;
 use commonware_cryptography::sha256::Digest;
 use commonware_utils::hex;
 use thiserror::Error;
@@ -76,5 +77,21 @@ impl Client {
 
             client: reqwest::Client::new(),
         }
+    }
+
+    /// Submit a transaction to the validator.
+    /// Note: This requires the indexer/validator to expose a transaction submission endpoint.
+    pub async fn transaction_submit(&self, transaction: Transaction) -> Result<(), Error> {
+        let result = self
+            .client
+            .post(format!("{}/transaction", self.uri))
+            .body(transaction.encode().to_vec())
+            .send()
+            .await
+            .map_err(Error::Reqwest)?;
+        if !result.status().is_success() {
+            return Err(Error::Failed(result.status()));
+        }
+        Ok(())
     }
 }

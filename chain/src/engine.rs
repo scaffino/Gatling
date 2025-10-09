@@ -107,6 +107,11 @@ impl<
         I: Indexer,
     > Engine<E, B, I>
 {
+    /// Get a reference to the application mailbox for transaction submission.
+    pub fn application_mailbox(&self) -> &application::Mailbox {
+        &self.application_mailbox
+    }
+
     /// Create a new [Engine].
     pub async fn new(context: E, cfg: Config<B, I>) -> Self {
         // Create the application

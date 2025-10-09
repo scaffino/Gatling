@@ -1,0 +1,22 @@
+=== Transaction Submission Example ===
+✓ Started 4 validators
+✓ Network synchronized
+Step 1: Creating transaction participants...
+  Alice:   ae3a9bc6eb721b7b8a34d23aa0d5b1623e89bc6f092815ea13b92f79a39c7d38
+  Bob:     80c02edc00c6b43231858aa5dd6c1911d7e489e470218da82193a470dfce50cf
+  Charlie: 8e1ea87cdb41614693298cb65ebfa8c3e6d09dc9f358321d8e533a8813e75bc4
+Step 2: Creating transactions...
+  TX1: Alice -> Bob (100 units)
+  TX2: Bob -> Charlie (50 units)
+  TX3: Charlie -> Alice (25 units)
+Step 3: Submitting transactions to validator 0...
+  ✓ TX1 submitted
+  ✓ TX2 submitted
+  ✓ TX3 submitted
+Step 4: Waiting for blocks to be produced with transactions...
+✓ Transactions submitted successfully!
+    TX1: 0addce3d92811a904d639f4f5ff40a07fe0a0e97876aed38f7ee35365dd1a174
+    TX2: e2818ea31c7e2aec76bba9461f4535f0e6ecdf8f07a48f6d1e37d07ac9af0ab8
+    TX3: 0f95caff0a6cee6a5e339c699c1a98b11c89c761b5dbf370fc0405faccf68c9a
+  Note: To verify inclusion, use the test suite:
+=== Example completed successfully! ===

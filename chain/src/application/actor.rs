@@ -1,12 +1,13 @@
 use super::{
     ingress::{Mailbox, Message},
+    mempool::Mempool,
     Config,
 };
 use crate::{supervisor::Supervisor, utils::OneshotClosedFut};
-use alto_types::Block;
+use alto_types::{Block, MAX_BLOCK_TRANSACTIONS};
 use commonware_consensus::{marshal, threshold_simplex::types::View};
 use commonware_cryptography::{
-    bls12381::primitives::variant::MinSig, Committable, Digestible, Hasher, Sha256,
+    bls12381::primitives::variant::MinSig, ed25519::Batch, BatchVerifier, Committable, Digestible, Hasher, Sha256,
 };
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Metrics, Spawner};
@@ -14,7 +15,7 @@ use commonware_utils::SystemTimeExt;
 use futures::StreamExt;
 use futures::{channel::mpsc, future::try_join};
 use futures::{future, future::Either};
-use rand::Rng;
+use rand::{CryptoRng, Rng};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use tracing::{debug, info, warn};
@@ -31,7 +32,7 @@ const GENESIS: &[u8] = b"commonware is neat";
 const SYNCHRONY_BOUND: u64 = 500;
 
 /// Application actor.
-pub struct Actor<R: Rng + Spawner + Metrics + Clock> {
+pub struct Actor<R: Rng + CryptoRng + Spawner + Metrics + Clock> {
     context: R,
     hasher: Sha256,
     mailbox: mpsc::Receiver<Message>,
@@ -43,7 +44,7 @@ pub struct Actor<R: Rng + Spawner + Metrics + Clock> {
     finalized_seen: HashSet<Vec<u8>>,
 }
 
-impl<R: Rng + Spawner + Metrics + Clock> Actor<R> {
+impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
     /// Create a new application actor.
     pub fn new(context: R, config: Config) -> (Self, Supervisor, Mailbox) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
@@ -86,10 +87,14 @@ impl<R: Rng + Spawner + Metrics + Clock> Actor<R> {
         // Compute genesis digest
         self.hasher.update(GENESIS);
         let genesis_parent = self.hasher.finalize();
-        let genesis = Block::new(genesis_parent, 0, 0);
+        let genesis = Block::new(genesis_parent, 0, 0, Vec::new());
         let genesis_digest = genesis.digest();
         let built: Option<(View, Block)> = None;
         let built = Arc::new(Mutex::new(built));
+        
+        // Initialize mempool
+        let mut mempool = Mempool::new(self.context.with_label("mempool"));
+        
         while let Some(message) = self.mailbox.next().await {
             match message {
                 Message::Genesis { response } => {
@@ -102,6 +107,16 @@ impl<R: Rng + Spawner + Metrics + Clock> Actor<R> {
                     parent,
                     mut response,
                 } => {
+                    // Collect transactions from mempool
+                    let mut transactions = Vec::new();
+                    while transactions.len() < MAX_BLOCK_TRANSACTIONS {
+                        let Some(tx) = mempool.next() else {
+                            break;
+                        };
+                        transactions.push(tx);
+                    }
+                    let tx_count = transactions.len();
+
                     // Get the parent block
                     let parent_request = if parent.1 == genesis_digest {
                         Either::Left(future::ready(Ok(genesis.clone())))
@@ -126,7 +141,7 @@ impl<R: Rng + Spawner + Metrics + Clock> Actor<R> {
                                     if current <= parent.timestamp {
                                         current = parent.timestamp + 1;
                                     }
-                                    let block = Block::new(parent.digest(), parent.height+1, current);
+                                    let block = Block::new(parent.digest(), parent.height+1, current, transactions);
                                     let digest = block.digest();
                                     {
                                         let mut built = built.lock().unwrap();
@@ -135,7 +150,7 @@ impl<R: Rng + Spawner + Metrics + Clock> Actor<R> {
 
                                     // Send the digest to the consensus
                                     let result = response.send(digest);
-                                    info!(engine_id=%engine_id, view, ?digest, success=result.is_ok(), "proposed new block");
+                                    info!(engine_id=%engine_id, view, ?digest, txs=tx_count, success=result.is_ok(), "proposed new block");
                                 },
                                 _ = response_closed => {
                                     // The response was cancelled
@@ -182,7 +197,7 @@ impl<R: Rng + Spawner + Metrics + Clock> Actor<R> {
                     self.context.with_label("verify").spawn({
                         let mut marshal = marshal.clone();
                         let engine_id = self.engine_id.clone();
-                        move |context| async move {
+                        move |mut context| async move {
                             let requester =
                                 try_join(parent_request, marshal.subscribe(None, payload).await);
                             let response_closed = OneshotClosedFut::new(&mut response);
@@ -206,6 +221,16 @@ impl<R: Rng + Spawner + Metrics + Clock> Actor<R> {
                                     }
                                     let current = context.current().epoch_millis();
                                     if block.timestamp > current + SYNCHRONY_BOUND {
+                                        let _ = response.send(false);
+                                        return;
+                                    }
+
+                                    // Batch verify transaction signatures
+                                    let mut batcher = Batch::new();
+                                    for tx in &block.transactions {
+                                        tx.verify_batch(&mut batcher);
+                                    }
+                                    if !batcher.verify(&mut context) {
                                         let _ = response.send(false);
                                         return;
                                     }
@@ -244,6 +269,15 @@ impl<R: Rng + Spawner + Metrics + Clock> Actor<R> {
                         digest = ?block.commitment(),
                         "processed block"
                     );
+                }
+                Message::SubmitTransaction { transaction } => {
+                    // Verify transaction signature before adding to mempool
+                    if transaction.verify() {
+                        mempool.add(transaction);
+                        debug!("transaction added to mempool");
+                    } else {
+                        warn!("rejected invalid transaction");
+                    }
                 }
             }
         }
