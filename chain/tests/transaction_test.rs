@@ -15,7 +15,7 @@ use commonware_runtime::{
     deterministic::{self, Runner},
     Clock, Metrics, Runner as _, Spawner,
 };
-use commonware_utils::quorum;
+use commonware_utils::{quorum, SystemTimeExt};
 use governor::Quota;
 use std::{
     collections::{HashMap, HashSet},
@@ -260,80 +260,133 @@ fn test_transaction_flow() {
             }
         }
 
-        // Create transaction signers (not validators)
-        let alice = PrivateKey::from_seed(100);
-        let bob = PrivateKey::from_seed(101);
-        let charlie = PrivateKey::from_seed(102);
+        info!("Creating and submitting transactions from ALL validators");
 
-        info!("Creating and submitting transactions");
+        // Record creation timestamps
+        let mut tx_creation_times = HashMap::new();
+        let mut all_tx_digests = Vec::new();
 
-        // Create transactions
-        let tx1 = Transaction::sign(&alice, bob.public_key(), 100);
-        let tx2 = Transaction::sign(&bob, charlie.public_key(), 50);
-        let tx3 = Transaction::sign(&charlie, alice.public_key(), 25);
+        // Each validator creates transactions to other validators
+        let submission_start = context.current().epoch_millis();
+        
+        for (validator_idx, mailbox) in mailboxes.iter_mut().enumerate() {
+            // Each validator sends to the next validator (round-robin)
+            let sender = &signers[validator_idx];
+            let receiver_idx = (validator_idx + 1) % n as usize;
+            let receiver = signers[receiver_idx].public_key();
+            
+            // Create 3 transactions per validator with different amounts
+            for amount in [100, 200, 300] {
+                let created_at = context.current().epoch_millis();
+                let tx = Transaction::sign(sender, receiver.clone(), amount);
+                let tx_digest = tx.digest();
+                
+                tx_creation_times.insert(tx_digest, created_at);
+                all_tx_digests.push(tx_digest);
+                
+                // Submit transaction
+                mailbox.submit_transaction(tx).await
+                    .expect(&format!("Failed to submit tx from validator {}", validator_idx));
+                
+                info!("Validator {} created and submitted TX (amount: {}, digest: {:?})", 
+                      validator_idx, amount, tx_digest);
+            }
+        }
+        
+        let submission_end = context.current().epoch_millis();
+        let total_txs = all_tx_digests.len();
 
-        let tx1_digest = tx1.digest();
-        let tx2_digest = tx2.digest();
-        let tx3_digest = tx3.digest();
-
-        info!("Transaction digests: tx1={:?}, tx2={:?}, tx3={:?}", tx1_digest, tx2_digest, tx3_digest);
-
-        // Submit transactions to first validator
-        let mut mailbox = mailboxes[0].clone();
-        mailbox.submit_transaction(tx1.clone()).await.expect("Failed to submit tx1");
-        mailbox.submit_transaction(tx2.clone()).await.expect("Failed to submit tx2");
-        mailbox.submit_transaction(tx3.clone()).await.expect("Failed to submit tx3");
-
-        info!("Transactions submitted to validator, waiting for inclusion");
+        info!("Total transactions created: {}", total_txs);
+        info!("Total submission took {} ms", submission_end - submission_start);
+        info!("Waiting for all transactions to be included in blocks...");
 
         // Wait for transactions to be included in blocks
-        let mut found_tx1 = false;
-        let mut found_tx2 = false;
-        let mut found_tx3 = false;
+        let mut found_txs = HashSet::new();
+        let mut tx_finalization_times = HashMap::new();
+        let mut block_finalization_times = HashMap::new();
         let mut max_height = initial_height;
-        let mut seen_heights = HashSet::new();
 
-        for _ in 0..30 {
-            context.sleep(Duration::from_secs(1)).await;
+        for iteration in 0..75 {  // Increased iterations for finer checking
+            context.sleep(Duration::from_millis(40)).await;  // Check every 40ms
             
             let blocks = tracker.get_blocks();
+            let current_time = context.current().epoch_millis();
             
-            // Check new blocks for our transactions (deduplicate by height to avoid processing same block multiple times)
+            // Track when we first see each block height (finalization time)
             for block in blocks.iter() {
-                if block.height <= initial_height || seen_heights.contains(&block.height) {
+                if block.height <= initial_height {
                     continue;
                 }
                 
-                seen_heights.insert(block.height);
+                // Record when we first see this block finalized
+                block_finalization_times.entry(block.height)
+                    .or_insert(current_time);
+                
                 max_height = max_height.max(block.height);
                 
                 for tx in &block.transactions {
                     let digest = tx.digest();
-                    if digest == tx1_digest {
-                        found_tx1 = true;
-                        info!("Found tx1 in block at height {}", block.height);
-                    }
-                    if digest == tx2_digest {
-                        found_tx2 = true;
-                        info!("Found tx2 in block at height {}", block.height);
-                    }
-                    if digest == tx3_digest {
-                        found_tx3 = true;
-                        info!("Found tx3 in block at height {}", block.height);
+                    
+                    // Only process if this is one of our transactions and we haven't seen it yet
+                    if tx_creation_times.contains_key(&digest) && !found_txs.contains(&digest) {
+                        found_txs.insert(digest);
+                        
+                        // Use the block's finalization time, not current iteration time
+                        let finalized_at = block_finalization_times.get(&block.height).unwrap();
+                        tx_finalization_times.insert(digest, *finalized_at);
+                        
+                        if let Some(created_at) = tx_creation_times.get(&digest) {
+                            let latency_ms = finalized_at - created_at;
+                            info!("TX CONFIRMED: digest={:?}, height={}, latency={} ms", 
+                                  digest, block.height, latency_ms);
+                        }
                     }
                 }
             }
             
-            if found_tx1 && found_tx2 && found_tx3 {
-                info!("All transactions found in blocks!");
+            if found_txs.len() == total_txs {
+                info!("All {} transactions found in blocks!", total_txs);
                 break;
+            }
+            
+            if iteration == 74 {
+                info!("Warning: Not all transactions found after 3 seconds. Found {}/{}", 
+                      found_txs.len(), total_txs);
             }
         }
 
         // Verify all transactions were included
-        assert!(found_tx1, "Transaction 1 not found in any block");
-        assert!(found_tx2, "Transaction 2 not found in any block");
-        assert!(found_tx3, "Transaction 3 not found in any block");
+        assert_eq!(found_txs.len(), total_txs, 
+                   "Not all transactions found. Expected {}, found {}", total_txs, found_txs.len());
+        
+        // Calculate summary statistics for all confirmed transactions
+        let mut latencies = Vec::new();
+        
+        for (digest, created_at) in tx_creation_times.iter() {
+            if let Some(finalized_at) = tx_finalization_times.get(digest) {
+                let latency = finalized_at - created_at;
+                latencies.push(latency);
+            }
+        }
+        
+        if !latencies.is_empty() {
+            let avg_latency = latencies.iter().sum::<u64>() / latencies.len() as u64;
+            let min_latency = latencies.iter().min().unwrap();
+            let max_latency = latencies.iter().max().unwrap();
+            
+            info!("");
+            info!("========================================");
+            info!("=== TRANSACTION CONFIRMATION METRICS ===");
+            info!("Total validators: {}", n);
+            info!("Transactions per validator: 3");
+            info!("Total transactions created: {}", total_txs);
+            info!("Transactions confirmed: {}", latencies.len());
+            info!("Average confirmation latency: {} ms", avg_latency);
+            info!("Min confirmation latency: {} ms", min_latency);
+            info!("Max confirmation latency: {} ms", max_latency);
+            info!("========================================");
+            info!("");
+        }
         
         info!("Test completed successfully! Height reached: {}", max_height);
     });
