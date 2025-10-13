@@ -141,8 +141,16 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                                     if current <= parent.timestamp {
                                         current = parent.timestamp + 1;
                                     }
-                                    let block = Block::new(parent.digest(), parent.height+1, current, transactions);
+                                    let block_height = parent.height + 1;
+                                    let block = Block::new(parent.digest(), block_height, current, transactions.clone());
                                     let digest = block.digest();
+                                    
+                                    // Log each transaction included in the block
+                                    for tx in &transactions {
+                                        let tx_id = tx.digest();
+                                        info!(engine_id=%engine_id, tx_id = ?tx_id, block_height, "Transaction included in block");
+                                    }
+                                    
                                     {
                                         let mut built = built.lock().unwrap();
                                         *built = Some((view, block));
@@ -150,7 +158,7 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
 
                                     // Send the digest to the consensus
                                     let result = response.send(digest);
-                                    info!(engine_id=%engine_id, view, ?digest, txs=tx_count, success=result.is_ok(), "proposed new block");
+                                    info!(engine_id=%engine_id, view, ?digest, txs=tx_count, block_height, success=result.is_ok(), "proposed new block");
                                 },
                                 _ = response_closed => {
                                     // The response was cancelled
@@ -254,6 +262,19 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                     //
                     // After an unclean shutdown, it is possible that the application may be asked to process a block it has already seen (which it can simply ignore).
                     let engine_id = self.engine_id.clone();
+                    let tx_count = block.transactions.len();
+                    
+                    // Debug: Log when we receive finalized block
+                    if tx_count > 0 {
+                        info!(engine_id=%engine_id, height = block.height, tx_count, "Finalized block contains transactions");
+                        
+                        // Log each finalized transaction
+                        for tx in &block.transactions {
+                            let tx_id = tx.digest();
+                            info!(engine_id=%engine_id, tx_id = ?tx_id, block_height = block.height, "Transaction is now final");
+                        }
+                    }
+                    
                     // Record metrics for finalized block only once per unique block digest
                     let digest = block.digest();
                     if self.finalized_seen.insert(digest.to_vec()) {
@@ -267,7 +288,8 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                         engine_id=%engine_id,
                         height = block.height,
                         digest = ?block.commitment(),
-                        "processed block"
+                        txs = tx_count,
+                        "finalized block"
                     );
                 }
                 Message::SubmitTransaction { transaction } => {

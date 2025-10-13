@@ -299,6 +299,7 @@ fn generate_local(
 
             port,
             metrics_port: port + 1,
+            transaction_port: 8080 + (port - start_port) / 2 + 1,
             directory,
             worker_threads,
             log_level: log_level.clone(),
@@ -443,6 +444,7 @@ fn generate_remote(
 
             port: PORT,
             metrics_port: METRICS_PORT,
+            transaction_port: 8080,
             directory: "/home/ubuntu/data".to_string(),
             worker_threads,
             log_level: log_level.clone(),

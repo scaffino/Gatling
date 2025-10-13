@@ -23,3 +23,9 @@ futures = { workspace = true }
 reqwest = "0.12.12"
 tokio-tungstenite = { version = "0.17", features = ["native-tls"] }
 tokio = { version = "1.40.0", features = ["full"] }
+clap = { workspace = true }
+hex = "0.4.3"
+
+[[bin]]
+name = "submit_tx"
+path = "src/bin/submit_tx.rs"

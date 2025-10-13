@@ -1,4 +1,4 @@
-use alto_chain::{engine, Config, Peers};
+use alto_chain::{engine, http_server, Config, Peers};
 use alto_client::Client;
 use alto_types::NAMESPACE;
 use clap::{Arg, Command};
@@ -10,7 +10,7 @@ use commonware_cryptography::{
 };
 use commonware_deployer::ec2::Hosts;
 use commonware_p2p::authenticated::discovery as authenticated;
-use commonware_runtime::{tokio, Metrics, Runner};
+use commonware_runtime::{tokio, Metrics, Runner, Spawner};
 use commonware_utils::{from_hex_formatted, quorum, union_unique};
 use futures::future::try_join_all;
 use governor::Quota;
@@ -86,7 +86,7 @@ fn main() {
     let executor = tokio::Runner::new(cfg);
 
     // Start runtime
-    executor.start(|context| async move {
+    executor.start(|mut context| async move {
         // Configure telemetry
         let log_level = Level::from_str(&config.log_level).expect("Invalid log level");
         tokio::telemetry::init(
@@ -267,6 +267,20 @@ fn main() {
             engines.push(engine);
         }
 
+        // Get a mailbox from the first engine for HTTP server
+        let http_mailbox = engines[0].application_mailbox().clone();
+        
+        // Start HTTP server for transaction submission in background
+        let transaction_addr = SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            config.transaction_port,
+        );
+        let http_server = context.spawn_ref()(async move {
+            if let Err(e) = http_server::start_server(transaction_addr, http_mailbox).await {
+                error!(?e, "HTTP server failed");
+            }
+        });
+
         // Start engines
         let mut started_engines = Vec::new();
         for (_i, engine) in engines.into_iter().enumerate() {
@@ -276,7 +290,7 @@ fn main() {
         }
 
         // Wait for any task to error
-        let mut all_tasks = vec![p2p];
+        let mut all_tasks = vec![p2p, http_server];
         all_tasks.extend(started_engines);
         if let Err(e) = try_join_all(all_tasks).await {
             error!(?e, "task failed");

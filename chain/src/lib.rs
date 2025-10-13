@@ -3,6 +3,7 @@ use std::{collections::HashMap, net::SocketAddr};
 
 pub mod application;
 pub mod engine;
+pub mod http_server;
 pub mod indexer;
 pub mod supervisor;
 pub mod utils;
@@ -16,6 +17,7 @@ pub struct Config {
 
     pub port: u16,
     pub metrics_port: u16,
+    pub transaction_port: u16,
     pub directory: String,
     pub worker_threads: usize,
     pub log_level: String,
