@@ -10,22 +10,42 @@ This document explains how to use the `submit_tx` client to send transactions to
 
 ## Building the Client
 
+**Option 1: Build only**
+
 ```bash
 cd /Users/gscaffino/Workspace/superfastBFT/evaluation/alto
 cargo build --bin submit_tx --release
 ```
 
-The compiled binary will be at:
+The compiled binary will be at: `target/release/submit_tx`
+
+**Option 2: Build and run in one command**
+
+Use `cargo run` to automatically build (if needed) and run:
+
+```bash
+cd /Users/gscaffino/Workspace/superfastBFT/evaluation/alto
+cargo run --release --bin submit_tx -- <ARGS>
 ```
-target/release/submit_tx
-```
+
+The `--` separates cargo arguments from your program arguments.
 
 ## Usage
 
 ### Basic Command Structure
 
+**Using pre-built binary:**
 ```bash
 ./target/release/submit_tx \
+  --validator <VALIDATOR_URL> \
+  --sender-seed <SEED> \
+  --receiver <PUBLIC_KEY_HEX> \
+  --amount <AMOUNT>
+```
+
+**Using cargo run (builds automatically):**
+```bash
+cargo run --release --bin submit_tx -- \
   --validator <VALIDATOR_URL> \
   --sender-seed <SEED> \
   --receiver <PUBLIC_KEY_HEX> \
@@ -102,8 +122,18 @@ This will fail (invalid receiver) but print the sender's public key that you can
 
 Once you have a valid receiver public key, submit a transaction:
 
+**Using pre-built binary:**
 ```bash
 ./target/release/submit_tx \
+  --validator http://localhost:8081 \
+  --sender-seed 100 \
+  --receiver 1c5e996c515199048cf970a75f81d78d9b4bda4ad759abfce22e8e0d5c881cfa \
+  --amount 1000
+```
+
+**Or using cargo run:**
+```bash
+cargo run --release --bin submit_tx -- \
   --validator http://localhost:8081 \
   --sender-seed 100 \
   --receiver 1c5e996c515199048cf970a75f81d78d9b4bda4ad759abfce22e8e0d5c881cfa \
@@ -161,9 +191,22 @@ You can submit to any running validator by changing the port:
 
 You can send multiple transactions from the same sender by running the command multiple times:
 
+**Using pre-built binary:**
 ```bash
 for i in {1..10}; do
   ./target/release/submit_tx \
+    --validator http://localhost:8081 \
+    --sender-seed 100 \
+    --receiver 1c5e996c515199048cf970a75f81d78d9b4bda4ad759abfce22e8e0d5c881cfa \
+    --amount $((i * 100))
+  sleep 0.1
+done
+```
+
+**Or using cargo run:**
+```bash
+for i in {1..10}; do
+  cargo run --release --bin submit_tx -- \
     --validator http://localhost:8081 \
     --sender-seed 100 \
     --receiver 1c5e996c515199048cf970a75f81d78d9b4bda4ad759abfce22e8e0d5c881cfa \
