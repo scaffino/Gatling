@@ -9,21 +9,57 @@ This document describes the complete end-to-end workflow of a transaction in the
 │ PHASE 1: TRANSACTION CREATION & SUBMISSION                      │
 └─────────────────────────────────────────────────────────────────┘
 
-[Client/Validator]
+[Client]
     │
     ├─> 1. Create Transaction
     │     • Transaction::sign(sender_key, receiver, amount)
     │     • Generates signature using ed25519
     │     • Returns Transaction with sender, receiver, amount, signature
     │
-    ├─> 2. Submit to Validator
+    ├─> 2. Submit to Validator (HTTP)
+    │     • POST http://validator:8081/transaction
+    │     • Sends encoded transaction
+    │
+    v
+[HTTP Server] (http_server.rs)
+    │
+    ├─> 3. Receive & Verify
+    │     • Verify transaction signature: tx.verify()
+    │     • If invalid: reject with 400
+    │     • LOG: "Transaction submitted to mempool via HTTP"
+    │
+    ├─> 4. Submit to Local Mempool
     │     • mailbox.submit_transaction(tx).await
     │     • Sends SubmitTransaction message to Actor
+    │
+    └─> 5. Broadcast via P2P Gossip
+          • Send to all other validators via P2P channel 5
+          • LOG: "Transaction broadcast to peers"
+          
+┌─────────────────────────────────────────────────────────────────┐
+│ PHASE 1B: TRANSACTION GOSSIP (NEW!)                             │
+└─────────────────────────────────────────────────────────────────┘
+
+[P2P Network]
+    │
+    ├─> Transaction broadcast from Validator 0
+    │
+    └─> Received by Validators 1, 2, 3
+    
+[Other Validators] (P2P Receive Task)
+    │
+    ├─> 6. Receive Gossiped Transaction
+    │     • Receive from P2P channel 5
+    │     • Decode transaction
+    │     
+    ├─> 7. Submit to Local Mempool
+    │     • mailbox.submit_transaction(tx).await
+    │     • LOG: "Transaction received from peer and added to mempool"
     │
     v
 [Actor] (application/actor.rs)
     │
-    ├─> 3. Receive & Verify (Message::SubmitTransaction)
+    ├─> 8. Receive & Verify (Message::SubmitTransaction)
     │     • Verify transaction signature: tx.verify()
     │     • If valid: mempool.add(tx)
     │     • If invalid: reject with warning
@@ -32,11 +68,14 @@ This document describes the complete end-to-end workflow of a transaction in the
     v
 [Mempool] (application/mempool.rs)
     │
-    └─> 4. Store in Mempool
+    └─> 9. Store in Mempool (All Validators)
           • Store in HashMap by digest
+          • Deduplicates if already present
           • Track by sender's public key
           • Add to round-robin queue
           • Metrics: transactions count, accounts count
+          
+**Result: ALL validators now have the transaction in mempool**
 
 ┌─────────────────────────────────────────────────────────────────┐
 │ PHASE 2: BLOCK PROPOSAL                                         │

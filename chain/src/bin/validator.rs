@@ -29,6 +29,7 @@ const RECOVERED_CHANNEL: u32 = 1;
 const RESOLVER_CHANNEL: u32 = 2;
 const BROADCASTER_CHANNEL: u32 = 3;
 const BACKFILL_BY_DIGEST_CHANNEL: u32 = 4;
+const TRANSACTION_CHANNEL: u32 = 5;
 
 const LEADER_TIMEOUT: Duration = Duration::from_secs(1);
 const NOTARIZATION_TIMEOUT: Duration = Duration::from_secs(2);
@@ -208,6 +209,7 @@ fn main() {
         let resolver_limit = Quota::per_second(NonZeroU32::new(128).unwrap());
         let broadcaster_limit = Quota::per_second(NonZeroU32::new(8).unwrap());
         let backfill_quota = Quota::per_second(NonZeroU32::new(8).unwrap());
+        let transaction_limit = Quota::per_second(NonZeroU32::new(256).unwrap());
 
         let mut engine_channels = Vec::new();
         for i in 0..engines_count {
@@ -226,6 +228,9 @@ fn main() {
 
             engine_channels.push((pending, recovered, resolver, broadcaster, backfill));
         }
+
+        // Register a shared transaction channel for gossip (only engine 0 needs it)
+        let (mut tx_sender, mut tx_receiver) = network.register(TRANSACTION_CHANNEL, transaction_limit, config.message_backlog);
 
         // Create network
         let p2p = network.start();
@@ -267,6 +272,9 @@ fn main() {
             engines.push(engine);
         }
 
+        // Create channel for broadcasting transactions
+        let (broadcast_tx, mut broadcast_rx) = futures::channel::mpsc::unbounded();
+        
         // Get a mailbox from the first engine for HTTP server
         let http_mailbox = engines[0].application_mailbox().clone();
         
@@ -275,9 +283,62 @@ fn main() {
             IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             config.transaction_port,
         );
-        let http_server = context.spawn_ref()(async move {
-            if let Err(e) = http_server::start_server(transaction_addr, http_mailbox).await {
+        let http_server = context.with_label("http_server").spawn(move |_| async move {
+            if let Err(e) = http_server::start_server(transaction_addr, http_mailbox, Some(broadcast_tx)).await {
                 error!(?e, "HTTP server failed");
+            }
+        });
+        
+        // Start background task to broadcast transactions via P2P
+        let tx_broadcast_task = context.with_label("tx_broadcast").spawn(move |_| async move {
+            use commonware_codec::Encode;
+            use commonware_cryptography::Digestible;
+            use commonware_p2p::{Sender, Recipients};
+            use tracing::{info, warn};
+            use futures::StreamExt;
+            use bytes::Bytes;
+            
+            while let Some(tx) = broadcast_rx.next().await {
+                let tx_id = tx.digest();
+                let tx_bytes = Bytes::from(tx.encode().to_vec());
+                match tx_sender.send(Recipients::All, tx_bytes, true).await {
+                    Ok(_) => info!(tx_id = ?tx_id, "Transaction broadcast to peers"),
+                    Err(e) => warn!(tx_id = ?tx_id, error = ?e, "Failed to broadcast transaction to peers"),
+                }
+            }
+        });
+        
+        // Start background task to receive transactions from other validators
+        let tx_gossip_mailbox = engines[0].application_mailbox().clone();
+        let tx_gossip_task = context.with_label("tx_gossip").spawn(move |_| async move {
+            use commonware_codec::DecodeExt;
+            use alto_types::Transaction;
+            use commonware_cryptography::Digestible;
+            use commonware_p2p::Receiver;
+            use tracing::{info, warn};
+            
+            loop {
+                match tx_receiver.recv().await {
+                    Ok((_, tx_bytes)) => {
+                        // Decode the transaction
+                        match Transaction::decode(tx_bytes.as_ref()) {
+                            Ok(tx) => {
+                                let tx_id = tx.digest();
+                                // Submit to local mempool
+                                let mut mailbox = tx_gossip_mailbox.clone();
+                                match mailbox.submit_transaction(tx).await {
+                                    Ok(_) => info!(tx_id = ?tx_id, "Transaction received from peer and added to mempool"),
+                                    Err(e) => warn!(tx_id = ?tx_id, error = %e, "Failed to add peer transaction to mempool"),
+                                }
+                            }
+                            Err(e) => warn!(error = ?e, "Failed to decode transaction from peer"),
+                        }
+                    }
+                    Err(e) => {
+                        warn!(error = ?e, "Transaction receiver error");
+                        break;
+                    }
+                }
             }
         });
 
@@ -290,7 +351,7 @@ fn main() {
         }
 
         // Wait for any task to error
-        let mut all_tasks = vec![p2p, http_server];
+        let mut all_tasks = vec![p2p, http_server, tx_broadcast_task, tx_gossip_task];
         all_tasks.extend(started_engines);
         if let Err(e) = try_join_all(all_tasks).await {
             error!(?e, "task failed");

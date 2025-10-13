@@ -138,25 +138,35 @@ done
 
 ```
 1. HTTP POST → Validator receives transaction
-2. Signature Verification → Added to mempool
-3. Block Proposal → Transaction included in block
-4. Consensus Voting → Validators verify and vote
-5. Finalization → Transaction confirmed (irreversible)
+2. Signature Verification → Added to local mempool
+3. P2P Gossip → Transaction broadcast to all validators
+4. All validators add transaction to their mempools
+5. Block Proposal → Any validator can include transaction
+6. Consensus Voting → Validators verify and vote
+7. Finalization → Transaction confirmed (irreversible)
 ```
 
 **Typical latency:** 100-2000ms
 
+**Note:** With P2P gossip, you only need to submit to **one** validator, and all validators will receive it!
+
 ## Transaction Logging
 
-Validators log three key events:
+Validators log four key events:
 
 | Event | Log Message | Meaning |
 |-------|-------------|---------|
-| **Submission** | `Transaction submitted to mempool via HTTP` | Received and verified |
+| **Submission (HTTP)** | `Transaction submitted to mempool via HTTP` | Received via HTTP |
+| **Gossip Broadcast** | `Transaction broadcast to peers` | Sent to other validators |
+| **Gossip Received** | `Transaction received from peer and added to mempool` | Received from another validator |
 | **Inclusion** | `Transaction included in block` | Proposed in a block |
 | **Finalization** | `Transaction is now final` | Permanently confirmed ✅ |
 
 Each log includes the transaction ID (`tx_id`) for tracking.
+
+**Note:** When you submit to one validator, you'll see:
+- **Validator 0**: "submitted via HTTP" + "broadcast to peers"
+- **Validators 1-3**: "received from peer" (via gossip)
 
 ## Troubleshooting
 

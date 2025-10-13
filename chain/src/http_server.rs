@@ -11,6 +11,7 @@ use commonware_codec::DecodeExt;
 use commonware_cryptography::Digestible;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use futures::channel::mpsc;
 use tokio::sync::Mutex;
 use tracing::{error, info};
 
@@ -18,6 +19,7 @@ use tracing::{error, info};
 #[derive(Clone)]
 pub struct ServerState {
     mailbox: Arc<Mutex<crate::application::Mailbox>>,
+    tx_broadcast_channel: Option<mpsc::UnboundedSender<Transaction>>,
 }
 
 /// Handle POST /transaction endpoint
@@ -43,11 +45,17 @@ async fn submit_transaction(
         return (StatusCode::BAD_REQUEST, "Invalid signature");
     }
 
-    // Submit to validator
+    // Submit to local mempool
     let mut mailbox = state.mailbox.lock().await;
-    match mailbox.submit_transaction(tx).await {
+    match mailbox.submit_transaction(tx.clone()).await {
         Ok(_) => {
             info!(tx_id = ?tx_id, "Transaction submitted to mempool via HTTP");
+            
+            // Send to broadcast task if available
+            if let Some(broadcast_tx) = &state.tx_broadcast_channel {
+                let _ = broadcast_tx.unbounded_send(tx);
+            }
+            
             (StatusCode::OK, "Transaction accepted")
         }
         Err(e) => {
@@ -61,9 +69,11 @@ async fn submit_transaction(
 pub async fn start_server(
     addr: SocketAddr,
     mailbox: crate::application::Mailbox,
+    tx_broadcast_channel: Option<mpsc::UnboundedSender<Transaction>>,
 ) -> Result<(), std::io::Error> {
     let state = ServerState {
         mailbox: Arc::new(Mutex::new(mailbox)),
+        tx_broadcast_channel,
     };
 
     let app = Router::new()
