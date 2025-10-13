@@ -51,7 +51,13 @@ fn main() {
         .arg(Arg::new("hosts").long("hosts").required(false))
         .arg(Arg::new("peers").long("peers").required(false))
         .arg(Arg::new("config").long("config").required(true))
-        .arg(Arg::new("engines").long("engines").value_name("COUNT").help("Number of engine instances to start").default_value("2"))
+        .arg(
+            Arg::new("consensus-instances")
+                .long("consensus-instances")
+                .value_name("COUNT")
+                .help("Number of independent consensus instances to run in parallel")
+                .default_value("1")
+        )
         .get_matches();
 
     // Load ip file
@@ -62,13 +68,13 @@ fn main() {
         "Either --hosts or --peers must be provided"
     );
 
-    // Parse engines count
-    let engines_count: usize = matches.get_one::<String>("engines")
+    // Parse consensus instances count
+    let consensus_instances: usize = matches.get_one::<String>("consensus-instances")
         .unwrap()
         .parse()
-        .expect("Invalid engines count");
-    assert!(engines_count > 0, "Number of engines must be at least 1");
-    assert!(engines_count <= 100, "Number of engines cannot exceed 100");
+        .expect("Invalid consensus instances count");
+    assert!(consensus_instances > 0, "Number of consensus instances must be at least 1");
+    assert!(consensus_instances <= 10, "Number of consensus instances cannot exceed 10");
 
     // Load config
     let config_file = matches.get_one::<String>("config").unwrap();
@@ -119,7 +125,8 @@ fn main() {
                 })
                 .collect();
 
-            let peer_keys = peers.keys().cloned().collect::<Vec<_>>();
+            let mut peer_keys: Vec<_> = peers.keys().cloned().collect();
+            peer_keys.sort();  // CRITICAL: Sort to ensure consistent ordering across all validators
             let mut bootstrappers = Vec::new();
             for bootstrapper in &config.bootstrappers {
                 let key =
@@ -147,7 +154,8 @@ fn main() {
                 })
                 .collect();
 
-            let peer_keys = peers.keys().cloned().collect::<Vec<_>>();
+            let mut peer_keys: Vec<_> = peers.keys().cloned().collect();
+            peer_keys.sort();  // CRITICAL: Sort to ensure consistent ordering across all validators
             let mut bootstrappers = Vec::new();
             for bootstrapper in &config.bootstrappers {
                 let key =
@@ -180,7 +188,7 @@ fn main() {
             ?identity,
             ?ip,
             port = config.port,
-            engines_count,
+            consensus_instances,
             "loaded config"
         );
 
@@ -203,7 +211,7 @@ fn main() {
         // Provide authorized peers
         oracle.register(0, peers.clone()).await;
 
-        // Register channels for all engines dynamically
+        // Register channels for each independent consensus instance
         let pending_limit = Quota::per_second(NonZeroU32::new(128).unwrap());
         let recovered_limit = Quota::per_second(NonZeroU32::new(128).unwrap());
         let resolver_limit = Quota::per_second(NonZeroU32::new(128).unwrap());
@@ -211,9 +219,10 @@ fn main() {
         let backfill_quota = Quota::per_second(NonZeroU32::new(8).unwrap());
         let transaction_limit = Quota::per_second(NonZeroU32::new(256).unwrap());
 
-        let mut engine_channels = Vec::new();
-        for i in 0..engines_count {
-            let base_channel = if i == 0 { 0 } else { i as u32 * 10 };
+        let mut consensus_channels = Vec::new();
+        for i in 0..consensus_instances {
+            // Each consensus instance gets its own set of channels (10 channels apart)
+            let base_channel = i as u32 * 10;
             let pending_channel = base_channel + PENDING_CHANNEL;
             let recovered_channel = base_channel + RECOVERED_CHANNEL;
             let resolver_channel = base_channel + RESOLVER_CHANNEL;
@@ -226,10 +235,10 @@ fn main() {
             let broadcaster = network.register(broadcaster_channel, broadcaster_limit, config.message_backlog);
             let backfill = network.register(backfill_channel, backfill_quota, config.message_backlog);
 
-            engine_channels.push((pending, recovered, resolver, broadcaster, backfill));
+            consensus_channels.push((pending, recovered, resolver, broadcaster, backfill));
         }
 
-        // Register a shared transaction channel for gossip (only engine 0 needs it)
+        // Register a shared transaction channel for gossip (shared across all consensus instances)
         let (mut tx_sender, mut tx_receiver) = network.register(TRANSACTION_CHANNEL, transaction_limit, config.message_backlog);
 
         // Create network
@@ -241,12 +250,15 @@ fn main() {
             indexer = Some(Client::new(&uri, identity));
         }
 
-        // Create engines dynamically
-        let mut engines = Vec::new();
-        for i in 0..engines_count {
+        // Create multiple independent consensus instances
+        let mut consensus_engines = Vec::new();
+        for i in 0..consensus_instances {
+            // Each consensus instance has a unique chain ID via partition_prefix
+            // This makes them completely independent blockchains
+            let chain_id = i + 1;
             let engine_config = engine::Config {
                 blocker: oracle.clone(),
-                partition_prefix: format!("engine_{}", i + 1),
+                partition_prefix: format!("consensus_{}", chain_id),
                 blocks_freezer_table_initial_size: BLOCKS_FREEZER_TABLE_INITIAL_SIZE,
                 finalized_freezer_table_initial_size: FINALIZED_FREEZER_TABLE_INITIAL_SIZE,
                 signer: signer.clone(),
@@ -268,23 +280,35 @@ fn main() {
                 fetch_rate_per_peer: resolver_limit,
                 indexer: indexer.clone(),
             };
-            let engine = engine::Engine::new(context.with_label(&format!("engine_{}", i + 1)), engine_config).await;
-            engines.push(engine);
+            let engine = engine::Engine::new(
+                context.with_label(&format!("consensus_{}", chain_id)), 
+                engine_config
+            ).await;
+            consensus_engines.push(engine);
         }
+        
+        // Collect all application mailboxes for transaction distribution
+        let mut all_mailboxes: Vec<_> = consensus_engines
+            .iter()
+            .map(|e| e.application_mailbox().clone())
+            .collect();
 
         // Create channel for broadcasting transactions
         let (broadcast_tx, mut broadcast_rx) = futures::channel::mpsc::unbounded();
         
-        // Get a mailbox from the first engine for HTTP server
-        let http_mailbox = engines[0].application_mailbox().clone();
-        
         // Start HTTP server for transaction submission in background
+        // HTTP server will distribute transactions to all consensus instances
         let transaction_addr = SocketAddr::new(
             IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             config.transaction_port,
         );
+        let http_mailboxes = all_mailboxes.clone();
         let http_server = context.with_label("http_server").spawn(move |_| async move {
-            if let Err(e) = http_server::start_server(transaction_addr, http_mailbox, Some(broadcast_tx)).await {
+            if let Err(e) = http_server::start_server_multi(
+                transaction_addr, 
+                http_mailboxes, 
+                Some(broadcast_tx)
+            ).await {
                 error!(?e, "HTTP server failed");
             }
         });
@@ -309,7 +333,8 @@ fn main() {
         });
         
         // Start background task to receive transactions from other validators
-        let tx_gossip_mailbox = engines[0].application_mailbox().clone();
+        // Distribute to ALL consensus instances' mempools
+        let mut gossip_mailboxes = all_mailboxes.clone();
         let tx_gossip_task = context.with_label("tx_gossip").spawn(move |_| async move {
             use commonware_codec::DecodeExt;
             use alto_types::Transaction;
@@ -324,11 +349,20 @@ fn main() {
                         match Transaction::decode(tx_bytes.as_ref()) {
                             Ok(tx) => {
                                 let tx_id = tx.digest();
-                                // Submit to local mempool
-                                let mut mailbox = tx_gossip_mailbox.clone();
-                                match mailbox.submit_transaction(tx).await {
-                                    Ok(_) => info!(tx_id = ?tx_id, "Transaction received from peer and added to mempool"),
-                                    Err(e) => warn!(tx_id = ?tx_id, error = %e, "Failed to add peer transaction to mempool"),
+                                // Submit to ALL consensus instances' mempools
+                                for (idx, mailbox) in gossip_mailboxes.iter_mut().enumerate() {
+                                    match mailbox.submit_transaction(tx.clone()).await {
+                                        Ok(_) => info!(
+                                            "[consensus_{}] Transaction {:?} received from peer and added to mempool",
+                                            idx + 1, tx_id
+                                        ),
+                                        Err(e) => warn!(
+                                            tx_id = ?tx_id, 
+                                            consensus_id = idx + 1,
+                                            error = %e, 
+                                            "Failed to add peer transaction to mempool"
+                                        ),
+                                    }
                                 }
                             }
                             Err(e) => warn!(error = ?e, "Failed to decode transaction from peer"),
@@ -342,17 +376,17 @@ fn main() {
             }
         });
 
-        // Start engines
-        let mut started_engines = Vec::new();
-        for (_i, engine) in engines.into_iter().enumerate() {
-            let (pending, recovered, resolver, broadcaster, backfill) = engine_channels.remove(0);
+        // Start all independent consensus instances
+        let mut started_consensus = Vec::new();
+        for (_i, engine) in consensus_engines.into_iter().enumerate() {
+            let (pending, recovered, resolver, broadcaster, backfill) = consensus_channels.remove(0);
             let started_engine = engine.start(pending, recovered, resolver, broadcaster, backfill);
-            started_engines.push(started_engine);
+            started_consensus.push(started_engine);
         }
 
         // Wait for any task to error
         let mut all_tasks = vec![p2p, http_server, tx_broadcast_task, tx_gossip_task];
-        all_tasks.extend(started_engines);
+        all_tasks.extend(started_consensus);
         if let Err(e) = try_join_all(all_tasks).await {
             error!(?e, "task failed");
         }

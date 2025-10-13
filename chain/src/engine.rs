@@ -124,6 +124,7 @@ impl<
                 share: cfg.share,
                 mailbox_size: cfg.mailbox_size,
                 engine_id: cfg.partition_prefix.clone(),
+                public_key: cfg.signer.public_key(),
             },
         );
 

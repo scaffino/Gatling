@@ -27,4 +27,7 @@ pub struct Config {
 
     /// Identifier for the engine instance (for logging/telemetry).
     pub engine_id: String,
+    
+    /// Public key of this validator (for determining validator index).
+    pub public_key: PublicKey,
 }

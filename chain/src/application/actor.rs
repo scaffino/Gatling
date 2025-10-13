@@ -37,6 +37,7 @@ pub struct Actor<R: Rng + CryptoRng + Spawner + Metrics + Clock> {
     hasher: Sha256,
     mailbox: mpsc::Receiver<Message>,
     engine_id: String,
+    validator_index: usize,
     // Custom Prometheus metrics
     finalized_blocks_counter: PromCounter<u64>,
     block_latency_ms_histogram: PromHistogram,
@@ -63,12 +64,20 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
         // Register the metrics so they appear on the /metrics endpoint
         context.register(&finalized_name, "Total number of finalized blocks", finalized_blocks_counter.clone());
         context.register(&latency_name, "Block proposal-to-finalization latency in milliseconds", block_latency_ms_histogram.clone());
+        
+        // Find this validator's index in the sorted participants list
+        let validator_index = config.participants
+            .iter()
+            .position(|p| p == &config.public_key)
+            .expect("Public key not found in participants");
+        
         (
             Self {
                 context,
                 hasher: Sha256::new(),
                 mailbox,
                 engine_id: config.engine_id,
+                validator_index,
                 finalized_blocks_counter,
                 block_latency_ms_histogram,
                 finalized_seen: HashSet::new(),
@@ -146,9 +155,11 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                                     let digest = block.digest();
                                     
                                     // Log each transaction included in the block
+                                    let validator_idx = self.validator_index;
                                     for tx in &transactions {
                                         let tx_id = tx.digest();
-                                        info!(engine_id=%engine_id, tx_id = ?tx_id, block_height, "Transaction included in block");
+                                        info!("[{}] Validator {} included transaction {:?} in block {}", 
+                                              engine_id, validator_idx, tx_id, block_height);
                                     }
                                     
                                     {
@@ -158,7 +169,9 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
 
                                     // Send the digest to the consensus
                                     let result = response.send(digest);
-                                    info!(engine_id=%engine_id, view, ?digest, txs=tx_count, block_height, success=result.is_ok(), "proposed new block");
+                                    let validator_idx = self.validator_index;
+                                    info!("[{}] Validator {} proposed block {} with {} transactions", 
+                                          engine_id, validator_idx, block_height, tx_count);
                                 },
                                 _ = response_closed => {
                                     // The response was cancelled
@@ -264,14 +277,13 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                     let engine_id = self.engine_id.clone();
                     let tx_count = block.transactions.len();
                     
-                    // Debug: Log when we receive finalized block
+                    // Log finalized transactions
                     if tx_count > 0 {
-                        info!(engine_id=%engine_id, height = block.height, tx_count, "Finalized block contains transactions");
-                        
                         // Log each finalized transaction
                         for tx in &block.transactions {
                             let tx_id = tx.digest();
-                            info!(engine_id=%engine_id, tx_id = ?tx_id, block_height = block.height, "Transaction is now final");
+                            info!("[{}] Transaction {:?} is now final in block {}", 
+                                  engine_id, tx_id, block.height);
                         }
                     }
                     
@@ -284,13 +296,8 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                         let latency_ms = now_ms.saturating_sub(block.timestamp);
                         self.block_latency_ms_histogram.observe(latency_ms as f64);
                     }
-                    info!(
-                        engine_id=%engine_id,
-                        height = block.height,
-                        digest = ?block.commitment(),
-                        txs = tx_count,
-                        "finalized block"
-                    );
+                    info!("[{}] Validator {} finalized block {} with {} transactions",
+                          engine_id, self.validator_index, block.height, tx_count);
                 }
                 Message::SubmitTransaction { transaction } => {
                     // Verify transaction signature before adding to mempool
