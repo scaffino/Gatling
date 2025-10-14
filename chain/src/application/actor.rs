@@ -7,7 +7,7 @@ use crate::{supervisor::Supervisor, utils::OneshotClosedFut};
 use alto_types::{Block, MAX_BLOCK_TRANSACTIONS};
 use commonware_consensus::{marshal, threshold_simplex::types::View};
 use commonware_cryptography::{
-    bls12381::primitives::variant::MinSig, ed25519::Batch, BatchVerifier, Committable, Digestible, Hasher, Sha256,
+    bls12381::primitives::variant::MinSig, ed25519::Batch, BatchVerifier, Digestible, Hasher, Sha256,
 };
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Metrics, Spawner};
@@ -43,6 +43,8 @@ pub struct Actor<R: Rng + CryptoRng + Spawner + Metrics + Clock> {
     block_latency_ms_histogram: PromHistogram,
     // Track finalized blocks we've already recorded to avoid double-counting
     finalized_seen: HashSet<Vec<u8>>,
+    // Track view for each block digest (shared across spawned tasks)
+    block_views: Arc<Mutex<std::collections::HashMap<Vec<u8>, View>>>,
 }
 
 impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
@@ -81,6 +83,7 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                 finalized_blocks_counter,
                 block_latency_ms_histogram,
                 finalized_seen: HashSet::new(),
+                block_views: Arc::new(Mutex::new(std::collections::HashMap::new())),
             },
             Supervisor::new(config.polynomial, config.participants, config.share),
             Mailbox::new(sender),
@@ -138,6 +141,7 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                     self.context.with_label("propose").spawn({
                         let built = built.clone();
                         let engine_id = self.engine_id.clone();
+                        let block_views = self.block_views.clone();
                         move |context| async move {
                             let response_closed = OneshotClosedFut::new(&mut response);
                             select! {
@@ -154,12 +158,18 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                                     let block = Block::new(parent.digest(), block_height, current, transactions.clone());
                                     let digest = block.digest();
                                     
+                                    // Store the view for this block
+                                    {
+                                        let mut views = block_views.lock().unwrap();
+                                        views.insert(digest.to_vec(), view);
+                                    }
+                                    
                                     // Log each transaction included in the block
                                     let validator_idx = self.validator_index;
                                     for tx in &transactions {
                                         let tx_id = tx.digest();
-                                        info!("[{}] Validator {} included transaction {:?} in block {}", 
-                                              engine_id, validator_idx, tx_id, block_height);
+                                        info!("[{}] Validator {} included transaction {:?} in block {} (view {})", 
+                                              engine_id, validator_idx, tx_id, block_height, view);
                                     }
                                     
                                     {
@@ -168,10 +178,10 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                                     }
 
                                     // Send the digest to the consensus
-                                    let result = response.send(digest);
+                                    let _result = response.send(digest);
                                     let validator_idx = self.validator_index;
-                                    info!("[{}] Validator {} proposed block {} with {} transactions", 
-                                          engine_id, validator_idx, block_height, tx_count);
+                                    info!("[{}] Validator {} proposed block {} (view {}) with {} transactions", 
+                                          engine_id, validator_idx, block_height, view, tx_count);
                                 },
                                 _ = response_closed => {
                                     // The response was cancelled
@@ -218,6 +228,7 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                     self.context.with_label("verify").spawn({
                         let mut marshal = marshal.clone();
                         let engine_id = self.engine_id.clone();
+                        let block_views = self.block_views.clone();
                         move |mut context| async move {
                             let requester =
                                 try_join(parent_request, marshal.subscribe(None, payload).await);
@@ -256,6 +267,12 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                                         return;
                                     }
 
+                                    // Store the view for this block
+                                    {
+                                        let mut views = block_views.lock().unwrap();
+                                        views.insert(block.digest().to_vec(), view);
+                                    }
+                                    
                                     // Persist the verified block
                                     marshal.verified(view, block).await;
 
@@ -270,20 +287,28 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                         }
                     });
                 }
-                Message::Finalized { block } => {
+                Message::Finalized { view, block } => {
                     // In an application that maintains state, you would compute the state transition function here.
                     //
                     // After an unclean shutdown, it is possible that the application may be asked to process a block it has already seen (which it can simply ignore).
                     let engine_id = self.engine_id.clone();
                     let tx_count = block.transactions.len();
                     
+                    // Look up the view for this block (if not provided from the message)
+                    let block_view = if view == 0 {
+                        let views = self.block_views.lock().unwrap();
+                        views.get(&block.digest().to_vec()).copied().unwrap_or(0)
+                    } else {
+                        view
+                    };
+                    
                     // Log finalized transactions
                     if tx_count > 0 {
                         // Log each finalized transaction
                         for tx in &block.transactions {
                             let tx_id = tx.digest();
-                            info!("[{}] Transaction {:?} is now final in block {}", 
-                                  engine_id, tx_id, block.height);
+                            info!("[{}] Transaction {:?} is now final in block {} (view {})", 
+                                  engine_id, tx_id, block.height, block_view);
                         }
                     }
                     
@@ -296,8 +321,8 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                         let latency_ms = now_ms.saturating_sub(block.timestamp);
                         self.block_latency_ms_histogram.observe(latency_ms as f64);
                     }
-                    info!("[{}] Validator {} finalized block {} with {} transactions",
-                          engine_id, self.validator_index, block.height, tx_count);
+                    info!("[{}] Validator {} finalized block {} (view {}) with {} transactions",
+                          engine_id, self.validator_index, block.height, block_view, tx_count);
                 }
                 Message::SubmitTransaction { transaction } => {
                     // Verify transaction signature before adding to mempool

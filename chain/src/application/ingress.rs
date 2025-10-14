@@ -29,6 +29,7 @@ pub enum Message {
         response: oneshot::Sender<bool>,
     },
     Finalized {
+        view: View,
         block: Block,
     },
     SubmitTransaction {
@@ -121,7 +122,7 @@ impl Reporter for Mailbox {
 
     async fn report(&mut self, block: Self::Activity) {
         self.sender
-            .send(Message::Finalized { block })
+            .send(Message::Finalized { view: 0, block })
             .await
             .expect("Failed to send finalized");
     }

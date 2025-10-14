@@ -54,10 +54,10 @@ curl -s http://localhost:3003/metrics | grep -v '^#' | grep 'finalized_blocks_to
 curl -s http://localhost:3003/metrics | grep -v '^#' | grep 'block_finalization_latency_ms'
 ```
 
-- If you run multiple engines and want just one, add its id (e.g., engine_1):
+- If you run multiple consensus instances and want just one, add its id (e.g., consensus_1):
 ```bash
-curl -s http://localhost:3003/metrics | grep -v '^#' | grep 'engine_1_.*finalized_blocks_total'
-curl -s http://localhost:3003/metrics | grep -v '^#' | grep 'engine_1_.*block_finalization_latency_ms'
+curl -s http://localhost:3003/metrics | grep -v '^#' | grep 'consensus_1_.*finalized_blocks_total'
+curl -s http://localhost:3003/metrics | grep -v '^#' | grep 'consensus_1_.*block_finalization_latency_ms'
 ```
 
 - Live watch (every 1s):
@@ -76,22 +76,46 @@ cargo run --bin validator -- --peers=<your-path>/test/peers.yaml --config=<your-
 
 _It is necessary to start at least one bootstrapper for any other peers to connect (used to exchange IPs to dial, not as a relay)._
 
-##### Configurable Engine Instances
+##### Configurable Consensus Instances
 
-By default, each validator runs 2 engine instances for parallel processing. You can configure the number of engines using the `--engines` flag:
+By default, each validator runs a single consensus instance. You can configure the number of independent consensus instances using the `--consensus-instances` flag:
 
 ```bash
-# Single engine (minimal resource usage)
-cargo run --bin validator -- --peers=<your-path>/test/peers.yaml --config=<your-path>/test/config.yaml --engines 1
+# Single consensus instance (default)
+cargo run --bin validator -- --peers=<your-path>/test/peers.yaml --config=<your-path>/test/config.yaml --consensus-instances 1
 
-# Default (2 engines)
-cargo run --bin validator -- --peers=<your-path>/test/peers.yaml --config=<your-path>/test/config.yaml
+# Two independent consensus instances
+cargo run --bin validator -- --peers=<your-path>/test/peers.yaml --config=<your-path>/test/config.yaml --consensus-instances 2
 
-# Multiple engines, e.g., 5 (up to 100)
-cargo run --bin validator -- --peers=<your-path>/test/peers.yaml --config=<your-path>/test/config.yaml --engines 5
+# Multiple independent consensus instances (up to 10)
+cargo run --bin validator -- --peers=<your-path>/test/peers.yaml --config=<your-path>/test/config.yaml --consensus-instances 5
 ```
 
-_More engines provide lower end-to-end latency but consume more resources. Each engine runs independently with its own channels and partition. The optimal number depends on your system resources (CPU cores, memory, file descriptors) and network capacity._
+_Each consensus instance runs an independent blockchain in parallel with its own state, blocks, and transaction mempool. Running multiple consensus instances allows for parallel transaction processing across different blockchains. Each instance consumes its own resources (CPU, memory, file descriptors). The optimal number depends on your system resources and workload requirements._
+
+##### Transaction Gossiping Control
+
+By default, validators automatically gossip received transactions to all other validators via P2P. You can control this behavior using gossip flags:
+
+```bash
+# Enable transaction gossiping (default behavior)
+cargo run --bin validator -- --peers=<your-path>/test/peers.yaml --config=<your-path>/test/config.yaml --gossip-txs
+
+# Disable transaction gossiping
+cargo run --bin validator -- --peers=<your-path>/test/peers.yaml --config=<your-path>/test/config.yaml --no-gossip-txs
+```
+
+**When gossip is enabled (default or `--gossip-txs`):**
+- Transactions submitted via HTTP are broadcast to all validators
+- Each validator receives and processes gossiped transactions
+- Submitting to one validator ensures all validators receive the transaction
+
+**When gossip is disabled (`--no-gossip-txs`):**
+- Transactions submitted via HTTP are only added to the local validator's mempool
+- No P2P gossip occurs for client-submitted transactions
+- Useful for testing or when manually controlling transaction distribution
+
+_Note: Even with `--no-gossip-txs`, validators can still receive transactions directly via HTTP on their individual transaction ports (8081-8084 by default)._
 
 #### Debugging
 

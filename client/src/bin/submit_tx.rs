@@ -13,7 +13,14 @@ async fn main() {
                 .long("validator")
                 .value_name("URL")
                 .help("Validator URL (e.g., http://localhost:8081)")
-                .required(true),
+                .conflicts_with("validator-all"),
+        )
+        .arg(
+            Arg::new("validator-all")
+                .long("validator-all")
+                .help("Submit to all validators (ports 8081-8084)")
+                .action(clap::ArgAction::SetTrue)
+                .conflicts_with("validator"),
         )
         .arg(
             Arg::new("sender-seed")
@@ -38,8 +45,26 @@ async fn main() {
         )
         .get_matches();
 
-    // Parse arguments
-    let validator_url = matches.get_one::<String>("validator").unwrap();
+    // Validate that either --validator or --validator-all is provided
+    let validator_all = matches.get_flag("validator-all");
+    if !validator_all && !matches.contains_id("validator") {
+        eprintln!("Error: Either --validator or --validator-all must be specified");
+        std::process::exit(1);
+    }
+
+    // Determine validator URLs
+    let validator_urls: Vec<String> = if validator_all {
+        // Default local validator ports
+        vec![
+            "http://localhost:8081".to_string(),
+            "http://localhost:8082".to_string(),
+            "http://localhost:8083".to_string(),
+            "http://localhost:8084".to_string(),
+        ]
+    } else {
+        vec![matches.get_one::<String>("validator").unwrap().to_string()]
+    };
+
     let sender_seed: u64 = matches
         .get_one::<String>("sender-seed")
         .unwrap()
@@ -68,27 +93,50 @@ async fn main() {
     println!("Amount: {}", tx.amount);
     println!("Digest: {:?}", tx.digest());
 
-    // Submit to validator
+    // Submit to validator(s)
     let client = reqwest::Client::new();
-    let url = format!("{}/transaction", validator_url);
+    let tx_bytes = tx.encode().to_vec();
     
-    println!("\n=== Submitting to Validator ===");
-    println!("URL: {}", url);
+    println!("\n=== Submitting to Validator{} ===", if validator_urls.len() > 1 { "s" } else { "" });
     
-    let response = client
-        .post(&url)
-        .body(tx.encode().to_vec())
-        .send()
-        .await
-        .expect("Failed to send request");
+    let mut all_success = true;
+    let mut success_count = 0;
+    
+    for validator_url in &validator_urls {
+        let url = format!("{}/transaction", validator_url);
+        println!("URL: {}", url);
+        
+        let response = client
+            .post(&url)
+            .body(tx_bytes.clone())
+            .send()
+            .await;
 
-    if response.status().is_success() {
-        println!("✓ Transaction accepted by validator!");
+        match response {
+            Ok(resp) if resp.status().is_success() => {
+                println!("  ✓ Transaction accepted by {}!", validator_url);
+                success_count += 1;
+            }
+            Ok(resp) => {
+                eprintln!("  ✗ Transaction rejected by {}: {}", validator_url, resp.status());
+                eprintln!("  Response: {}", resp.text().await.unwrap_or_default());
+                all_success = false;
+            }
+            Err(e) => {
+                eprintln!("  ✗ Failed to connect to {}: {}", validator_url, e);
+                all_success = false;
+            }
+        }
+    }
+
+    println!("\n=== Summary ===");
+    println!("Submitted to {}/{} validator(s) successfully", success_count, validator_urls.len());
+    
+    if all_success {
         println!("\nTransaction has been submitted to the mempool.");
         println!("It will be included in an upcoming block.");
     } else {
-        eprintln!("✗ Transaction rejected: {}", response.status());
-        eprintln!("Response: {}", response.text().await.unwrap_or_default());
+        eprintln!("\nSome submissions failed. Check the errors above.");
         std::process::exit(1);
     }
 }

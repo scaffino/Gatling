@@ -98,6 +98,7 @@ INFO alto_chain::application::actor: finalized block height=42 txs=1
 
 ### Command Structure
 
+**Single validator:**
 ```bash
 ./target/release/submit_tx \
   --validator <VALIDATOR_URL> \
@@ -106,26 +107,45 @@ INFO alto_chain::application::actor: finalized block height=42 txs=1
   --amount <AMOUNT>
 ```
 
+**All validators (ports 8081-8084):**
+```bash
+./target/release/submit_tx \
+  --validator-all \
+  --sender-seed <SEED> \
+  --receiver <PUBLIC_KEY_HEX> \
+  --amount <AMOUNT>
+```
+
 **Parameters:**
-- `--validator`: Validator endpoint (e.g., `http://localhost:8081`)
+- `--validator`: Validator endpoint (e.g., `http://localhost:8081`) - mutually exclusive with `--validator-all`
+- `--validator-all`: Submit to all validators (ports 8081-8084) - mutually exclusive with `--validator`
 - `--sender-seed`: u64 seed for sender's private key (any number)
 - `--receiver`: Receiver's public key (64-char hex)
 - `--amount`: Amount to send (u64)
 
 ### Examples
 
-**Multiple transactions:**
+**Submit to all validators at once:**
+```bash
+./target/release/submit_tx \
+  --validator-all \
+  --sender-seed 100 \
+  --receiver <RECEIVER_HEX> \
+  --amount 1000
+```
+
+**Multiple transactions to all validators:**
 ```bash
 for i in {1..5}; do
   ./target/release/submit_tx \
-    --validator http://localhost:8081 \
+    --validator-all \
     --sender-seed $i \
     --receiver <RECEIVER_HEX> \
     --amount $((i * 100))
 done
 ```
 
-**Different validators:**
+**Different validators (single):**
 ```bash
 # Validator 0 (port 8081)
 ./target/release/submit_tx --validator http://localhost:8081 ...

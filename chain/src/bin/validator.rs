@@ -58,6 +58,20 @@ fn main() {
                 .help("Number of independent consensus instances to run in parallel")
                 .default_value("1")
         )
+        .arg(
+            Arg::new("gossip-txs")
+                .long("gossip-txs")
+                .help("Enable transaction gossiping to other validators")
+                .action(clap::ArgAction::SetTrue)
+                .conflicts_with("no-gossip-txs")
+        )
+        .arg(
+            Arg::new("no-gossip-txs")
+                .long("no-gossip-txs")
+                .help("Disable transaction gossiping to other validators")
+                .action(clap::ArgAction::SetTrue)
+                .conflicts_with("gossip-txs")
+        )
         .get_matches();
 
     // Load ip file
@@ -76,6 +90,13 @@ fn main() {
     assert!(consensus_instances > 0, "Number of consensus instances must be at least 1");
     assert!(consensus_instances <= 10, "Number of consensus instances cannot exceed 10");
 
+    // Parse gossip flag (default: enabled if neither flag is specified)
+    let gossip_enabled = if matches.get_flag("no-gossip-txs") {
+        false
+    } else {
+        true // Default to enabled, or explicitly enabled with --gossip-txs
+    };
+
     // Load config
     let config_file = matches.get_one::<String>("config").unwrap();
     let config_file = std::fs::read_to_string(config_file).expect("Could not read config file");
@@ -93,7 +114,7 @@ fn main() {
     let executor = tokio::Runner::new(cfg);
 
     // Start runtime
-    executor.start(|mut context| async move {
+    executor.start(|context| async move {
         // Configure telemetry
         let log_level = Level::from_str(&config.log_level).expect("Invalid log level");
         tokio::telemetry::init(
@@ -288,13 +309,17 @@ fn main() {
         }
         
         // Collect all application mailboxes for transaction distribution
-        let mut all_mailboxes: Vec<_> = consensus_engines
+        let all_mailboxes: Vec<_> = consensus_engines
             .iter()
             .map(|e| e.application_mailbox().clone())
             .collect();
 
-        // Create channel for broadcasting transactions
-        let (broadcast_tx, mut broadcast_rx) = futures::channel::mpsc::unbounded();
+        // Create channel for broadcasting transactions (only if gossip is enabled)
+        let broadcast_channel = if gossip_enabled {
+            Some(futures::channel::mpsc::unbounded())
+        } else {
+            None
+        };
         
         // Start HTTP server for transaction submission in background
         // HTTP server will distribute transactions to all consensus instances
@@ -303,78 +328,90 @@ fn main() {
             config.transaction_port,
         );
         let http_mailboxes = all_mailboxes.clone();
+        let broadcast_tx_for_http = broadcast_channel.as_ref().map(|(tx, _)| tx.clone());
         let http_server = context.with_label("http_server").spawn(move |_| async move {
             if let Err(e) = http_server::start_server_multi(
                 transaction_addr, 
                 http_mailboxes, 
-                Some(broadcast_tx)
+                broadcast_tx_for_http
             ).await {
                 error!(?e, "HTTP server failed");
             }
         });
         
-        // Start background task to broadcast transactions via P2P
-        let tx_broadcast_task = context.with_label("tx_broadcast").spawn(move |_| async move {
-            use commonware_codec::Encode;
-            use commonware_cryptography::Digestible;
-            use commonware_p2p::{Sender, Recipients};
-            use tracing::{info, warn};
-            use futures::StreamExt;
-            use bytes::Bytes;
-            
-            while let Some(tx) = broadcast_rx.next().await {
-                let tx_id = tx.digest();
-                let tx_bytes = Bytes::from(tx.encode().to_vec());
-                match tx_sender.send(Recipients::All, tx_bytes, true).await {
-                    Ok(_) => info!(tx_id = ?tx_id, "Transaction broadcast to peers"),
-                    Err(e) => warn!(tx_id = ?tx_id, error = ?e, "Failed to broadcast transaction to peers"),
-                }
-            }
-        });
+        // Conditionally start background tasks for transaction gossiping
+        let mut gossip_tasks = Vec::new();
         
-        // Start background task to receive transactions from other validators
-        // Distribute to ALL consensus instances' mempools
-        let mut gossip_mailboxes = all_mailboxes.clone();
-        let tx_gossip_task = context.with_label("tx_gossip").spawn(move |_| async move {
-            use commonware_codec::DecodeExt;
-            use alto_types::Transaction;
-            use commonware_cryptography::Digestible;
-            use commonware_p2p::Receiver;
-            use tracing::{info, warn};
+        if let Some((_broadcast_tx, mut broadcast_rx)) = broadcast_channel {
+            info!(gossip_enabled, "Transaction gossiping is ENABLED");
             
-            loop {
-                match tx_receiver.recv().await {
-                    Ok((_, tx_bytes)) => {
-                        // Decode the transaction
-                        match Transaction::decode(tx_bytes.as_ref()) {
-                            Ok(tx) => {
-                                let tx_id = tx.digest();
-                                // Submit to ALL consensus instances' mempools
-                                for (idx, mailbox) in gossip_mailboxes.iter_mut().enumerate() {
-                                    match mailbox.submit_transaction(tx.clone()).await {
-                                        Ok(_) => info!(
-                                            "[consensus_{}] Transaction {:?} received from peer and added to mempool",
-                                            idx + 1, tx_id
-                                        ),
-                                        Err(e) => warn!(
-                                            tx_id = ?tx_id, 
-                                            consensus_id = idx + 1,
-                                            error = %e, 
-                                            "Failed to add peer transaction to mempool"
-                                        ),
+            // Start background task to broadcast transactions via P2P
+            let tx_broadcast_task = context.with_label("tx_broadcast").spawn(move |_| async move {
+                use commonware_codec::Encode;
+                use commonware_cryptography::Digestible;
+                use commonware_p2p::{Sender, Recipients};
+                use tracing::{info, warn};
+                use futures::StreamExt;
+                use bytes::Bytes;
+                
+                while let Some(tx) = broadcast_rx.next().await {
+                    let tx_id = tx.digest();
+                    let tx_bytes = Bytes::from(tx.encode().to_vec());
+                    match tx_sender.send(Recipients::All, tx_bytes, true).await {
+                        Ok(_) => info!(tx_id = ?tx_id, "Transaction broadcast to peers"),
+                        Err(e) => warn!(tx_id = ?tx_id, error = ?e, "Failed to broadcast transaction to peers"),
+                    }
+                }
+            });
+            gossip_tasks.push(tx_broadcast_task);
+            
+            // Start background task to receive transactions from other validators
+            // Distribute to ALL consensus instances' mempools
+            let mut gossip_mailboxes = all_mailboxes.clone();
+            let tx_gossip_task = context.with_label("tx_gossip").spawn(move |_| async move {
+                use commonware_codec::DecodeExt;
+                use alto_types::Transaction;
+                use commonware_cryptography::Digestible;
+                use commonware_p2p::Receiver;
+                use tracing::{info, warn};
+                
+                loop {
+                    match tx_receiver.recv().await {
+                        Ok((_, tx_bytes)) => {
+                            // Decode the transaction
+                            match Transaction::decode(tx_bytes.as_ref()) {
+                                Ok(tx) => {
+                                    let tx_id = tx.digest();
+                                    // Submit to ALL consensus instances' mempools
+                                    for (idx, mailbox) in gossip_mailboxes.iter_mut().enumerate() {
+                                        match mailbox.submit_transaction(tx.clone()).await {
+                                            Ok(_) => info!(
+                                                "[consensus_{}] Transaction {:?} received from peer and added to mempool",
+                                                idx + 1, tx_id
+                                            ),
+                                            Err(e) => warn!(
+                                                tx_id = ?tx_id, 
+                                                consensus_id = idx + 1,
+                                                error = %e, 
+                                                "Failed to add peer transaction to mempool"
+                                            ),
+                                        }
                                     }
                                 }
+                                Err(e) => warn!(error = ?e, "Failed to decode transaction from peer"),
                             }
-                            Err(e) => warn!(error = ?e, "Failed to decode transaction from peer"),
+                        }
+                        Err(e) => {
+                            warn!(error = ?e, "Transaction receiver error");
+                            break;
                         }
                     }
-                    Err(e) => {
-                        warn!(error = ?e, "Transaction receiver error");
-                        break;
-                    }
                 }
-            }
-        });
+            });
+            gossip_tasks.push(tx_gossip_task);
+        } else {
+            info!(gossip_enabled, "Transaction gossiping is DISABLED");
+        }
 
         // Start all independent consensus instances
         let mut started_consensus = Vec::new();
@@ -385,7 +422,8 @@ fn main() {
         }
 
         // Wait for any task to error
-        let mut all_tasks = vec![p2p, http_server, tx_broadcast_task, tx_gossip_task];
+        let mut all_tasks = vec![p2p, http_server];
+        all_tasks.extend(gossip_tasks);
         all_tasks.extend(started_consensus);
         if let Err(e) = try_join_all(all_tasks).await {
             error!(?e, "task failed");
