@@ -1,5 +1,5 @@
 use crate::{application, indexer, indexer::Indexer, supervisor::Supervisor};
-use alto_types::{Activity, Block, Evaluation, NAMESPACE};
+use alto_types::{Activity, Block, Evaluation};
 use commonware_broadcast::buffered;
 use commonware_consensus::{
     marshal,
@@ -23,7 +23,7 @@ use futures::future::try_join_all;
 use governor::clock::Clock as GClock;
 use governor::Quota;
 use rand::{CryptoRng, Rng};
-use std::{num::NonZero, time::Duration};
+use std::{collections::HashSet, num::NonZero, sync::{Arc, Mutex}, time::Duration};
 use tracing::{error, warn};
 
 /// Reporter type for [threshold_simplex::Engine].
@@ -49,6 +49,7 @@ const MAX_REPAIR: u64 = 20;
 pub struct Config<B: Blocker<PublicKey = PublicKey>, I: Indexer> {
     pub blocker: B,
     pub partition_prefix: String,
+    pub namespace: Vec<u8>,
     pub blocks_freezer_table_initial_size: u32,
     pub finalized_freezer_table_initial_size: u32,
     pub signer: PrivateKey,
@@ -71,6 +72,9 @@ pub struct Config<B: Blocker<PublicKey = PublicKey>, I: Indexer> {
     pub fetch_rate_per_peer: Quota,
 
     pub indexer: Option<I>,
+    
+    /// Shared set of transaction digests that have been included in blocks across all consensus instances.
+    pub included_transactions: Arc<Mutex<HashSet<Digest>>>,
 }
 
 /// The engine that drives the [application].
@@ -125,6 +129,7 @@ impl<
                 mailbox_size: cfg.mailbox_size,
                 engine_id: cfg.partition_prefix.clone(),
                 public_key: cfg.signer.public_key(),
+                included_transactions: cfg.included_transactions,
             },
         );
 
@@ -157,7 +162,7 @@ impl<
                     view_retention_timeout: cfg
                         .activity_timeout
                         .saturating_mul(SYNCER_ACTIVITY_TIMEOUT_MULTIPLIER),
-                    namespace: NAMESPACE.to_vec(),
+                    namespace: cfg.namespace.clone(),
                     prunable_items_per_section: PRUNABLE_ITEMS_PER_SECTION,
                     immutable_items_per_section: IMMUTABLE_ITEMS_PER_SECTION,
                     freezer_table_initial_size: cfg.blocks_freezer_table_initial_size,
@@ -191,7 +196,7 @@ impl<
         let consensus = Consensus::new(
             context.with_label("consensus"),
             threshold_simplex::Config {
-                namespace: NAMESPACE.to_vec(),
+                namespace: cfg.namespace.clone(),
                 crypto: cfg.signer,
                 automaton: application_mailbox.clone(),
                 relay: application_mailbox.clone(),

@@ -10,6 +10,10 @@ mod ingress;
 pub use ingress::Mailbox;
 pub mod mempool;
 
+use commonware_cryptography::sha256::Digest;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
+
 /// Configuration for the application.
 pub struct Config {
     /// Participants active in consensus.
@@ -30,4 +34,8 @@ pub struct Config {
     
     /// Public key of this validator (for determining validator index).
     pub public_key: PublicKey,
+    
+    /// Shared set of transaction digests that have been included in blocks across all consensus instances.
+    /// This prevents the same transaction from being included in multiple instances.
+    pub included_transactions: Arc<Mutex<HashSet<Digest>>>,
 }

@@ -8,6 +8,7 @@ use alto_types::{Block, MAX_BLOCK_TRANSACTIONS};
 use commonware_consensus::{marshal, threshold_simplex::types::View};
 use commonware_cryptography::{
     bls12381::primitives::variant::MinSig, ed25519::Batch, BatchVerifier, Digestible, Hasher, Sha256,
+    sha256::Digest,
 };
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Metrics, Spawner};
@@ -45,6 +46,8 @@ pub struct Actor<R: Rng + CryptoRng + Spawner + Metrics + Clock> {
     finalized_seen: HashSet<Vec<u8>>,
     // Track view for each block digest (shared across spawned tasks)
     block_views: Arc<Mutex<std::collections::HashMap<Vec<u8>, View>>>,
+    // Track transactions included in blocks across all consensus instances (shared)
+    included_transactions: Arc<Mutex<HashSet<Digest>>>,
 }
 
 impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
@@ -84,6 +87,7 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                 block_latency_ms_histogram,
                 finalized_seen: HashSet::new(),
                 block_views: Arc::new(Mutex::new(std::collections::HashMap::new())),
+                included_transactions: config.included_transactions,
             },
             Supervisor::new(config.polynomial, config.participants, config.share),
             Mailbox::new(sender),
@@ -119,12 +123,24 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                     parent,
                     mut response,
                 } => {
-                    // Collect transactions from mempool
+                    // Collect transactions from mempool, filtering out already-included ones
                     let mut transactions = Vec::new();
+                    let included_txs = self.included_transactions.clone();
+                    
                     while transactions.len() < MAX_BLOCK_TRANSACTIONS {
                         let Some(tx) = mempool.next() else {
                             break;
                         };
+                        
+                        // Skip if this transaction was already included in another consensus instance
+                        let tx_digest = tx.digest();
+                        {
+                            let included = included_txs.lock().unwrap();
+                            if included.contains(&tx_digest) {
+                                continue;
+                            }
+                        }
+                        
                         transactions.push(tx);
                     }
                     let tx_count = transactions.len();
@@ -162,6 +178,14 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                                     {
                                         let mut views = block_views.lock().unwrap();
                                         views.insert(digest.to_vec(), view);
+                                    }
+                                    
+                                    // Mark transactions as included globally
+                                    {
+                                        let mut included = included_txs.lock().unwrap();
+                                        for tx in &transactions {
+                                            included.insert(tx.digest());
+                                        }
                                     }
                                     
                                     // Log each transaction included in the block
@@ -229,6 +253,7 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                         let mut marshal = marshal.clone();
                         let engine_id = self.engine_id.clone();
                         let block_views = self.block_views.clone();
+                        let included_txs = self.included_transactions.clone();
                         move |mut context| async move {
                             let requester =
                                 try_join(parent_request, marshal.subscribe(None, payload).await);
@@ -271,6 +296,14 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                                     {
                                         let mut views = block_views.lock().unwrap();
                                         views.insert(block.digest().to_vec(), view);
+                                    }
+                                    
+                                    // Mark transactions in this block as included globally
+                                    {
+                                        let mut included = included_txs.lock().unwrap();
+                                        for tx in &block.transactions {
+                                            included.insert(tx.digest());
+                                        }
                                     }
                                     
                                     // Persist the verified block

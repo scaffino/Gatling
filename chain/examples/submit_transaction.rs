@@ -99,12 +99,16 @@ fn main() {
         // Start validators and collect mailboxes
         let mut mailboxes = Vec::new();
         
+        // Create shared state for tracking included transactions
+        let included_transactions = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+        
         for (idx, signer) in signers.iter().enumerate() {
             let pk = signer.public_key();
             
             let config: engine::Config<_, Client> = engine::Config {
                 blocker: oracle.control(pk.clone()),
                 partition_prefix: format!("validator-{idx}"),
+                namespace: alto_types::NAMESPACE.to_vec(),
                 blocks_freezer_table_initial_size: FREEZER_TABLE_INITIAL_SIZE,
                 finalized_freezer_table_initial_size: FREEZER_TABLE_INITIAL_SIZE,
                 signer: signer.clone(),
@@ -125,6 +129,7 @@ fn main() {
                 fetch_concurrent: 10,
                 fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(10).unwrap()),
                 indexer: None,
+                included_transactions: included_transactions.clone(),
             };
 
             let engine = engine::Engine::new(context.with_label(&format!("engine-{idx}")), config).await;

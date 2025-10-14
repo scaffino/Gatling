@@ -196,6 +196,7 @@ mod tests {
                 let config: Config<_, Mock> = engine::Config {
                     blocker: oracle.control(public_key.clone()),
                     partition_prefix: uid.clone(),
+                    namespace: alto_types::NAMESPACE.to_vec(),
                     blocks_freezer_table_initial_size: FREEZER_TABLE_INITIAL_SIZE,
                     finalized_freezer_table_initial_size: FREEZER_TABLE_INITIAL_SIZE,
                     signer,
@@ -216,6 +217,7 @@ mod tests {
                     fetch_concurrent: 10,
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(10).unwrap()),
                     indexer: None,
+                    included_transactions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
                 };
                 let engine = Engine::new(context.with_label(&uid), config).await;
 
@@ -370,6 +372,7 @@ mod tests {
                 let config: Config<_, Mock> = engine::Config {
                     blocker: oracle.control(public_key.clone()),
                     partition_prefix: uid.clone(),
+                    namespace: alto_types::NAMESPACE.to_vec(),
                     blocks_freezer_table_initial_size: FREEZER_TABLE_INITIAL_SIZE,
                     finalized_freezer_table_initial_size: FREEZER_TABLE_INITIAL_SIZE,
                     signer: signer.clone(),
@@ -390,6 +393,7 @@ mod tests {
                     fetch_concurrent: 10,
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(10).unwrap()),
                     indexer: None,
+                    included_transactions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
                 };
                 let engine = Engine::new(context.with_label(&uid), config).await;
 
@@ -458,6 +462,7 @@ mod tests {
             let config: Config<_, Mock> = engine::Config {
                 blocker: oracle.control(public_key.clone()),
                 partition_prefix: uid.clone(),
+                namespace: alto_types::NAMESPACE.to_vec(),
                 blocks_freezer_table_initial_size: FREEZER_TABLE_INITIAL_SIZE,
                 finalized_freezer_table_initial_size: FREEZER_TABLE_INITIAL_SIZE,
                 signer: signer.clone(),
@@ -478,6 +483,7 @@ mod tests {
                 fetch_concurrent: 10,
                 fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(10).unwrap()),
                 indexer: None,
+                included_transactions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             };
             let engine = Engine::new(context.with_label(&uid), config).await;
 
@@ -593,6 +599,7 @@ mod tests {
                     let config: Config<_, Mock> = engine::Config {
                         blocker: oracle.control(public_key.clone()),
                         partition_prefix: uid.clone(),
+                        namespace: alto_types::NAMESPACE.to_vec(),
                         blocks_freezer_table_initial_size: FREEZER_TABLE_INITIAL_SIZE,
                         finalized_freezer_table_initial_size: FREEZER_TABLE_INITIAL_SIZE,
                         signer,
@@ -613,6 +620,7 @@ mod tests {
                         fetch_concurrent: 10,
                         fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(10).unwrap()),
                         indexer: None,
+                        included_transactions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
                     };
                     let engine = Engine::new(context.with_label(&uid), config).await;
 
@@ -764,6 +772,7 @@ mod tests {
                 let config: Config<_, Mock> = engine::Config {
                     blocker: oracle.control(public_key.clone()),
                     partition_prefix: uid.clone(),
+                    namespace: alto_types::NAMESPACE.to_vec(),
                     blocks_freezer_table_initial_size: FREEZER_TABLE_INITIAL_SIZE,
                     finalized_freezer_table_initial_size: FREEZER_TABLE_INITIAL_SIZE,
                     signer,
@@ -784,6 +793,7 @@ mod tests {
                     fetch_concurrent: 10,
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(10).unwrap()),
                     indexer: Some(indexer.clone()),
+                    included_transactions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
                 };
                 let engine = Engine::new(context.with_label(&uid), config).await;
 

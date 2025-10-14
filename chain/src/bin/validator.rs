@@ -271,15 +271,24 @@ fn main() {
             indexer = Some(Client::new(&uri, identity));
         }
 
+        // Create shared state for tracking included transactions across all consensus instances
+        // This prevents the same transaction from being included in multiple independent blockchains
+        let included_transactions = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+        
         // Create multiple independent consensus instances
         let mut consensus_engines = Vec::new();
         for i in 0..consensus_instances {
             // Each consensus instance has a unique chain ID via partition_prefix
             // This makes them completely independent blockchains
             let chain_id = i + 1;
+            // Create unique namespace for each instance to enable independent leader schedules
+            let namespace = format!("{}_{}",
+                std::str::from_utf8(NAMESPACE).unwrap(),
+                chain_id).into_bytes();
             let engine_config = engine::Config {
                 blocker: oracle.clone(),
                 partition_prefix: format!("consensus_{}", chain_id),
+                namespace,
                 blocks_freezer_table_initial_size: BLOCKS_FREEZER_TABLE_INITIAL_SIZE,
                 finalized_freezer_table_initial_size: FINALIZED_FREEZER_TABLE_INITIAL_SIZE,
                 signer: signer.clone(),
@@ -300,6 +309,7 @@ fn main() {
                 fetch_concurrent: FETCH_CONCURRENT,
                 fetch_rate_per_peer: resolver_limit,
                 indexer: indexer.clone(),
+                included_transactions: included_transactions.clone(),
             };
             let engine = engine::Engine::new(
                 context.with_label(&format!("consensus_{}", chain_id)), 
