@@ -283,7 +283,8 @@ fn test_transaction_flow() {
             // Create 3 transactions per validator with different amounts
             for amount in [100, 200, 300] {
                 let created_at = context.current().epoch_millis();
-                let tx = Transaction::sign(sender, receiver.clone(), amount);
+                let timestamp = created_at / 1000;
+                let tx = Transaction::sign(sender, receiver.clone(), amount, timestamp);
                 let tx_digest = tx.digest();
                 
                 tx_creation_times.insert(tx_digest, created_at);

@@ -12,9 +12,9 @@ This document describes the complete end-to-end workflow of a transaction in the
 [Client]
     │
     ├─> 1. Create Transaction
-    │     • Transaction::sign(sender_key, receiver, amount)
+    │     • Transaction::sign(sender_key, receiver, amount, timestamp)
     │     • Generates signature using ed25519
-    │     • Returns Transaction with sender, receiver, amount, signature
+    │     • Returns Transaction with sender, receiver, amount, timestamp, signature
     │
     ├─> 2. Submit to Validator (HTTP)
     │     • POST http://validator:8081/transaction
@@ -201,7 +201,11 @@ This document describes the complete end-to-end workflow of a transaction in the
 
 ```rust
 // Client creates transaction
-let tx = Transaction::sign(&sender_private_key, receiver, amount);
+let timestamp = std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .expect("Time went backwards")
+    .as_secs();
+let tx = Transaction::sign(&sender_private_key, receiver, amount, timestamp);
 
 // Internally:
 pub fn sign(private: &ed25519::PrivateKey, receiver: PublicKey, amount: u64) -> Self {

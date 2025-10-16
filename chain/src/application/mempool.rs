@@ -156,7 +156,8 @@ mod tests {
 
             let sender_private = PrivateKey::from_seed(1);
             let receiver_private = PrivateKey::from_seed(2);
-            let tx = Transaction::sign(&sender_private, receiver_private.public_key(), 100);
+            let timestamp = 1634567890;
+            let tx = Transaction::sign(&sender_private, receiver_private.public_key(), 100, timestamp);
             let digest = tx.digest();
             let sender = tx.sender.clone();
 
@@ -178,7 +179,8 @@ mod tests {
 
             let sender_private = PrivateKey::from_seed(1);
             let receiver_private = PrivateKey::from_seed(2);
-            let tx = Transaction::sign(&sender_private, receiver_private.public_key(), 100);
+            let timestamp = 1634567890;
+            let tx = Transaction::sign(&sender_private, receiver_private.public_key(), 100, timestamp);
 
             mempool.add(tx.clone());
             mempool.add(tx);
@@ -197,7 +199,8 @@ mod tests {
 
             let sender_private = PrivateKey::from_seed(1);
             let receiver_private = PrivateKey::from_seed(2);
-            let tx = Transaction::sign(&sender_private, receiver_private.public_key(), 100);
+            let timestamp = 1634567890;
+            let tx = Transaction::sign(&sender_private, receiver_private.public_key(), 100, timestamp);
             let expected_amount = tx.amount;
 
             mempool.add(tx);
@@ -222,7 +225,8 @@ mod tests {
             let receiver_private = PrivateKey::from_seed(2);
 
             for amount in 1..=5 {
-                let tx = Transaction::sign(&sender_private, receiver_private.public_key(), amount);
+                let timestamp = 1634567890 + amount;
+                let tx = Transaction::sign(&sender_private, receiver_private.public_key(), amount, timestamp);
                 mempool.add(tx);
             }
 
@@ -241,7 +245,8 @@ mod tests {
             for seed in 0..5 {
                 let sender_private = PrivateKey::from_seed(seed);
                 let receiver_private = PrivateKey::from_seed(100);
-                let tx = Transaction::sign(&sender_private, receiver_private.public_key(), 100);
+                let timestamp = 1634567890 + seed;
+                let tx = Transaction::sign(&sender_private, receiver_private.public_key(), 100, timestamp);
                 mempool.add(tx);
             }
 

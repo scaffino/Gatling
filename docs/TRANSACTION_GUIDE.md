@@ -71,11 +71,18 @@ use commonware_cryptography::Digestible;
 let sender_key = PrivateKey::from_seed(100);
 let receiver_key = PrivateKey::from_seed(101);
 
+// Get current unix timestamp
+let timestamp = std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .expect("Time went backwards")
+    .as_secs();
+
 // Sign the transaction
 let tx = Transaction::sign(
     &sender_key,
     receiver_key.public_key(),
-    100  // amount
+    100,  // amount
+    timestamp
 );
 
 // Get the transaction digest for tracking
@@ -182,7 +189,11 @@ See `alto/chain/tests/transaction_test.rs` for a complete working example that:
 **Key Code Snippet:**
 ```rust
 // Create transaction
-let tx = Transaction::sign(&alice, bob.public_key(), 100);
+let timestamp = std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .expect("Time went backwards")
+    .as_secs();
+let tx = Transaction::sign(&alice, bob.public_key(), 100, timestamp);
 let tx_digest = tx.digest();
 
 // Submit to validator
@@ -276,7 +287,11 @@ All validators will have the transaction in their mempool. The first to propose 
 ```rust
 // Create many transactions
 for i in 0..1000 {
-    let tx = Transaction::sign(&sender, receiver.public_key(), i);
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("Time went backwards")
+        .as_secs();
+    let tx = Transaction::sign(&sender, receiver.public_key(), i, timestamp);
     mailbox.submit_transaction(tx).await?;
 }
 ```
@@ -290,7 +305,11 @@ Transactions will be:
 
 ```rust
 // Create transaction with wrong signature
-let mut tx = Transaction::sign(&sender, receiver.public_key(), 100);
+let timestamp = std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .expect("Time went backwards")
+    .as_secs();
+let mut tx = Transaction::sign(&sender, receiver.public_key(), 100, timestamp);
 tx.signature = wrong_signature;  // Corrupt it
 
 // This will fail verification and be rejected

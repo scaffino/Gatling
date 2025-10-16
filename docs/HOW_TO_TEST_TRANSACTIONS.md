@@ -107,7 +107,11 @@ cargo run --release --example submit_transaction 2>&1 | sed $'s/\x1b\\[[0-9;]*m/
 ```rust
 let alice = PrivateKey::from_seed(100);
 let bob = PrivateKey::from_seed(101);
-let tx = Transaction::sign(&alice, bob.public_key(), 100);
+let timestamp = std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .expect("Time went backwards")
+    .as_secs();
+let tx = Transaction::sign(&alice, bob.public_key(), 100, timestamp);
 ```
 
 ### 2. Submit to Validator
@@ -165,7 +169,11 @@ engine.start(pending, recovered, resolver, broadcast, backfill);
 // 2. Create transaction
 let sender = PrivateKey::from_seed(1);
 let receiver = PrivateKey::from_seed(2);
-let tx = Transaction::sign(&sender, receiver.public_key(), 100);
+let timestamp = std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .expect("Time went backwards")
+    .as_secs();
+let tx = Transaction::sign(&sender, receiver.public_key(), 100, timestamp);
 
 // 3. Submit
 mailbox.submit_transaction(tx).await?;

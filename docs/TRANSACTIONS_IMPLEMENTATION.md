@@ -51,7 +51,11 @@ let sender_key = PrivateKey::from_seed(1);
 let receiver_key = PrivateKey::from_seed(2);
 let receiver = receiver_key.public_key();
 
-let tx = Transaction::sign(&sender_key, receiver, 100);
+let timestamp = std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .expect("Time went backwards")
+    .as_secs();
+let tx = Transaction::sign(&sender_key, receiver, 100, timestamp);
 assert!(tx.verify());
 ```
 
@@ -107,7 +111,11 @@ use alto_types::Transaction;
 let mut mailbox: alto_chain::application::Mailbox = ...;
 
 // Create and submit transaction
-let tx = Transaction::sign(&private_key, receiver, amount);
+let timestamp = std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .expect("Time went backwards")
+    .as_secs();
+let tx = Transaction::sign(&private_key, receiver, amount, timestamp);
 mailbox.submit_transaction(tx).await?;
 ```
 
@@ -288,7 +296,11 @@ let mut mailbox = engine.application_mailbox().clone();
 // Create and sign transaction
 let sender_key = PrivateKey::from_seed(1);
 let receiver_key = PrivateKey::from_seed(2);
-let tx = Transaction::sign(&sender_key, receiver_key.public_key(), 100);
+let timestamp = std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .expect("Time went backwards")
+    .as_secs();
+let tx = Transaction::sign(&sender_key, receiver_key.public_key(), 100, timestamp);
 
 // Submit to validator
 mailbox.submit_transaction(tx).await?;

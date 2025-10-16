@@ -38,6 +38,7 @@ async fn submit_transaction(
 
     // Get transaction identifier before moving tx
     let tx_id = tx.digest();
+    let tx_timestamp = tx.timestamp;
 
     // Verify signature
     if !tx.verify() {
@@ -49,7 +50,7 @@ async fn submit_transaction(
     let mut mailbox = state.mailbox.lock().await;
     match mailbox.submit_transaction(tx.clone()).await {
         Ok(_) => {
-            info!(tx_id = ?tx_id, "Transaction submitted to mempool via HTTP");
+            info!(tx_id = ?tx_id, timestamp = tx_timestamp, "Transaction submitted to mempool via HTTP");
             
             // Send to broadcast task if available
             if let Some(broadcast_tx) = &state.tx_broadcast_channel {
@@ -109,6 +110,7 @@ async fn submit_transaction_multi(
 
     // Get transaction identifier before moving tx
     let tx_id = tx.digest();
+    let tx_timestamp = tx.timestamp;
 
     // Verify signature
     if !tx.verify() {
@@ -123,8 +125,8 @@ async fn submit_transaction_multi(
         match mailbox.submit_transaction(tx.clone()).await {
             Ok(_) => {
                 submitted_count += 1;
-                info!("[consensus_{}] Transaction {:?} submitted to mempool via HTTP", 
-                      idx + 1, tx_id);
+                info!("[consensus_{}] Transaction {:?} (timestamp: {}) submitted to mempool via HTTP", 
+                      idx + 1, tx_id, tx_timestamp);
             }
             Err(e) => {
                 error!(

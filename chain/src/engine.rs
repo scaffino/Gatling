@@ -131,7 +131,7 @@ impl<
                 public_key: cfg.signer.public_key(),
                 included_transactions: cfg.included_transactions,
             },
-        );
+        ); 
 
         // Create the buffer
         let (buffer, buffer_mailbox) = buffered::Engine::new(

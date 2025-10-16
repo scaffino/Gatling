@@ -85,13 +85,24 @@ async fn main() {
     let sender = PrivateKey::from_seed(sender_seed);
     println!("Sender public key: {}", hex::encode(sender.public_key().as_ref()));
 
+    // Get current unix timestamp
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("Time went backwards")
+        .as_secs();
+
     // Create transaction
-    let tx = Transaction::sign(&sender, receiver, amount);
-    println!("\n=== Creating Transaction ===");
-    println!("From:   {}", hex::encode(tx.sender.as_ref()));
-    println!("To:     {}", hex::encode(tx.receiver.as_ref()));
-    println!("Amount: {}", tx.amount);
-    println!("Digest: {:?}", tx.digest());
+    let tx = Transaction::sign(&sender, receiver, amount, timestamp);
+    let tx_hash = tx.digest();
+    
+    println!("\n=== Transaction Created ===");
+    println!("Transaction Hash: {}", hex::encode(tx_hash.as_ref()));
+    println!();
+    println!("Transaction Fields:");
+    println!("  Sender:    {}", hex::encode(tx.sender.as_ref()));
+    println!("  Receiver:  {}", hex::encode(tx.receiver.as_ref()));
+    println!("  Amount:    {}", tx.amount);
+    println!("  Timestamp: {} (Unix timestamp)", tx.timestamp);
 
     // Submit to validator(s)
     let client = reqwest::Client::new();

@@ -192,8 +192,8 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                                     let validator_idx = self.validator_index;
                                     for tx in &transactions {
                                         let tx_id = tx.digest();
-                                        info!("[{}] Validator {} included transaction {:?} in block {} (view {})", 
-                                              engine_id, validator_idx, tx_id, block_height, view);
+                                        info!("[{}] Validator {} included transaction {:?} (timestamp: {}) in block {} (view {})", 
+                                              engine_id, validator_idx, tx_id, tx.timestamp, block_height, view);
                                     }
                                     
                                     {
@@ -202,7 +202,7 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                                     }
 
                                     // Send the digest to the consensus
-                                    let _result = response.send(digest);
+                                    let _result = response.send(digest); //giulia todo: before this line check the current time and the goal time. Wait for the right time: wait before sending the proposal 
                                     let validator_idx = self.validator_index;
                                     info!("[{}] Validator {} proposed block {} (view {}) with {} transactions", 
                                           engine_id, validator_idx, block_height, view, tx_count);
@@ -340,8 +340,8 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                         // Log each finalized transaction
                         for tx in &block.transactions {
                             let tx_id = tx.digest();
-                            info!("[{}] Transaction {:?} is now final in block {} (view {})", 
-                                  engine_id, tx_id, block.height, block_view);
+                            info!("[{}] Transaction {:?} (timestamp: {}) is now final in block {} (view {})", 
+                                  engine_id, tx_id, tx.timestamp, block.height, block_view);
                         }
                     }
                     
