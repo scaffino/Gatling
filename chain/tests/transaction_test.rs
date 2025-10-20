@@ -232,6 +232,7 @@ fn test_transaction_flow() {
                 fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(10).unwrap()),
                 indexer: Some(TrackingIndexer::new("", identity, tracker.clone())),
                 included_transactions: included_transactions.clone(),
+                proposal_offset_ms: 0,
             };
             
             let engine = engine::Engine::new(context.with_label(&uid), config).await;

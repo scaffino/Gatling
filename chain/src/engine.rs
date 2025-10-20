@@ -75,6 +75,10 @@ pub struct Config<B: Blocker<PublicKey = PublicKey>, I: Indexer> {
     
     /// Shared set of transaction digests that have been included in blocks across all consensus instances.
     pub included_transactions: Arc<Mutex<HashSet<Digest>>>,
+    
+    /// Time offset within each second (in milliseconds, 0-999) for when this engine should send proposals.
+    /// For example: 0 means X.000s, 500 means X.500s. This allows staggering multiple consensus instances.
+    pub proposal_offset_ms: u64,
 }
 
 /// The engine that drives the [application].
@@ -130,6 +134,7 @@ impl<
                 engine_id: cfg.partition_prefix.clone(),
                 public_key: cfg.signer.public_key(),
                 included_transactions: cfg.included_transactions,
+                proposal_offset_ms: cfg.proposal_offset_ms,
             },
         ); 
 

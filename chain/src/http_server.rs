@@ -125,7 +125,7 @@ async fn submit_transaction_multi(
         match mailbox.submit_transaction(tx.clone()).await {
             Ok(_) => {
                 submitted_count += 1;
-                info!("[consensus_{}] Transaction {:?} (timestamp: {}) submitted to mempool via HTTP", 
+                info!("[consensus_{}] Transaction {:?} (timestamp: {} ms) submitted to mempool via HTTP", 
                       idx + 1, tx_id, tx_timestamp);
             }
             Err(e) => {

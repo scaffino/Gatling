@@ -218,6 +218,7 @@ mod tests {
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(10).unwrap()),
                     indexer: None,
                     included_transactions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+                    proposal_offset_ms: 0,
                 };
                 let engine = Engine::new(context.with_label(&uid), config).await;
 
@@ -394,6 +395,7 @@ mod tests {
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(10).unwrap()),
                     indexer: None,
                     included_transactions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+                    proposal_offset_ms: 0,
                 };
                 let engine = Engine::new(context.with_label(&uid), config).await;
 
@@ -484,6 +486,7 @@ mod tests {
                 fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(10).unwrap()),
                 indexer: None,
                 included_transactions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+                proposal_offset_ms: 0,
             };
             let engine = Engine::new(context.with_label(&uid), config).await;
 
@@ -621,6 +624,7 @@ mod tests {
                         fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(10).unwrap()),
                         indexer: None,
                         included_transactions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+                        proposal_offset_ms: 0,
                     };
                     let engine = Engine::new(context.with_label(&uid), config).await;
 
@@ -794,6 +798,7 @@ mod tests {
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(10).unwrap()),
                     indexer: Some(indexer.clone()),
                     included_transactions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+                    proposal_offset_ms: 0,
                 };
                 let engine = Engine::new(context.with_label(&uid), config).await;
 

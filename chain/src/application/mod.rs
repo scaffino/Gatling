@@ -38,4 +38,8 @@ pub struct Config {
     /// Shared set of transaction digests that have been included in blocks across all consensus instances.
     /// This prevents the same transaction from being included in multiple instances.
     pub included_transactions: Arc<Mutex<HashSet<Digest>>>,
+    
+    /// Time offset within each second (in milliseconds, 0-999) for when this engine should send proposals.
+    /// For example: 0 means X.000s, 500 means X.500s. This allows staggering multiple consensus instances.
+    pub proposal_offset_ms: u64,
 }

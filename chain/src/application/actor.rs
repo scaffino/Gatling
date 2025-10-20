@@ -48,6 +48,8 @@ pub struct Actor<R: Rng + CryptoRng + Spawner + Metrics + Clock> {
     block_views: Arc<Mutex<std::collections::HashMap<Vec<u8>, View>>>,
     // Track transactions included in blocks across all consensus instances (shared)
     included_transactions: Arc<Mutex<HashSet<Digest>>>,
+    // Time offset within each second for proposal timing (0-999ms)
+    proposal_offset_ms: u64,
 }
 
 impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
@@ -88,6 +90,7 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                 finalized_seen: HashSet::new(),
                 block_views: Arc::new(Mutex::new(std::collections::HashMap::new())),
                 included_transactions: config.included_transactions,
+                proposal_offset_ms: config.proposal_offset_ms,
             },
             Supervisor::new(config.polynomial, config.participants, config.share),
             Mailbox::new(sender),
@@ -158,6 +161,7 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                         let built = built.clone();
                         let engine_id = self.engine_id.clone();
                         let block_views = self.block_views.clone();
+                        let proposal_offset_ms = self.proposal_offset_ms;
                         move |context| async move {
                             let response_closed = OneshotClosedFut::new(&mut response);
                             select! {
@@ -201,11 +205,30 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                                         *built = Some((view, block));
                                     }
 
-                                    // Send the digest to the consensus
-                                    let _result = response.send(digest); //giulia todo: before this line check the current time and the goal time. Wait for the right time: wait before sending the proposal 
+                                    // Wait until the precise time (X.000s + offset) before sending the proposal
+                                    let current_ms = context.current().epoch_millis();
+                                    let current_ms_in_second = current_ms % 1000;
+                                    let target_ms_in_second = proposal_offset_ms;
+                                    
+                                    // Calculate how many milliseconds to wait
+                                    let wait_ms = if current_ms_in_second <= target_ms_in_second {
+                                        // Target is later in this second
+                                        target_ms_in_second - current_ms_in_second
+                                    } else {
+                                        // Target is in the next second
+                                        1000 - current_ms_in_second + target_ms_in_second
+                                    };
+                                    
+                                    if wait_ms > 0 {
+                                        context.sleep(std::time::Duration::from_millis(wait_ms)).await;
+                                    }
+
+                                    // Send the digest to the consensus at the precise time
+                                    let _result = response.send(digest);
+                                    let proposal_timestamp = context.current().epoch_millis();
                                     let validator_idx = self.validator_index;
-                                    info!("[{}] Validator {} proposed block {} (view {}) with {} transactions", 
-                                          engine_id, validator_idx, block_height, view, tx_count);
+                                    info!("[{}] Validator {} proposed block {} (view {}) with {} transactions at Unix timestamp {} ms", 
+                                          engine_id, validator_idx, block_height, view, tx_count, proposal_timestamp);
                                 },
                                 _ = response_closed => {
                                     // The response was cancelled
@@ -340,7 +363,7 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                         // Log each finalized transaction
                         for tx in &block.transactions {
                             let tx_id = tx.digest();
-                            info!("[{}] Transaction {:?} (timestamp: {}) is now final in block {} (view {})", 
+                            info!("[{}] Transaction {:?} (timestamp: {} ms) is now final in block {} (view {})", 
                                   engine_id, tx_id, tx.timestamp, block.height, block_view);
                         }
                     }

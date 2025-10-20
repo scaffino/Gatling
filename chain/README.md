@@ -74,7 +74,7 @@ Run the emitted start commands in separate terminals:
 cargo run --bin validator -- --peers=<your-path>/test/peers.yaml --config=<your-path>/test/10cf8d03daca2332213981adee2a4bfffe4a1782bb5cce036c1d5689c6090997.yaml
 ```
 
-To output the validator info log, use 
+To output to file the validator info log, use:
 
 ```bash
 cargo run --bin validator -- --peers=<your-path>/test/peers.yaml --config=<your-path>/test/10cf8d03daca2332213981adee2a4bfffe4a1782bb5cce036c1d5689c6090997.yaml 2>&1 | tee >(sed 's/\x1b\[[0-9;]*m//g' > validator.log)

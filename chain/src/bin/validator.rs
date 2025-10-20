@@ -285,6 +285,13 @@ fn main() {
             let namespace = format!("{}_{}",
                 std::str::from_utf8(NAMESPACE).unwrap(),
                 chain_id).into_bytes();
+            
+            // Calculate time offset for this instance to stagger proposals evenly across the second
+            // For N instances: instance 0 gets 0ms, instance 1 gets 1000/N ms, instance 2 gets 2000/N ms, etc.
+            let proposal_offset_ms = (i * 1000 / consensus_instances) as u64;
+            tracing::info!("Consensus instance {} will send proposals at offset {} ms within each second", 
+                          chain_id, proposal_offset_ms);
+            
             let engine_config = engine::Config {
                 blocker: oracle.clone(),
                 partition_prefix: format!("consensus_{}", chain_id),
@@ -310,6 +317,7 @@ fn main() {
                 fetch_rate_per_peer: resolver_limit,
                 indexer: indexer.clone(),
                 included_transactions: included_transactions.clone(),
+                proposal_offset_ms,
             };
             let engine = engine::Engine::new(
                 context.with_label(&format!("consensus_{}", chain_id)), 

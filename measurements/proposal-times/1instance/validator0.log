@@ -1,0 +1,82 @@
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.28s
+     Running `target/debug/validator --peers=/Users/gscaffino/Workspace/superfastBFT/evaluation/alto/test/peers.yaml --config=/Users/gscaffino/Workspace/superfastBFT/evaluation/alto/test/47fed29ebadee9ff2391092d5e225408eda9a11a2d016e2eebd66b20f014cfe7.yaml --consensus-instances 1`
+2025-10-20T12:43:25.113484Z  INFO ThreadId(01) validator: chain/src/bin/validator.rs:194: loaded peers peers=4
+2025-10-20T12:43:25.114096Z  INFO ThreadId(01) validator: chain/src/bin/validator.rs:207: loaded config public_key=47fed29ebadee9ff2391092d5e225408eda9a11a2d016e2eebd66b20f014cfe7 identity=8b86b46151ed0b3f3497cd2ae1b0d555da8dc3ce9c3441e1b3473bed8e749e4b391fe99d9dc3f637a9edd1145a5f08e204c4bf2fe6269627dbdc170b04a52af26051f85dec862c578c4a1a2dd0fbb8614f17948628a4bccdb8cc8310d18b6beb ip=127.0.0.1 port=3000 consensus_instances=1
+2025-10-20T12:43:25.114741Z  INFO ThreadId(01) validator: chain/src/bin/validator.rs:292: Consensus instance 1 will send proposals at offset 0 ms within each second
+2025-10-20T12:43:25.115156Z  INFO ThreadId(02) commonware_p2p::authenticated::discovery::network: /Users/gscaffino/.cargo/git/checkouts/monorepo-6ae909991b852483/9e9e8b4/p2p/src/authenticated/discovery/network.rs:180: network started
+2025-10-20T12:43:25.118596Z  INFO ThreadId(01) commonware_consensus::marshal::actor: /Users/gscaffino/.cargo/git/checkouts/monorepo-6ae909991b852483/9e9e8b4/consensus/src/marshal/actor.rs:674: restored verified_blocks archive elapsed=473.354µs
+2025-10-20T12:43:25.118798Z  INFO ThreadId(01) commonware_consensus::marshal::actor: /Users/gscaffino/.cargo/git/checkouts/monorepo-6ae909991b852483/9e9e8b4/consensus/src/marshal/actor.rs:674: restored notarized_blocks archive elapsed=156.062µs
+2025-10-20T12:43:25.118990Z  INFO ThreadId(01) commonware_consensus::marshal::actor: /Users/gscaffino/.cargo/git/checkouts/monorepo-6ae909991b852483/9e9e8b4/consensus/src/marshal/actor.rs:674: restored notarizations_by_view archive elapsed=164.332µs
+2025-10-20T12:43:25.119191Z  INFO ThreadId(01) commonware_consensus::marshal::actor: /Users/gscaffino/.cargo/git/checkouts/monorepo-6ae909991b852483/9e9e8b4/consensus/src/marshal/actor.rs:674: restored finalizations_by_view archive elapsed=168.654µs
+2025-10-20T12:43:26.775632Z  INFO ThreadId(01) commonware_consensus::marshal::actor: /Users/gscaffino/.cargo/git/checkouts/monorepo-6ae909991b852483/9e9e8b4/consensus/src/marshal/actor.rs:200: restored finalizations by height archive elapsed=1.656391085s
+2025-10-20T12:43:28.254946Z  INFO ThreadId(01) commonware_consensus::marshal::actor: /Users/gscaffino/.cargo/git/checkouts/monorepo-6ae909991b852483/9e9e8b4/consensus/src/marshal/actor.rs:234: restored finalized blocks archive elapsed=1.479197217s
+2025-10-20T12:43:28.255329Z  INFO ThreadId(01) validator: chain/src/bin/validator.rs:364: Transaction gossiping is ENABLED gossip_enabled=true
+2025-10-20T12:43:28.255656Z  INFO ThreadId(02) alto_chain::http_server: chain/src/http_server.rs:170: Starting transaction HTTP server for multiple consensus instances addr=0.0.0.0:8081 instances=1
+2025-10-20T12:43:28.259045Z  INFO ThreadId(02) commonware_consensus::threshold_simplex::actors::voter::actor: /Users/gscaffino/.cargo/git/checkouts/monorepo-6ae909991b852483/9e9e8b4/consensus/src/threshold_simplex/actors/voter/actor.rs:1789: consensus initialized current_view=1 elapsed=622µs
+2025-10-20T12:43:29.002676Z  INFO ThreadId(04) alto_chain::application::actor: chain/src/application/actor.rs:230: [consensus_1] Validator 0 proposed block 1 (view 1) with 0 transactions at Unix timestamp 1760964209002 ms
+2025-10-20T12:43:33.675874Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 1 (view 5) with 0 transactions
+2025-10-20T12:43:34.779456Z  INFO ThreadId(03) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 2 (view 6) with 0 transactions
+2025-10-20T12:43:35.928148Z  INFO ThreadId(04) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 3 (view 0) with 0 transactions
+2025-10-20T12:43:36.811792Z  INFO ThreadId(04) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 4 (view 0) with 0 transactions
+2025-10-20T12:43:37.712315Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 5 (view 9) with 0 transactions
+2025-10-20T12:43:38.002261Z  INFO ThreadId(03) alto_chain::application::actor: chain/src/application/actor.rs:230: [consensus_1] Validator 0 proposed block 6 (view 10) with 0 transactions at Unix timestamp 1760964218002 ms
+2025-10-20T12:43:38.733144Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 6 (view 10) with 0 transactions
+2025-10-20T12:43:39.903970Z  INFO ThreadId(04) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 7 (view 0) with 0 transactions
+2025-10-20T12:43:40.727943Z  INFO ThreadId(03) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 8 (view 0) with 0 transactions
+2025-10-20T12:43:41.001632Z  INFO ThreadId(03) alto_chain::application::actor: chain/src/application/actor.rs:230: [consensus_1] Validator 0 proposed block 9 (view 13) with 0 transactions at Unix timestamp 1760964221001 ms
+2025-10-20T12:43:41.794229Z  INFO ThreadId(04) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 9 (view 13) with 0 transactions
+2025-10-20T12:43:42.003018Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:230: [consensus_1] Validator 0 proposed block 10 (view 14) with 0 transactions at Unix timestamp 1760964222002 ms
+2025-10-20T12:43:42.667373Z  INFO ThreadId(03) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 10 (view 14) with 0 transactions
+2025-10-20T12:43:43.722080Z  INFO ThreadId(04) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 11 (view 15) with 0 transactions
+2025-10-20T12:43:44.002463Z  INFO ThreadId(04) alto_chain::application::actor: chain/src/application/actor.rs:230: [consensus_1] Validator 0 proposed block 12 (view 16) with 0 transactions at Unix timestamp 1760964224002 ms
+2025-10-20T12:43:44.753000Z  INFO ThreadId(04) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 12 (view 16) with 0 transactions
+2025-10-20T12:43:45.740936Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 13 (view 17) with 0 transactions
+2025-10-20T12:43:46.763651Z  INFO ThreadId(03) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 14 (view 18) with 0 transactions
+2025-10-20T12:43:47.869051Z  INFO ThreadId(04) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 15 (view 0) with 0 transactions
+2025-10-20T12:43:48.632458Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 16 (view 20) with 0 transactions
+2025-10-20T12:43:49.705936Z  INFO ThreadId(04) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 17 (view 21) with 0 transactions
+2025-10-20T12:43:50.672266Z  INFO ThreadId(04) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 18 (view 22) with 0 transactions
+2025-10-20T12:43:51.852517Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 19 (view 0) with 0 transactions
+2025-10-20T12:43:52.003396Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:230: [consensus_1] Validator 0 proposed block 20 (view 24) with 0 transactions at Unix timestamp 1760964232003 ms
+2025-10-20T12:43:52.647445Z  INFO ThreadId(03) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 20 (view 24) with 0 transactions
+2025-10-20T12:43:53.759232Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 21 (view 25) with 0 transactions
+2025-10-20T12:43:54.746249Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 22 (view 26) with 0 transactions
+2025-10-20T12:43:55.002744Z  INFO ThreadId(03) alto_chain::application::actor: chain/src/application/actor.rs:230: [consensus_1] Validator 0 proposed block 23 (view 27) with 0 transactions at Unix timestamp 1760964235002 ms
+2025-10-20T12:43:55.694195Z  INFO ThreadId(03) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 23 (view 27) with 0 transactions
+2025-10-20T12:43:56.002163Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:230: [consensus_1] Validator 0 proposed block 24 (view 28) with 0 transactions at Unix timestamp 1760964236002 ms
+2025-10-20T12:43:56.825161Z  INFO ThreadId(04) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 24 (view 28) with 0 transactions
+2025-10-20T12:43:57.864285Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 25 (view 29) with 0 transactions
+2025-10-20T12:43:58.709694Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 26 (view 30) with 0 transactions
+2025-10-20T12:43:59.730558Z  INFO ThreadId(04) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 27 (view 31) with 0 transactions
+2025-10-20T12:44:00.792620Z  INFO ThreadId(04) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 28 (view 32) with 0 transactions
+2025-10-20T12:44:01.683039Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 29 (view 33) with 0 transactions
+2025-10-20T12:44:02.691920Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 30 (view 34) with 0 transactions
+2025-10-20T12:44:03.781602Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 31 (view 35) with 0 transactions
+2025-10-20T12:44:04.819772Z  INFO ThreadId(04) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 32 (view 0) with 0 transactions
+2025-10-20T12:44:05.887897Z  INFO ThreadId(04) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 33 (view 37) with 0 transactions
+2025-10-20T12:44:06.827059Z  INFO ThreadId(04) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 34 (view 38) with 0 transactions
+2025-10-20T12:44:07.002095Z  INFO ThreadId(04) alto_chain::application::actor: chain/src/application/actor.rs:230: [consensus_1] Validator 0 proposed block 35 (view 39) with 0 transactions at Unix timestamp 1760964247002 ms
+2025-10-20T12:44:07.769956Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 35 (view 39) with 0 transactions
+2025-10-20T12:44:08.741035Z  INFO ThreadId(04) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 36 (view 0) with 0 transactions
+2025-10-20T12:44:09.678550Z  INFO ThreadId(03) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 37 (view 0) with 0 transactions
+2025-10-20T12:44:10.002865Z  INFO ThreadId(04) alto_chain::application::actor: chain/src/application/actor.rs:230: [consensus_1] Validator 0 proposed block 38 (view 42) with 0 transactions at Unix timestamp 1760964250002 ms
+2025-10-20T12:44:10.633556Z  INFO ThreadId(04) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 38 (view 42) with 0 transactions
+2025-10-20T12:44:11.601007Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 39 (view 43) with 0 transactions
+2025-10-20T12:44:12.668984Z  INFO ThreadId(03) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 40 (view 44) with 0 transactions
+2025-10-20T12:44:13.727976Z  INFO ThreadId(04) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 41 (view 45) with 0 transactions
+2025-10-20T12:44:14.719648Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 42 (view 46) with 0 transactions
+2025-10-20T12:44:15.722243Z  INFO ThreadId(04) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 43 (view 47) with 0 transactions
+2025-10-20T12:44:16.634398Z  INFO ThreadId(04) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 44 (view 48) with 0 transactions
+2025-10-20T12:44:17.002903Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:230: [consensus_1] Validator 0 proposed block 45 (view 49) with 0 transactions at Unix timestamp 1760964257002 ms
+2025-10-20T12:44:17.700747Z  INFO ThreadId(04) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 45 (view 49) with 0 transactions
+2025-10-20T12:44:18.618836Z  INFO ThreadId(04) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 46 (view 50) with 0 transactions
+2025-10-20T12:44:19.717654Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 47 (view 51) with 0 transactions
+2025-10-20T12:44:20.596128Z  INFO ThreadId(04) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 48 (view 52) with 0 transactions
+2025-10-20T12:44:21.787081Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 49 (view 53) with 0 transactions
+2025-10-20T12:44:22.664629Z  INFO ThreadId(03) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 50 (view 54) with 0 transactions
+2025-10-20T12:44:23.641057Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 51 (view 55) with 0 transactions
+2025-10-20T12:44:24.735178Z  INFO ThreadId(03) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 52 (view 56) with 0 transactions
+2025-10-20T12:44:25.849987Z  INFO ThreadId(03) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 53 (view 57) with 0 transactions
+2025-10-20T12:44:26.660489Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 54 (view 58) with 0 transactions
+2025-10-20T12:44:27.788922Z  INFO ThreadId(04) alto_chain::application::actor: chain/src/application/actor.rs:380: [consensus_1] Validator 0 finalized block 55 (view 59) with 0 transactions
+2025-10-20T12:44:28.751735Z  INFO ThreadId(02) alto_chain::application::a

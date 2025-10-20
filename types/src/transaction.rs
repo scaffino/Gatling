@@ -15,12 +15,13 @@ pub fn transaction_namespace(namespace: &[u8]) -> Vec<u8> {
 }
 
 /// A simple transaction with sender, receiver, amount, and timestamp.
+/// The timestamp field represents Unix time in milliseconds.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Transaction {
     pub sender: PublicKey,
     pub receiver: PublicKey,
     pub amount: u64,
-    pub timestamp: u64,
+    pub timestamp: u64, // Unix timestamp in milliseconds
     pub signature: ed25519::Signature,
 }
 
