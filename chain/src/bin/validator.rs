@@ -6,13 +6,14 @@ use commonware_codec::{Decode, DecodeExt};
 use commonware_cryptography::{
     bls12381::primitives::{group, poly, variant::MinSig},
     ed25519::{PrivateKey, PublicKey},
-    Signer,
+    Digestible, Signer,
 };
 use commonware_deployer::ec2::Hosts;
 use commonware_p2p::authenticated::discovery as authenticated;
 use commonware_runtime::{tokio, Metrics, Runner, Spawner};
 use commonware_utils::{from_hex_formatted, quorum, union_unique};
 use futures::future::try_join_all;
+use futures::StreamExt;
 use governor::Quota;
 use std::{
     collections::HashMap,
@@ -58,6 +59,94 @@ const MAX_FETCH_SIZE: usize = 512 * 1024;
 const BLOCKS_FREEZER_TABLE_INITIAL_SIZE: u32 = 2u32.pow(21); // 100MB
 const FINALIZED_FREEZER_TABLE_INITIAL_SIZE: u32 = 2u32.pow(21); // 100MB
 
+/// Gatling thread that orders blocks from all consensus instances by view and instance number.
+async fn gatling_thread(
+    mut rx: futures::channel::mpsc::UnboundedReceiver<engine::GatlingEvent>,
+    validator_index: usize,
+    num_instances: usize,
+) {
+    use std::collections::BTreeMap;
+    
+    // Per-instance queues of finalized blocks, keyed by view number
+    let mut instance_queues: Vec<BTreeMap<u64, alto_types::Block>> = 
+        (0..num_instances).map(|_| BTreeMap::new()).collect();
+    
+    // Track the highest view we've finalized for each instance
+    let mut finalized_views: Vec<u64> = vec![0; num_instances];
+    
+    info!("[gatling] Gatling thread started for {} instances", num_instances);
+    
+    while let Some(event) = rx.next().await {
+        let instance_idx = event.instance_id - 1; // Convert 1-based to 0-based for indexing
+        
+        // Add the block to the instance's queue
+        instance_queues[instance_idx].insert(event.view, event.block);
+        
+        // Try to finalize blocks in global order
+        loop {
+            // Find the next block that can be finalized
+            // Rules:
+            // 1. Sort by view number (ascending)  
+            // 2. For a given view V from instance N, all instances k < N must have completed view V
+            
+            let mut can_finalize = None;
+            let mut min_view = u64::MAX;
+            let mut min_instance = usize::MAX;
+            
+            // Find the minimum available view across all instances
+            for inst_idx in 0..num_instances {
+                let queue = &instance_queues[inst_idx];
+                
+                // Find the smallest view in this instance's queue
+                if let Some((&view, block)) = queue.iter().next() {
+                    // Check if all instances with index < inst_idx have completed this view or higher
+                    let can_proceed = (0..inst_idx).all(|k| finalized_views[k] >= view);
+                    
+                    if can_proceed {
+                        // This block is eligible for finalization
+                        // Check if it's the minimum view (or same view but lower instance)
+                        if view < min_view || (view == min_view && inst_idx < min_instance) {
+                            min_view = view;
+                            min_instance = inst_idx;
+                            can_finalize = Some((inst_idx, view, block.clone()));
+                        }
+                    }
+                }
+            }
+            
+            // Finalize the block if we found one
+            if let Some((inst_idx, view, block)) = can_finalize {
+                let instance_id = inst_idx + 1; // Convert back to 1-based for display
+                let tx_count = block.transactions.len();
+                
+                // Log the globally finalized block
+                info!(
+                    "[gatling] Validator {} finalized block {} from instance {} (view {}) with {} transactions",
+                    validator_index, block.height, instance_id, view, tx_count
+                );
+                
+                // Log each transaction in the block
+                for tx in &block.transactions {
+                    let tx_id = tx.digest();
+                    info!(
+                        "[gatling] Transaction {:?} (timestamp: {} ms) is now final in block {} from instance {} (view {})",
+                        tx_id, tx.timestamp, block.height, instance_id, view
+                    );
+                }
+                
+                // Update tracking
+                finalized_views[inst_idx] = view;
+                instance_queues[inst_idx].remove(&view);
+            } else {
+                // No more blocks can be finalized right now
+                break;
+            }
+        }
+    }
+    
+    info!("[gatling] Gatling thread stopped");
+}
+
 fn main() {
     // Parse arguments
     let matches = Command::new("validator")
@@ -86,6 +175,12 @@ fn main() {
                 .action(clap::ArgAction::SetTrue)
                 .conflicts_with("gossip-txs")
         )
+        .arg(
+            Arg::new("gatling")
+                .long("gatling")
+                .help("Enable gatling global finalization tracking and logging")
+                .action(clap::ArgAction::SetTrue)
+        )
         .get_matches();
 
     // Load ip file
@@ -110,6 +205,9 @@ fn main() {
     } else {
         true // Default to enabled, or explicitly enabled with --gossip-txs
     };
+
+    // Parse gatling flag (default: disabled)
+    let gatling_enabled = matches.get_flag("gatling");
 
     // Load config
     let config_file = matches.get_one::<String>("config").unwrap();
@@ -289,6 +387,14 @@ fn main() {
         // This prevents the same transaction from being included in multiple independent blockchains
         let included_transactions = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
         
+        // Create gatling event channel if gatling is enabled
+        let (gatling_tx, gatling_rx) = if gatling_enabled {
+            let (tx, rx) = futures::channel::mpsc::unbounded();
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
+        
         // Create multiple independent consensus instances
         let mut consensus_engines = Vec::new();
         for i in 0..consensus_instances {
@@ -332,6 +438,8 @@ fn main() {
                 indexer: indexer.clone(),
                 included_transactions: included_transactions.clone(),
                 proposal_offset_ms,
+                gatling_tx: gatling_tx.clone(),
+                gatling_instance_id: chain_id,
             };
             let engine = engine::Engine::new(
                 context.with_label(&format!("consensus_{}", chain_id)), 
@@ -453,10 +561,28 @@ fn main() {
             started_consensus.push(started_engine);
         }
 
+        // Spawn gatling thread if enabled
+        let gatling_task = if let Some(gatling_rx) = gatling_rx {
+            // Calculate validator index from sorted peers list
+            let validator_index = peers
+                .iter()
+                .position(|p| p == &public_key)
+                .expect("Public key not found in peers");
+            
+            Some(context.with_label("gatling").spawn(move |_| async move {
+                gatling_thread(gatling_rx, validator_index, consensus_instances).await
+            }))
+        } else {
+            None
+        };
+
         // Wait for any task to error
         let mut all_tasks = vec![p2p, http_server];
         all_tasks.extend(gossip_tasks);
         all_tasks.extend(started_consensus);
+        if let Some(task) = gatling_task {
+            all_tasks.push(task);
+        }
         if let Err(e) = try_join_all(all_tasks).await {
             error!(?e, "task failed");
         }

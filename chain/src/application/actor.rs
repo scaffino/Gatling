@@ -50,6 +50,10 @@ pub struct Actor<R: Rng + CryptoRng + Spawner + Metrics + Clock> {
     included_transactions: Arc<Mutex<HashSet<Digest>>>,
     // Time offset within each second for proposal timing (0-999ms)
     proposal_offset_ms: u64,
+    // Channel to send finalized blocks to the gatling thread (if enabled)
+    gatling_tx: Option<futures::channel::mpsc::UnboundedSender<crate::engine::GatlingEvent>>,
+    // Instance ID for this consensus engine (1-based, used for gatling ordering)
+    gatling_instance_id: usize,
 }
 
 impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
@@ -91,6 +95,8 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                 block_views: Arc::new(Mutex::new(std::collections::HashMap::new())),
                 included_transactions: config.included_transactions,
                 proposal_offset_ms: config.proposal_offset_ms,
+                gatling_tx: config.gatling_tx,
+                gatling_instance_id: config.gatling_instance_id,
             },
             Supervisor::new(config.polynomial, config.participants, config.share),
             Mailbox::new(sender),
@@ -358,16 +364,36 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                     let engine_id = self.engine_id.clone();
                     let tx_count = block.transactions.len();
                     
-                    // Look up the view for this block (if not provided from the message)
-                    let block_view = if view == 0 {
+                    // Look up the view for this block from our tracking map
+                    // The view parameter from the message is sometimes 0, so we always check our map first
+                    let block_digest = block.digest();
+                    let block_view = {
                         let views = self.block_views.lock().unwrap();
-                        views.get(&block.digest().to_vec()).copied().unwrap_or(0)
-                    } else {
-                        view
+                        views.get(&block_digest.to_vec()).copied().unwrap_or_else(|| {
+                            warn!("[{}] Block {} finalized but view not found in tracking map, using message view {}", 
+                                  engine_id, block.height, view);
+                            view
+                        })
                     };
                     
-                    // Log finalized transactions
-                    if tx_count > 0 {
+                    // Send event to gatling thread if enabled (only if we have a valid view)
+                    if let Some(ref tx) = self.gatling_tx {
+                        if block_view > 0 {
+                            let event = crate::engine::GatlingEvent {
+                                instance_id: self.gatling_instance_id,
+                                view: block_view,
+                                block: block.clone(),
+                            };
+                            if let Err(e) = tx.unbounded_send(event) {
+                                warn!("[{}] Failed to send block to gatling: {}", engine_id, e);
+                            }
+                        } else {
+                            warn!("[{}] Skipping gatling event for block {} with invalid view 0", engine_id, block.height);
+                        }
+                    }
+                    
+                    // Log finalized transactions (only if gatling is disabled)
+                    if self.gatling_tx.is_none() && tx_count > 0 {
                         // Log each finalized transaction
                         for tx in &block.transactions {
                             let tx_id = tx.digest();

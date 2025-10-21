@@ -219,6 +219,8 @@ mod tests {
                     indexer: None,
                     included_transactions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
                     proposal_offset_ms: 0,
+                    gatling_tx: None,
+                    gatling_instance_id: 1,
                 };
                 let engine = Engine::new(context.with_label(&uid), config).await;
 
@@ -396,6 +398,8 @@ mod tests {
                     indexer: None,
                     included_transactions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
                     proposal_offset_ms: 0,
+                    gatling_tx: None,
+                    gatling_instance_id: 1,
                 };
                 let engine = Engine::new(context.with_label(&uid), config).await;
 
@@ -487,6 +491,8 @@ mod tests {
                 indexer: None,
                 included_transactions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
                 proposal_offset_ms: 0,
+                gatling_tx: None,
+                gatling_instance_id: 1,
             };
             let engine = Engine::new(context.with_label(&uid), config).await;
 
@@ -625,6 +631,8 @@ mod tests {
                         indexer: None,
                         included_transactions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
                         proposal_offset_ms: 0,
+                        gatling_tx: None,
+                        gatling_instance_id: 1,
                     };
                     let engine = Engine::new(context.with_label(&uid), config).await;
 
@@ -799,6 +807,8 @@ mod tests {
                     indexer: Some(indexer.clone()),
                     included_transactions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
                     proposal_offset_ms: 0,
+                    gatling_tx: None,
+                    gatling_instance_id: 1,
                 };
                 let engine = Engine::new(context.with_label(&uid), config).await;
 

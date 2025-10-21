@@ -3,7 +3,7 @@ use alto_types::{Activity, Block, Evaluation};
 use commonware_broadcast::buffered;
 use commonware_consensus::{
     marshal,
-    threshold_simplex::{self, Engine as Consensus},
+    threshold_simplex::{self, types::View, Engine as Consensus},
     Reporters,
 };
 use commonware_cryptography::{
@@ -25,6 +25,14 @@ use governor::Quota;
 use rand::{CryptoRng, Rng};
 use std::{collections::HashSet, num::NonZero, sync::{Arc, Mutex}, time::Duration};
 use tracing::{error, warn};
+
+/// Event sent to the gatling thread when a block is finalized.
+#[derive(Clone)]
+pub struct GatlingEvent {
+    pub instance_id: usize,
+    pub view: View,
+    pub block: Block,
+}
 
 /// Reporter type for [threshold_simplex::Engine].
 type Reporter<E, I> =
@@ -79,6 +87,12 @@ pub struct Config<B: Blocker<PublicKey = PublicKey>, I: Indexer> {
     /// Time offset within each second (in milliseconds, 0-999) for when this engine should send proposals.
     /// For example: 0 means X.000s, 500 means X.500s. This allows staggering multiple consensus instances.
     pub proposal_offset_ms: u64,
+    
+    /// Channel to send finalized blocks to the gatling thread (if enabled).
+    pub gatling_tx: Option<futures::channel::mpsc::UnboundedSender<GatlingEvent>>,
+    
+    /// Instance ID for this consensus engine (1-based, used for gatling ordering).
+    pub gatling_instance_id: usize,
 }
 
 /// The engine that drives the [application].
@@ -135,6 +149,8 @@ impl<
                 public_key: cfg.signer.public_key(),
                 included_transactions: cfg.included_transactions,
                 proposal_offset_ms: cfg.proposal_offset_ms,
+                gatling_tx: cfg.gatling_tx,
+                gatling_instance_id: cfg.gatling_instance_id,
             },
         ); 
 

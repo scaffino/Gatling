@@ -42,4 +42,10 @@ pub struct Config {
     /// Time offset within each second (in milliseconds, 0-999) for when this engine should send proposals.
     /// For example: 0 means X.000s, 500 means X.500s. This allows staggering multiple consensus instances.
     pub proposal_offset_ms: u64,
+    
+    /// Channel to send finalized blocks to the gatling thread (if enabled).
+    pub gatling_tx: Option<futures::channel::mpsc::UnboundedSender<crate::engine::GatlingEvent>>,
+    
+    /// Instance ID for this consensus engine (1-based, used for gatling ordering).
+    pub gatling_instance_id: usize,
 }

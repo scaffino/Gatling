@@ -233,6 +233,8 @@ fn test_transaction_flow() {
                 indexer: Some(TrackingIndexer::new("", identity, tracker.clone())),
                 included_transactions: included_transactions.clone(),
                 proposal_offset_ms: 0,
+                gatling_tx: None,
+                gatling_instance_id: 1,
             };
             
             let engine = engine::Engine::new(context.with_label(&uid), config).await;
