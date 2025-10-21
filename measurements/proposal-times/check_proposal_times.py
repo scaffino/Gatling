@@ -167,7 +167,37 @@ def main():
     # Sort all timestamps (across all instances)
     all_timestamps.sort()
 
-    print("Total timestamps collected: {}".format(len(all_timestamps)))
+    print("Total timestamps collected (before filtering): {}".format(len(all_timestamps)))
+    
+    # Filter out the first 30 seconds to exclude startup artifacts
+    STARTUP_EXCLUSION_MS = 30000  # 30 seconds
+    if all_timestamps:
+        min_timestamp = all_timestamps[0]
+        cutoff_timestamp = min_timestamp + STARTUP_EXCLUSION_MS
+        
+        # Filter timestamps
+        filtered_timestamps = [ts for ts in all_timestamps if ts >= cutoff_timestamp]
+        filtered_instances = {}
+        for instance_id, timestamps in all_instances.items():
+            filtered_ts = [ts for ts in timestamps if ts >= cutoff_timestamp]
+            if filtered_ts:
+                filtered_instances[instance_id] = filtered_ts
+        
+        excluded_count = len(all_timestamps) - len(filtered_timestamps)
+        
+        print("Excluded first 30 seconds: {} timestamps removed".format(excluded_count))
+        print("Analyzing timestamps from {} ms onward".format(cutoff_timestamp))
+        print()
+        
+        # Replace with filtered data
+        all_timestamps = filtered_timestamps
+        all_instances = filtered_instances
+    
+    if not all_timestamps:
+        print("No timestamps remaining after filtering!")
+        return
+    
+    print("Total timestamps for analysis: {}".format(len(all_timestamps)))
     print("Total instances found: {}".format(len(all_instances)))
     print("Instance IDs: {}".format(sorted(all_instances.keys())))
     print("Time range: {} ms to {} ms".format(

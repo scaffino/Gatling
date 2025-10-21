@@ -1,0 +1,392 @@
+   Compiling unicode-ident v1.0.19
+   Compiling cfg-if v1.0.3
+   Compiling pin-project-lite v0.2.16
+   Compiling once_cell v1.21.3
+   Compiling libc v0.2.177
+   Compiling futures-core v0.3.31
+   Compiling typenum v1.19.0
+   Compiling smallvec v1.15.1
+   Compiling itoa v1.0.15
+   Compiling bytes v1.10.1
+   Compiling proc-macro2 v1.0.101
+   Compiling log v0.4.28
+   Compiling memchr v2.7.6
+   Compiling slab v0.4.11
+   Compiling pin-utils v0.1.0
+   Compiling futures-sink v0.3.31
+   Compiling scopeguard v1.2.0
+   Compiling tracing-core v0.1.34
+   Compiling futures-io v0.3.31
+   Compiling lock_api v0.4.14
+   Compiling futures-task v0.3.31
+   Compiling quote v1.0.41
+   Compiling serde_core v1.0.228
+   Compiling subtle v2.6.1
+   Compiling syn v2.0.106
+   Compiling getrandom v0.2.16
+   Compiling parking_lot_core v0.9.12
+   Compiling futures-channel v0.3.31
+   Compiling rand_core v0.6.4
+   Compiling signal-hook-registry v1.4.6
+   Compiling mio v1.0.4
+   Compiling parking_lot v0.12.5
+   Compiling socket2 v0.6.1
+   Compiling fnv v1.0.7
+   Compiling bitflags v2.9.4
+   Compiling stable_deref_trait v1.2.1
+   Compiling core-foundation-sys v0.8.7
+   Compiling const-oid v0.9.6
+   Compiling http v1.3.1
+   Compiling percent-encoding v2.3.2
+   Compiling ryu v1.0.20
+   Compiling crossbeam-utils v0.8.21
+   Compiling core-foundation v0.9.4
+   Compiling jobserver v0.1.34
+   Compiling tower-service v0.3.3
+   Compiling cpufeatures v0.2.17
+   Compiling litemap v0.8.0
+   Compiling cc v1.2.41
+   Compiling writeable v0.6.1
+   Compiling hashbrown v0.16.0
+   Compiling equivalent v1.0.2
+   Compiling tower-layer v0.3.3
+   Compiling httparse v1.10.1
+   Compiling getrandom v0.3.3
+   Compiling errno v0.3.14
+   Compiling rustix v1.1.2
+   Compiling icu_properties_data v2.0.1
+   Compiling http-body v1.0.1
+   Compiling icu_normalizer_data v2.0.0
+   Compiling form_urlencoded v1.2.2
+   Compiling http-body-util v0.1.3
+   Compiling security-framework-sys v2.15.0
+   Compiling indexmap v2.11.4
+   Compiling sync_wrapper v1.0.2
+   Compiling base64 v0.22.1
+   Compiling atomic-waker v1.1.2
+   Compiling try-lock v0.2.5
+   Compiling fastrand v2.3.0
+   Compiling want v0.3.1
+   Compiling security-framework v2.11.1
+   Compiling system-configuration-sys v0.6.0
+   Compiling httpdate v1.0.3
+   Compiling system-configuration v0.6.1
+   Compiling mime v0.3.17
+   Compiling utf8_iter v1.0.4
+   Compiling ipnet v2.11.0
+   Compiling crossbeam-epoch v0.9.18
+   Compiling either v1.15.0
+   Compiling serde_json v1.0.145
+   Compiling tempfile v3.23.0
+   Compiling regex-syntax v0.8.8
+   Compiling crossbeam-deque v0.8.6
+   Compiling ff v0.13.1
+   Compiling lazy_static v1.5.0
+   Compiling base16ct v0.2.0
+   Compiling utf8parse v0.2.2
+   Compiling native-tls v0.2.14
+   Compiling anstyle-parse v0.2.7
+   Compiling sharded-slab v0.1.7
+   Compiling group v0.13.0
+   Compiling rayon-core v1.13.0
+   Compiling libm v0.2.15
+   Compiling tracing-log v0.2.0
+   Compiling thread_local v1.1.9
+   Compiling is_terminal_polyfill v1.70.1
+   Compiling iri-string v0.7.8
+   Compiling nu-ansi-term v0.50.3
+   Compiling regex-automata v0.4.13
+   Compiling anstyle v1.0.13
+   Compiling colorchoice v1.0.4
+   Compiling opaque-debug v0.3.1
+   Compiling byteorder v1.5.0
+   Compiling glob v0.3.3
+   Compiling synstructure v0.13.2
+   Compiling anstyle-query v1.1.4
+   Compiling num-traits v0.2.19
+   Compiling anstream v0.6.21
+   Compiling rayon v1.11.0
+   Compiling concurrent-queue v2.5.0
+   Compiling encoding_rs v0.8.35
+   Compiling strsim v0.11.1
+   Compiling parking v2.2.1
+   Compiling clap_lex v0.7.6
+   Compiling plotters-backend v0.3.7
+   Compiling ciborium-io v0.2.2
+   Compiling clap_builder v4.5.49
+   Compiling event-listener v5.4.1
+   Compiling plotters-svg v0.3.7
+   Compiling itertools v0.10.5
+   Compiling blake3 v1.8.2
+   Compiling blst v0.3.16
+   Compiling serde_path_to_error v0.1.20
+   Compiling zeroize_derive v1.4.2
+   Compiling futures-macro v0.3.31
+   Compiling tracing-attributes v0.1.30
+   Compiling zeroize v1.8.2
+   Compiling tokio-macros v2.5.0
+   Compiling futures-util v0.3.31
+   Compiling generic-array v0.14.9
+   Compiling zerofrom-derive v0.1.6
+   Compiling serde_derive v1.0.228
+   Compiling tokio v1.47.1
+   Compiling tracing v0.1.41
+   Compiling crypto-common v0.1.6
+   Compiling yoke-derive v0.8.0
+   Compiling zerocopy-derive v0.8.27
+   Compiling zerofrom v0.1.6
+   Compiling zerovec-derive v0.11.1
+   Compiling yoke v0.8.0
+   Compiling displaydoc v0.2.5
+   Compiling block-buffer v0.10.4
+   Compiling digest v0.10.7
+   Compiling zerocopy v0.8.27
+   Compiling zerotrie v0.2.2
+   Compiling thiserror-impl v2.0.17
+   Compiling zerovec v0.11.4
+   Compiling futures-executor v0.3.31
+   Compiling async-trait v0.1.89
+   Compiling der v0.7.10
+   Compiling futures v0.3.31
+   Compiling serde v1.0.228
+   Compiling hmac v0.12.1
+   Compiling crypto-bigint v0.5.5
+   Compiling thiserror v2.0.17
+   Compiling opentelemetry v0.28.0
+   Compiling thiserror-impl v1.0.69
+   Compiling tinystr v0.8.1
+   Compiling potential_utf v0.1.3
+   Compiling icu_collections v2.0.0
+   Compiling icu_locale_core v2.0.0
+   Compiling ppv-lite86 v0.2.21
+   Compiling serde_urlencoded v0.7.1
+   Compiling rand_chacha v0.3.1
+   Compiling sec1 v0.7.3
+   Compiling rand v0.8.5
+   Compiling icu_provider v2.0.0
+   Compiling prost-derive v0.13.5
+   Compiling pin-project-internal v1.1.10
+   Compiling thiserror v1.0.69
+   Compiling icu_properties v2.0.1
+   Compiling icu_normalizer v2.0.0
+   Compiling elliptic-curve v0.13.8
+   Compiling tokio-util v0.7.16
+   Compiling tower v0.5.2
+   Compiling tokio-native-tls v0.3.1
+   Compiling tokio-stream v0.1.17
+   Compiling half v2.7.1
+   Compiling pin-project v1.1.10
+   Compiling h2 v0.4.12
+   Compiling opentelemetry_sdk v0.28.0
+   Compiling tower-http v0.6.6
+   Compiling digest v0.9.0
+   Compiling rustls-pki-types v1.12.0
+   Compiling idna_adapter v1.2.1
+   Compiling idna v1.1.0
+   Compiling prost v0.13.5
+   Compiling ciborium-ll v0.2.2
+   Compiling spki v0.7.3
+   Compiling url v2.5.7
+   Compiling tracing-serde v0.2.0
+   Compiling commonware-codec v0.0.62 (https://github.com/scaffino/monorepo.git?tag=v0.0.62#9e9e8b47)
+   Compiling tonic v0.12.3
+   Compiling rfc6979 v0.4.0
+   Compiling signature v2.2.0
+   Compiling sha2 v0.10.9
+   Compiling block-buffer v0.9.0
+   Compiling matchers v0.2.0
+   Compiling raw-cpuid v11.6.0
+   Compiling num_cpus v1.17.0
+   Compiling same-file v1.0.6
+   Compiling cast v0.3.0
+   Compiling subtle-ng v2.5.0
+   Compiling hashbrown v0.14.5
+   Compiling curve25519-dalek-ng v4.1.1
+   Compiling dashmap v5.5.3
+   Compiling criterion-plot v0.5.0
+   Compiling walkdir v2.5.0
+   Compiling tracing-subscriber v0.3.20
+   Compiling threadpool v1.8.1
+   Compiling sha2 v0.9.9
+   Compiling ecdsa v0.16.9
+   Compiling opentelemetry-proto v0.28.0
+   Compiling quanta v0.12.6
+   Compiling commonware-utils v0.0.62 (https://github.com/scaffino/monorepo.git?tag=v0.0.62#9e9e8b47)
+   Compiling ciborium v0.2.2
+   Compiling primeorder v0.13.6
+   Compiling hyper v1.7.0
+   Compiling tinytemplate v1.2.1
+   Compiling axum-core v0.5.5
+   Compiling inout v0.1.4
+   Compiling clap v4.5.49
+   Compiling arrayvec v0.7.6
+   Compiling regex v1.12.2
+   Compiling prometheus-client-derive-encode v0.4.2
+   Compiling hyper-util v0.1.17
+   Compiling plotters v0.3.7
+   Compiling event-listener-strategy v0.5.4
+   Compiling syn v1.0.109
+   Compiling portable-atomic v1.11.1
+   Compiling is-terminal v0.4.16
+   Compiling spinning_top v0.3.0
+   Compiling nonzero_ext v0.3.0
+   Compiling oorandom v11.1.5
+   Compiling matchit v0.8.4
+   Compiling arrayref v0.3.9
+   Compiling no-std-compat v0.4.1
+   Compiling constant_time_eq v0.3.1
+   Compiling futures-timer v3.0.3
+   Compiling anes v0.1.6
+   Compiling dtoa v1.0.10
+   Compiling hex v0.4.3
+   Compiling criterion v0.5.1
+   Compiling prometheus-client v0.22.3
+   Compiling governor v0.6.3
+   Compiling hyper-tls v0.6.0
+   Compiling reqwest v0.12.24
+   Compiling ed25519-consensus v2.1.0
+   Compiling axum v0.8.6
+   Compiling zstd-sys v2.0.16+zstd.1.5.7
+   Compiling async-lock v3.4.1
+   Compiling cipher v0.4.4
+   Compiling tracing-opentelemetry v0.29.0
+   Compiling p256 v0.13.2
+   Compiling universal-hash v0.5.1
+   Compiling sysinfo v0.33.1
+   Compiling curve25519-dalek-derive v0.1.1
+   Compiling poly1305 v0.8.0
+   Compiling opentelemetry-http v0.28.0
+   Compiling curve25519-dalek v4.1.3
+   Compiling commonware-cryptography v0.0.62 (https://github.com/scaffino/monorepo.git?tag=v0.0.62#9e9e8b47)
+   Compiling opentelemetry-otlp v0.28.0
+   Compiling commonware-macros v0.0.62 (https://github.com/scaffino/monorepo.git?tag=v0.0.62#9e9e8b47)
+   Compiling chacha20 v0.9.1
+   Compiling wasm-bindgen-shared v0.2.104
+   Compiling aead v0.5.2
+   Compiling wasm-bindgen-backend v0.2.104
+   Compiling x25519-dalek v2.0.1
+   Compiling chacha20poly1305 v0.10.1
+   Compiling hkdf v0.12.4
+   Compiling rand_distr v0.4.3
+   Compiling crc32fast v1.5.0
+   Compiling bimap v0.6.3
+   Compiling sha-1 v0.10.1
+   Compiling http v0.2.12
+   Compiling utf-8 v0.7.6
+   Compiling base64 v0.13.1
+   Compiling unsafe-libyaml v0.2.11
+   Compiling axum-core v0.4.5
+   Compiling wasm-bindgen-macro-support v0.2.104
+   Compiling tungstenite v0.17.3
+   Compiling serde_yaml v0.9.34+deprecated
+   Compiling matchit v0.7.3
+   Compiling uuid v1.18.1
+   Compiling tokio-tungstenite v0.17.2
+   Compiling wasm-bindgen-macro v0.2.104
+   Compiling commonware-runtime v0.0.62 (https://github.com/scaffino/monorepo.git?tag=v0.0.62#9e9e8b47)
+   Compiling wasm-bindgen v0.2.104
+   Compiling axum v0.7.9
+   Compiling commonware-deployer v0.0.62 (https://github.com/scaffino/monorepo.git?tag=v0.0.62#9e9e8b47)
+   Compiling js-sys v0.3.81
+   Compiling zstd-safe v7.2.4
+   Compiling zstd v0.13.3
+   Compiling serde-wasm-bindgen v0.6.5
+   Compiling commonware-stream v0.0.62 (https://github.com/scaffino/monorepo.git?tag=v0.0.62#9e9e8b47)
+   Compiling commonware-storage v0.0.62 (https://github.com/scaffino/monorepo.git?tag=v0.0.62#9e9e8b47)
+   Compiling commonware-p2p v0.0.62 (https://github.com/scaffino/monorepo.git?tag=v0.0.62#9e9e8b47)
+   Compiling commonware-resolver v0.0.62 (https://github.com/scaffino/monorepo.git?tag=v0.0.62#9e9e8b47)
+   Compiling commonware-broadcast v0.0.62 (https://github.com/scaffino/monorepo.git?tag=v0.0.62#9e9e8b47)
+   Compiling commonware-consensus v0.0.62 (https://github.com/scaffino/monorepo.git?tag=v0.0.62#9e9e8b47)
+   Compiling alto-types v0.0.14 (/Users/gscaffino/Workspace/superfastBFT/evaluation/alto/types)
+   Compiling alto-client v0.0.14 (/Users/gscaffino/Workspace/superfastBFT/evaluation/alto/client)
+   Compiling alto-chain v0.0.14 (/Users/gscaffino/Workspace/superfastBFT/evaluation/alto/chain)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 56s
+     Running `target/debug/validator --peers=/Users/gscaffino/Workspace/superfastBFT/evaluation/alto/test/peers.yaml --config=/Users/gscaffino/Workspace/superfastBFT/evaluation/alto/test/a6a1499379dda0e800766a149bc049a11ab939a66e90abf23e9333290b556a38.yaml --consensus-instances 1`
+2025-10-20T14:09:39.970037Z  INFO ThreadId(01) validator: chain/src/bin/validator.rs:208: loaded peers peers=4
+2025-10-20T14:09:39.970883Z  INFO ThreadId(01) validator: chain/src/bin/validator.rs:221: loaded config public_key=a6a1499379dda0e800766a149bc049a11ab939a66e90abf23e9333290b556a38 identity=8b86b46151ed0b3f3497cd2ae1b0d555da8dc3ce9c3441e1b3473bed8e749e4b391fe99d9dc3f637a9edd1145a5f08e204c4bf2fe6269627dbdc170b04a52af26051f85dec862c578c4a1a2dd0fbb8614f17948628a4bccdb8cc8310d18b6beb ip=127.0.0.1 port=3006 consensus_instances=1
+2025-10-20T14:09:39.971826Z  INFO ThreadId(01) validator: chain/src/bin/validator.rs:306: Consensus instance 1 will send proposals at offset 0 ms within each second
+2025-10-20T14:09:39.972349Z  INFO ThreadId(04) commonware_p2p::authenticated::discovery::network: /Users/gscaffino/.cargo/git/checkouts/monorepo-6ae909991b852483/9e9e8b4/p2p/src/authenticated/discovery/network.rs:180: network started
+2025-10-20T14:09:39.975483Z  INFO ThreadId(01) commonware_consensus::marshal::actor: /Users/gscaffino/.cargo/git/checkouts/monorepo-6ae909991b852483/9e9e8b4/consensus/src/marshal/actor.rs:674: restored verified_blocks archive elapsed=364.722µs
+2025-10-20T14:09:39.975649Z  INFO ThreadId(01) commonware_consensus::marshal::actor: /Users/gscaffino/.cargo/git/checkouts/monorepo-6ae909991b852483/9e9e8b4/consensus/src/marshal/actor.rs:674: restored notarized_blocks archive elapsed=125.167µs
+2025-10-20T14:09:39.975811Z  INFO ThreadId(01) commonware_consensus::marshal::actor: /Users/gscaffino/.cargo/git/checkouts/monorepo-6ae909991b852483/9e9e8b4/consensus/src/marshal/actor.rs:674: restored notarizations_by_view archive elapsed=133.239µs
+2025-10-20T14:09:39.975925Z  INFO ThreadId(01) commonware_consensus::marshal::actor: /Users/gscaffino/.cargo/git/checkouts/monorepo-6ae909991b852483/9e9e8b4/consensus/src/marshal/actor.rs:674: restored finalizations_by_view archive elapsed=91.316µs
+2025-10-20T14:09:40.015625Z  INFO ThreadId(01) commonware_consensus::marshal::actor: /Users/gscaffino/.cargo/git/checkouts/monorepo-6ae909991b852483/9e9e8b4/consensus/src/marshal/actor.rs:200: restored finalizations by height archive elapsed=39.665969ms
+2025-10-20T14:09:40.037525Z  INFO ThreadId(01) commonware_consensus::marshal::actor: /Users/gscaffino/.cargo/git/checkouts/monorepo-6ae909991b852483/9e9e8b4/consensus/src/marshal/actor.rs:234: restored finalized blocks archive elapsed=21.832692ms
+2025-10-20T14:09:40.037871Z  INFO ThreadId(01) validator: chain/src/bin/validator.rs:378: Transaction gossiping is ENABLED gossip_enabled=true
+2025-10-20T14:09:40.038218Z  INFO ThreadId(04) alto_chain::http_server: chain/src/http_server.rs:170: Starting transaction HTTP server for multiple consensus instances addr=0.0.0.0:8084 instances=1
+2025-10-20T14:09:40.039559Z  INFO ThreadId(03) commonware_consensus::threshold_simplex::actors::voter::actor: /Users/gscaffino/.cargo/git/checkouts/monorepo-6ae909991b852483/9e9e8b4/consensus/src/threshold_simplex/actors/voter/actor.rs:1789: consensus initialized current_view=1 elapsed=14µs
+2025-10-20T14:10:06.697497Z  INFO ThreadId(03) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 1 (view 7) with 0 transactions
+2025-10-20T14:10:07.625313Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 2 (view 8) with 0 transactions
+2025-10-20T14:10:08.756678Z  INFO ThreadId(03) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 3 (view 9) with 0 transactions
+2025-10-20T14:10:09.613682Z  INFO ThreadId(03) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 4 (view 10) with 0 transactions
+2025-10-20T14:10:10.651411Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 5 (view 11) with 0 transactions
+2025-10-20T14:10:11.744308Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 6 (view 12) with 0 transactions
+2025-10-20T14:10:12.635009Z  INFO ThreadId(04) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 7 (view 13) with 0 transactions
+2025-10-20T14:10:13.824230Z  INFO ThreadId(03) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 8 (view 14) with 0 transactions
+2025-10-20T14:10:14.001176Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:231: [consensus_1] Validator 3 proposed block 9 (view 15) with 0 transactions at Unix timestamp 1760969414001 ms
+2025-10-20T14:10:14.790407Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 9 (view 15) with 0 transactions
+2025-10-20T14:10:15.702225Z  INFO ThreadId(04) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 10 (view 16) with 0 transactions
+2025-10-20T14:10:16.662028Z  INFO ThreadId(04) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 11 (view 17) with 0 transactions
+2025-10-20T14:10:17.613621Z  INFO ThreadId(03) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 12 (view 18) with 0 transactions
+2025-10-20T14:10:18.700671Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 13 (view 19) with 0 transactions
+2025-10-20T14:10:19.794485Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 14 (view 20) with 0 transactions
+2025-10-20T14:10:20.001873Z  INFO ThreadId(04) alto_chain::application::actor: chain/src/application/actor.rs:231: [consensus_1] Validator 3 proposed block 15 (view 21) with 0 transactions at Unix timestamp 1760969420001 ms
+2025-10-20T14:10:20.675245Z  INFO ThreadId(03) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 15 (view 21) with 0 transactions
+2025-10-20T14:10:21.002801Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:231: [consensus_1] Validator 3 proposed block 16 (view 22) with 0 transactions at Unix timestamp 1760969421002 ms
+2025-10-20T14:10:21.742544Z  INFO ThreadId(03) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 16 (view 22) with 0 transactions
+2025-10-20T14:10:22.728081Z  INFO ThreadId(03) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 17 (view 23) with 0 transactions
+2025-10-20T14:10:23.774115Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 18 (view 24) with 0 transactions
+2025-10-20T14:10:24.001796Z  INFO ThreadId(03) alto_chain::application::actor: chain/src/application/actor.rs:231: [consensus_1] Validator 3 proposed block 19 (view 25) with 0 transactions at Unix timestamp 1760969424001 ms
+2025-10-20T14:10:24.773886Z  INFO ThreadId(04) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 19 (view 25) with 0 transactions
+2025-10-20T14:10:25.001878Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:231: [consensus_1] Validator 3 proposed block 20 (view 26) with 0 transactions at Unix timestamp 1760969425001 ms
+2025-10-20T14:10:25.781216Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 20 (view 26) with 0 transactions
+2025-10-20T14:10:26.622300Z  INFO ThreadId(04) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 21 (view 27) with 0 transactions
+2025-10-20T14:10:27.793608Z  INFO ThreadId(04) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 22 (view 28) with 0 transactions
+2025-10-20T14:10:28.659932Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 23 (view 29) with 0 transactions
+2025-10-20T14:10:29.726836Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 24 (view 30) with 0 transactions
+2025-10-20T14:10:30.661615Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 25 (view 31) with 0 transactions
+2025-10-20T14:10:31.003683Z  INFO ThreadId(04) alto_chain::application::actor: chain/src/application/actor.rs:231: [consensus_1] Validator 3 proposed block 26 (view 32) with 0 transactions at Unix timestamp 1760969431003 ms
+2025-10-20T14:10:31.849058Z  INFO ThreadId(03) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 26 (view 32) with 0 transactions
+2025-10-20T14:10:32.875055Z  INFO ThreadId(04) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 27 (view 33) with 0 transactions
+2025-10-20T14:10:33.001947Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:231: [consensus_1] Validator 3 proposed block 28 (view 34) with 0 transactions at Unix timestamp 1760969433001 ms
+2025-10-20T14:10:33.783270Z  INFO ThreadId(03) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 28 (view 34) with 0 transactions
+2025-10-20T14:10:34.792145Z  INFO ThreadId(03) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 29 (view 35) with 0 transactions
+2025-10-20T14:10:35.538708Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 30 (view 36) with 0 transactions
+2025-10-20T14:10:36.002966Z  INFO ThreadId(04) alto_chain::application::actor: chain/src/application/actor.rs:231: [consensus_1] Validator 3 proposed block 31 (view 37) with 0 transactions at Unix timestamp 1760969436002 ms
+2025-10-20T14:10:36.685270Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 31 (view 37) with 0 transactions
+2025-10-20T14:10:37.001912Z  INFO ThreadId(04) alto_chain::application::actor: chain/src/application/actor.rs:231: [consensus_1] Validator 3 proposed block 32 (view 38) with 0 transactions at Unix timestamp 1760969437001 ms
+2025-10-20T14:10:37.782702Z  INFO ThreadId(03) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 32 (view 38) with 0 transactions
+2025-10-20T14:10:38.767125Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 33 (view 39) with 0 transactions
+2025-10-20T14:10:39.741079Z  INFO ThreadId(04) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 34 (view 40) with 0 transactions
+2025-10-20T14:10:40.738200Z  INFO ThreadId(04) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 35 (view 41) with 0 transactions
+2025-10-20T14:10:41.685300Z  INFO ThreadId(03) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 36 (view 42) with 0 transactions
+2025-10-20T14:10:42.002501Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:231: [consensus_1] Validator 3 proposed block 37 (view 43) with 0 transactions at Unix timestamp 1760969442002 ms
+2025-10-20T14:10:42.727611Z  INFO ThreadId(04) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 37 (view 43) with 0 transactions
+2025-10-20T14:10:43.733740Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 38 (view 44) with 0 transactions
+2025-10-20T14:10:44.674612Z  INFO ThreadId(03) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 39 (view 45) with 0 transactions
+2025-10-20T14:10:45.704066Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 40 (view 46) with 0 transactions
+2025-10-20T14:10:46.602107Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 41 (view 47) with 0 transactions
+2025-10-20T14:10:47.003078Z  INFO ThreadId(03) alto_chain::application::actor: chain/src/application/actor.rs:231: [consensus_1] Validator 3 proposed block 42 (view 48) with 0 transactions at Unix timestamp 1760969447003 ms
+2025-10-20T14:10:47.731471Z  INFO ThreadId(04) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 42 (view 48) with 0 transactions
+2025-10-20T14:10:48.688741Z  INFO ThreadId(04) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 43 (view 49) with 0 transactions
+2025-10-20T14:10:49.758836Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 44 (view 50) with 0 transactions
+2025-10-20T14:10:50.785944Z  INFO ThreadId(04) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 45 (view 51) with 0 transactions
+2025-10-20T14:10:51.790606Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 46 (view 52) with 0 transactions
+2025-10-20T14:10:52.704885Z  INFO ThreadId(03) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 47 (view 53) with 0 transactions
+2025-10-20T14:10:53.001837Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:231: [consensus_1] Validator 3 proposed block 48 (view 54) with 0 transactions at Unix timestamp 1760969453001 ms
+2025-10-20T14:10:53.725011Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 48 (view 54) with 0 transactions
+2025-10-20T14:10:54.645141Z  INFO ThreadId(04) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 49 (view 55) with 0 transactions
+2025-10-20T14:10:55.711155Z  INFO ThreadId(04) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 50 (view 56) with 0 transactions
+2025-10-20T14:10:56.625932Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 51 (view 57) with 0 transactions
+2025-10-20T14:10:57.003575Z  INFO ThreadId(04) alto_chain::application::actor: chain/src/application/actor.rs:231: [consensus_1] Validator 3 proposed block 52 (view 58) with 0 transactions at Unix timestamp 1760969457003 ms
+2025-10-20T14:10:57.762138Z  INFO ThreadId(04) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 52 (view 58) with 0 transactions
+2025-10-20T14:10:58.836526Z  INFO ThreadId(03) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 53 (view 59) with 0 transactions
+2025-10-20T14:10:59.666377Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 54 (view 60) with 0 transactions
+2025-10-20T14:11:00.722396Z  INFO ThreadId(03) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 55 (view 61) with 0 transactions
+2025-10-20T14:11:01.717954Z  INFO ThreadId(03) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 56 (view 62) with 0 transactions
+2025-10-20T14:11:02.677514Z  INFO ThreadId(04) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 57 (view 63) with 0 transactions
+2025-10-20T14:11:03.680289Z  INFO ThreadId(03) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 58 (view 64) with 0 transactions
+2025-10-20T14:11:04.743524Z  INFO ThreadId(03) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 59 (view 65) with 0 transactions
+2025-10-20T14:11:05.002314Z  INFO ThreadId(03) alto_chain::application::actor: chain/src/application/actor.rs:231: [consensus_1] Validator 3 proposed block 60 (view 66) with 0 transactions at Unix timestamp 1760969465002 ms
+2025-10-20T14:11:05.705631Z  INFO ThreadId(02) alto_chain::application::actor: chain/src/application/actor.rs:388: [consensus_1] Validator 3 finalized block 60 (view 66) with 0 transactions
+2025-10-20T14:11:06.540658Z  INFO ThreadId(03) alto_chain::applicati

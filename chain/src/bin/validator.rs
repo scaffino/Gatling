@@ -31,8 +31,22 @@ const BROADCASTER_CHANNEL: u32 = 3;
 const BACKFILL_BY_DIGEST_CHANNEL: u32 = 4;
 const TRANSACTION_CHANNEL: u32 = 5;
 
-const LEADER_TIMEOUT: Duration = Duration::from_secs(1);
-const NOTARIZATION_TIMEOUT: Duration = Duration::from_secs(2);
+// Timeouts tuned for 1 proposal per second with rotating leaders
+// Goal: Each view completes in ~1 second, leader proposes at second boundary
+// 
+// LEADER_TIMEOUT: Must allow leader to wait for next second boundary + propose
+//   - Leader may need to wait up to 1s for their time slot
+//   - Then proposal propagates (~100-200ms)
+//   - Setting to 2.5s: allows 1s wait + 1.5s buffer for network delays
+//
+// NOTARIZATION_TIMEOUT: Must allow signature collection from all validators
+//   - After proposal, validators sign and send back (~200-400ms)
+//   - With network delays and multiple validators, need generous timeout
+//   - Setting to 3s: ensures consensus stability
+//
+// Result: Views may take 1-2 seconds, but consensus remains stable
+const LEADER_TIMEOUT: Duration = Duration::from_millis(2500);
+const NOTARIZATION_TIMEOUT: Duration = Duration::from_millis(3000);
 const NULLIFY_RETRY: Duration = Duration::from_secs(10);
 const ACTIVITY_TIMEOUT: u64 = 256;
 const SKIP_TIMEOUT: u64 = 32;

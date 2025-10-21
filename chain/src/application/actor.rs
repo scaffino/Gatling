@@ -206,6 +206,7 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                                     }
 
                                     // Wait until the precise time (X.000s + offset) before sending the proposal
+                                    // This ensures all proposals happen at exact second boundaries for regularity
                                     let current_ms = context.current().epoch_millis();
                                     let current_ms_in_second = current_ms % 1000;
                                     let target_ms_in_second = proposal_offset_ms;
@@ -263,6 +264,13 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                     payload,
                     mut response,
                 } => {
+                    // Store the view for this block immediately to avoid race conditions
+                    // (before any async operations that might delay us)
+                    {
+                        let mut views = self.block_views.lock().unwrap();
+                        views.insert(payload.to_vec(), view);
+                    }
+                    
                     // Get the parent and current block
                     let parent_request = if parent.1 == genesis_digest {
                         Either::Left(future::ready(Ok(genesis.clone())))
