@@ -29,9 +29,11 @@ def extract_timestamps_from_file(filepath):
 
     # Pattern to match the proposal log line
     # and extract instance ID and timestamp
-    pattern = (r"\[consensus_(\d+)\] Validator \d+ proposed block \d+ "
-               r"\(view \d+\) with \d+ transactions at Unix timestamp "
-               r"(\d+) ms")
+    pattern = (
+        r"\[consensus_(\d+)\] Validator \d+ proposed block \d+ "
+        r"\(view \d+\) with \d+ transactions at Unix timestamp "
+        r"(\d+) ms"
+    )
 
     try:
         with open(filepath, 'r') as f:
@@ -42,10 +44,15 @@ def extract_timestamps_from_file(filepath):
                     timestamp = int(match.group(2))
                     timestamps_by_instance[instance_id].append(timestamp)
     except IOError:
-        print("Warning: File not found: {}".format(filepath),
-              file=sys.stderr)
+        print(
+            "Warning: File not found: {}".format(filepath),
+            file=sys.stderr
+        )
     except Exception as e:
-        print("Error reading {}: {}".format(filepath, e), file=sys.stderr)
+        print(
+            "Error reading {}: {}".format(filepath, e),
+            file=sys.stderr
+        )
 
     return dict(timestamps_by_instance)
 
@@ -147,8 +154,11 @@ def main():
                 all_instances[instance_id].extend(timestamps)
                 all_timestamps.extend(timestamps)
                 total_in_file += len(timestamps)
-            print("  Found {} proposals across {} instance(s)".format(
-                total_in_file, len(timestamps_by_instance)))
+            print(
+                "  Found {} proposals across {} instance(s)".format(
+                    total_in_file, len(timestamps_by_instance)
+                )
+            )
         else:
             print("  No proposal timestamps found")
 
@@ -167,36 +177,52 @@ def main():
     # Sort all timestamps (across all instances)
     all_timestamps.sort()
 
-    print("Total timestamps collected (before filtering): {}".format(len(all_timestamps)))
-    
+    print(
+        "Total timestamps collected (before filtering): {}".format(
+            len(all_timestamps)
+        )
+    )
+
     # Filter out the first 30 seconds to exclude startup artifacts
     STARTUP_EXCLUSION_MS = 30000  # 30 seconds
     if all_timestamps:
         min_timestamp = all_timestamps[0]
         cutoff_timestamp = min_timestamp + STARTUP_EXCLUSION_MS
-        
+
         # Filter timestamps
-        filtered_timestamps = [ts for ts in all_timestamps if ts >= cutoff_timestamp]
+        filtered_timestamps = [
+            ts for ts in all_timestamps if ts >= cutoff_timestamp
+        ]
         filtered_instances = {}
         for instance_id, timestamps in all_instances.items():
-            filtered_ts = [ts for ts in timestamps if ts >= cutoff_timestamp]
+            filtered_ts = [
+                ts for ts in timestamps if ts >= cutoff_timestamp
+            ]
             if filtered_ts:
                 filtered_instances[instance_id] = filtered_ts
-        
+
         excluded_count = len(all_timestamps) - len(filtered_timestamps)
-        
-        print("Excluded first 30 seconds: {} timestamps removed".format(excluded_count))
-        print("Analyzing timestamps from {} ms onward".format(cutoff_timestamp))
+
+        print(
+            "Excluded first 30 seconds: {} timestamps removed".format(
+                excluded_count
+            )
+        )
+        print(
+            "Analyzing timestamps from {} ms onward".format(
+                cutoff_timestamp
+            )
+        )
         print()
-        
+
         # Replace with filtered data
         all_timestamps = filtered_timestamps
         all_instances = filtered_instances
-    
+
     if not all_timestamps:
         print("No timestamps remaining after filtering!")
         return
-    
+
     print("Total timestamps for analysis: {}".format(len(all_timestamps)))
     print("Total instances found: {}".format(len(all_instances)))
     print("Instance IDs: {}".format(sorted(all_instances.keys())))
@@ -225,17 +251,32 @@ def main():
             avg_gap, median_gap, min_gap, max_gap = compute_statistics(gaps)
 
             print("Instance {}:".format(instance_id))
-            print("  Total proposals (all validators): {}".format(
-                len(timestamps)))
+            print(
+                "  Total proposals (all validators): {}".format(
+                    len(timestamps)
+                )
+            )
             print("  Number of gaps: {}".format(len(gaps)))
-            print("  Average gap: {:.2f} ms "
-                  "({:.4f} seconds)".format(avg_gap, avg_gap/1000.0))
-            print("  Median gap: {:.2f} ms "
-                  "({:.4f} seconds)".format(median_gap, median_gap/1000.0))
-            print("  Min gap: {} ms "
-                  "({:.4f} seconds)".format(min_gap, min_gap/1000.0))
-            print("  Max gap: {} ms "
-                  "({:.4f} seconds)".format(max_gap, max_gap/1000.0))
+            print(
+                "  Average gap: {:.2f} ms ({:.4f} seconds)".format(
+                    avg_gap, avg_gap/1000.0
+                )
+            )
+            print(
+                "  Median gap: {:.2f} ms ({:.4f} seconds)".format(
+                    median_gap, median_gap/1000.0
+                )
+            )
+            print(
+                "  Min gap: {} ms ({:.4f} seconds)".format(
+                    min_gap, min_gap/1000.0
+                )
+            )
+            print(
+                "  Max gap: {} ms ({:.4f} seconds)".format(
+                    max_gap, max_gap/1000.0
+                )
+            )
             print()
 
     if within_instance_gaps_all:
@@ -244,14 +285,26 @@ def main():
         print("SUMMARY - Within-Instance Statistics:")
         num_gaps = len(within_instance_gaps_all)
         print("  Total gaps (within instances): {}".format(num_gaps))
-        print("  Average gap: {:.2f} ms "
-              "({:.4f} seconds)".format(avg_within, avg_within/1000.0))
-        print("  Median gap: {:.2f} ms "
-              "({:.4f} seconds)".format(median_within, median_within/1000.0))
-        print("  Min gap: {} ms "
-              "({:.4f} seconds)".format(min_within, min_within/1000.0))
-        print("  Max gap: {} ms "
-              "({:.4f} seconds)".format(max_within, max_within/1000.0))
+        print(
+            "  Average gap: {:.2f} ms ({:.4f} seconds)".format(
+                avg_within, avg_within/1000.0
+            )
+        )
+        print(
+            "  Median gap: {:.2f} ms ({:.4f} seconds)".format(
+                median_within, median_within/1000.0
+            )
+        )
+        print(
+            "  Min gap: {} ms ({:.4f} seconds)".format(
+                min_within, min_within/1000.0
+            )
+        )
+        print(
+            "  Max gap: {} ms ({:.4f} seconds)".format(
+                max_within, max_within/1000.0
+            )
+        )
 
     print()
 
@@ -273,17 +326,32 @@ def main():
 
     avg_gap, median_gap, min_gap, max_gap = compute_statistics(all_gaps)
 
-    print("Total proposals (all instances, all validators): {}".format(
-        len(all_timestamps)))
+    print(
+        "Total proposals (all instances, all validators): {}".format(
+            len(all_timestamps)
+        )
+    )
     print("Total gaps: {}".format(len(all_gaps)))
-    print("Average gap: {:.2f} ms "
-          "({:.4f} seconds)".format(avg_gap, avg_gap/1000.0))
-    print("Median gap: {:.2f} ms "
-          "({:.4f} seconds)".format(median_gap, median_gap/1000.0))
-    print("Minimum gap: {} ms "
-          "({:.4f} seconds)".format(min_gap, min_gap/1000.0))
-    print("Maximum gap: {} ms "
-          "({:.4f} seconds)".format(max_gap, max_gap/1000.0))
+    print(
+        "Average gap: {:.2f} ms ({:.4f} seconds)".format(
+            avg_gap, avg_gap/1000.0
+        )
+    )
+    print(
+        "Median gap: {:.2f} ms ({:.4f} seconds)".format(
+            median_gap, median_gap/1000.0
+        )
+    )
+    print(
+        "Minimum gap: {} ms ({:.4f} seconds)".format(
+            min_gap, min_gap/1000.0
+        )
+    )
+    print(
+        "Maximum gap: {} ms ({:.4f} seconds)".format(
+            max_gap, max_gap/1000.0
+        )
+    )
     print()
 
 
