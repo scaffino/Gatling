@@ -23,7 +23,7 @@ use futures::future::try_join_all;
 use governor::clock::Clock as GClock;
 use governor::Quota;
 use rand::{CryptoRng, Rng};
-use std::{collections::HashSet, num::NonZero, sync::{Arc, Mutex}, time::Duration};
+use std::{collections::HashSet, num::NonZero, sync::{Arc, Mutex, atomic::AtomicU64}, time::Duration};
 use tracing::{error, warn};
 
 /// Event sent to the gatling thread when a block is finalized.
@@ -93,6 +93,12 @@ pub struct Config<B: Blocker<PublicKey = PublicKey>, I: Indexer> {
     
     /// Instance ID for this consensus engine (1-based, used for gatling ordering).
     pub gatling_instance_id: usize,
+    
+    /// Shared view tracking across all instances - used to detect lagging instances.
+    pub instance_views: Arc<Vec<AtomicU64>>,
+    
+    /// Number of views an instance must be behind to skip its scheduled wait.
+    pub lag_threshold: u64,
 }
 
     /// The engine that drives the [application].
@@ -151,6 +157,8 @@ impl<
                 proposal_offset_ms: cfg.proposal_offset_ms,
                 gatling_tx: cfg.gatling_tx,
                 gatling_instance_id: cfg.gatling_instance_id,
+                instance_views: cfg.instance_views,
+                lag_threshold: cfg.lag_threshold,
             },
         ); 
 

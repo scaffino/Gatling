@@ -19,6 +19,7 @@ use futures::{future, future::Either};
 use rand::{CryptoRng, Rng};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{debug, info, warn};
 
 // Metrics
@@ -52,6 +53,10 @@ pub struct Actor<R: Rng + CryptoRng + Spawner + Metrics + Clock> {
     gatling_tx: Option<futures::channel::mpsc::UnboundedSender<crate::engine::GatlingEvent>>,
     // Instance ID for this consensus engine (1-based, used for gatling ordering)
     gatling_instance_id: usize,
+    // Shared view tracking across all instances
+    instance_views: Arc<Vec<AtomicU64>>,
+    // Lag threshold for adaptive timing
+    lag_threshold: u64,
 }
 
 impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
@@ -94,6 +99,8 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                 proposal_offset_ms: config.proposal_offset_ms,
                 gatling_tx: config.gatling_tx,
                 gatling_instance_id: config.gatling_instance_id,
+                instance_views: config.instance_views,
+                lag_threshold: config.lag_threshold,
             },
             Supervisor::new(config.polynomial, config.participants, config.share),
             Mailbox::new(sender),
@@ -164,6 +171,9 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                         let built = built.clone();
                         let engine_id = self.engine_id.clone();
                         let proposal_offset_ms = self.proposal_offset_ms;
+                        let instance_views = self.instance_views.clone();
+                        let current_instance_id = self.gatling_instance_id;
+                        let lag_threshold = self.lag_threshold;
                         move |context| async move {
                             let response_closed = OneshotClosedFut::new(&mut response);
                             select! {
@@ -201,31 +211,50 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                                         *built = Some((view, block));
                                     }
 
-                                    // Wait until the precise time (X.000s + offset) before sending the proposal
-                                    // This ensures all proposals happen at exact second boundaries for regularity
-                                    let current_ms = context.current().epoch_millis();
-                                    let current_ms_in_second = current_ms % 1000;
-                                    let target_ms_in_second = proposal_offset_ms;
+                                    // Adaptive timing: Check if this instance is lagging behind others
+                                    let current_view = view;
+                                    let max_view = instance_views.iter()
+                                        .map(|v| v.load(Ordering::Relaxed))
+                                        .max()
+                                        .unwrap_or(0);
+                                    let lag = max_view.saturating_sub(current_view);
                                     
-                                    // Calculate how many milliseconds to wait
-                                    let wait_ms = if current_ms_in_second <= target_ms_in_second {
-                                        // Target is later in this second
-                                        target_ms_in_second - current_ms_in_second
+                                    // Track if this is a catch-up proposal
+                                    let is_catchup = lag >= lag_threshold;
+                                    
+                                    // Skip wait if lagging by threshold or more
+                                    if is_catchup {
+                                        // Instance is catching up - skip wait, will be marked in proposal log
                                     } else {
-                                        // Target is in the next second
-                                        1000 - current_ms_in_second + target_ms_in_second
-                                    };
-                                    
-                                    if wait_ms > 0 {
-                                        context.sleep(std::time::Duration::from_millis(wait_ms)).await;
+                                        // Wait until the precise time (X.000s + offset) before sending the proposal
+                                        // This ensures all proposals happen at exact second boundaries for regularity
+                                        let current_ms = context.current().epoch_millis();
+                                        let current_ms_in_second = current_ms % 1000;
+                                        let target_ms_in_second = proposal_offset_ms;
+                                        
+                                        // Calculate how many milliseconds to wait
+                                        let wait_ms = if current_ms_in_second <= target_ms_in_second {
+                                            // Target is later in this second
+                                            target_ms_in_second - current_ms_in_second
+                                        } else {
+                                            // Target is in the next second
+                                            1000 - current_ms_in_second + target_ms_in_second
+                                        };
+                                        
+                                        if wait_ms > 0 {
+                                            info!("[{}] Instance {} on schedule, waiting {} ms (lag: {} views)", 
+                                                  engine_id, current_instance_id, wait_ms, lag);
+                                            context.sleep(std::time::Duration::from_millis(wait_ms)).await;
+                                        }
                                     }
 
                                     // Send the digest to the consensus at the precise time
                                     let _result = response.send(digest);
                                     let proposal_timestamp = context.current().epoch_millis();
                                     let validator_idx = self.validator_index;
-                                    info!("[{}] Validator {} proposed block {} (view {}) with {} transactions at Unix timestamp {} ms", 
-                                          engine_id, validator_idx, block_height, view, tx_count, proposal_timestamp);
+                                    let catchup_msg = if is_catchup { " (catch up proposal)" } else { "" };
+                                    info!("[{}] Validator {} proposed block {} (view {}) with {} transactions at Unix timestamp {} ms{}", 
+                                          engine_id, validator_idx, block_height, view, tx_count, proposal_timestamp, catchup_msg);
                                 },
                                 _ = response_closed => {
                                     // The response was cancelled
@@ -339,6 +368,18 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                     // After an unclean shutdown, it is possible that the application may be asked to process a block it has already seen (which it can simply ignore).
                     let engine_id = self.engine_id.clone();
                     let tx_count = block.transactions.len();
+                    
+                    // Update shared view tracking for lag detection
+                    // Convert 1-based instance ID to 0-based index
+                    let instance_idx = (self.gatling_instance_id - 1) as usize;
+                    if instance_idx < self.instance_views.len() {
+                        let old_view = self.instance_views[instance_idx].load(Ordering::Relaxed);
+                        // Only update if this is a newer view
+                        if view > old_view {
+                            self.instance_views[instance_idx].store(view, Ordering::Relaxed);
+                            debug!("[{}] Instance {} advanced to view {}", engine_id, self.gatling_instance_id, view);
+                        }
+                    }
                     
                     // Use the view from the message (extracted from consensus proof by FinalizationPusher)
                     let block_view = view;

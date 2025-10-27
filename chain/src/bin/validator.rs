@@ -21,6 +21,7 @@ use std::{
     num::NonZeroU32,
     path::PathBuf,
     str::FromStr,
+    sync::{Arc, atomic::AtomicU64},
     time::Duration,
 };
 use tracing::{debug, error, info, Level};
@@ -423,6 +424,14 @@ fn main() {
         // This prevents the same transaction from being included in multiple independent blockchains
         let included_transactions = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
         
+        // Create shared state for tracking the highest view reached by each consensus instance
+        // This allows instances to detect if they're lagging and skip their scheduled wait time
+        let instance_views: Arc<Vec<AtomicU64>> = Arc::new(
+            (0..consensus_instances)
+                .map(|_| AtomicU64::new(0))
+                .collect()
+        );
+        
         // Create gatling event channel if gatling is enabled
         let (gatling_tx, gatling_rx) = if gatling_enabled {
             let (tx, rx) = futures::channel::mpsc::unbounded();
@@ -476,6 +485,8 @@ fn main() {
                 proposal_offset_ms,
                 gatling_tx: gatling_tx.clone(),
                 gatling_instance_id: chain_id,
+                instance_views: instance_views.clone(),
+                lag_threshold: 2, // Default threshold: skip wait if 2+ views behind
             };
             let engine = engine::Engine::new(
                 context.with_label(&format!("consensus_{}", chain_id)), 

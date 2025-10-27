@@ -12,7 +12,7 @@ pub mod mempool;
 
 use commonware_cryptography::sha256::Digest;
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, atomic::AtomicU64};
 
 /// Configuration for the application.
 pub struct Config {
@@ -48,4 +48,10 @@ pub struct Config {
     
     /// Instance ID for this consensus engine (1-based, used for gatling ordering).
     pub gatling_instance_id: usize,
+    
+    /// Shared view tracking across all instances - used to detect lagging instances.
+    pub instance_views: Arc<Vec<AtomicU64>>,
+    
+    /// Number of views an instance must be behind to skip its scheduled wait.
+    pub lag_threshold: u64,
 }
