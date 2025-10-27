@@ -44,8 +44,6 @@ pub struct Actor<R: Rng + CryptoRng + Spawner + Metrics + Clock> {
     block_latency_ms_histogram: PromHistogram,
     // Track finalized blocks we've already recorded to avoid double-counting
     finalized_seen: HashSet<Vec<u8>>,
-    // Track view for each block digest (shared across spawned tasks)
-    block_views: Arc<Mutex<std::collections::HashMap<Vec<u8>, View>>>,
     // Track transactions included in blocks across all consensus instances (shared)
     included_transactions: Arc<Mutex<HashSet<Digest>>>,
     // Time offset within each second for proposal timing (0-999ms)
@@ -92,7 +90,6 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                 finalized_blocks_counter,
                 block_latency_ms_histogram,
                 finalized_seen: HashSet::new(),
-                block_views: Arc::new(Mutex::new(std::collections::HashMap::new())),
                 included_transactions: config.included_transactions,
                 proposal_offset_ms: config.proposal_offset_ms,
                 gatling_tx: config.gatling_tx,
@@ -166,7 +163,6 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                     self.context.with_label("propose").spawn({
                         let built = built.clone();
                         let engine_id = self.engine_id.clone();
-                        let block_views = self.block_views.clone();
                         let proposal_offset_ms = self.proposal_offset_ms;
                         move |context| async move {
                             let response_closed = OneshotClosedFut::new(&mut response);
@@ -183,12 +179,6 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                                     let block_height = parent.height + 1;
                                     let block = Block::new(parent.digest(), block_height, current, transactions.clone());
                                     let digest = block.digest();
-                                    
-                                    // Store the view for this block
-                                    {
-                                        let mut views = block_views.lock().unwrap();
-                                        views.insert(digest.to_vec(), view);
-                                    }
                                     
                                     // Mark transactions as included globally
                                     {
@@ -270,13 +260,6 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                     payload,
                     mut response,
                 } => {
-                    // Store the view for this block immediately to avoid race conditions
-                    // (before any async operations that might delay us)
-                    {
-                        let mut views = self.block_views.lock().unwrap();
-                        views.insert(payload.to_vec(), view);
-                    }
-                    
                     // Get the parent and current block
                     let parent_request = if parent.1 == genesis_digest {
                         Either::Left(future::ready(Ok(genesis.clone())))
@@ -289,7 +272,6 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                     self.context.with_label("verify").spawn({
                         let mut marshal = marshal.clone();
                         let engine_id = self.engine_id.clone();
-                        let block_views = self.block_views.clone();
                         let included_txs = self.included_transactions.clone();
                         move |mut context| async move {
                             let requester =
@@ -329,12 +311,6 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                                         return;
                                     }
 
-                                    // Store the view for this block
-                                    {
-                                        let mut views = block_views.lock().unwrap();
-                                        views.insert(block.digest().to_vec(), view);
-                                    }
-                                    
                                     // Mark transactions in this block as included globally
                                     {
                                         let mut included = included_txs.lock().unwrap();
@@ -364,33 +340,8 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                     let engine_id = self.engine_id.clone();
                     let tx_count = block.transactions.len();
                     
-                    // Look up the view for this block from our tracking map
-                    // The view parameter from the message is sometimes 0, so we always check our map first
-                    let block_digest = block.digest();
-                    let block_view = {
-                        let views = self.block_views.lock().unwrap();
-                        views.get(&block_digest.to_vec()).copied().unwrap_or_else(|| {
-                            warn!("[{}] Block {} finalized but view not found in tracking map, using message view {}", 
-                                  engine_id, block.height, view);
-                            view
-                        })
-                    };
-                    
-                    // Send event to gatling thread if enabled (only if we have a valid view)
-                    if let Some(ref tx) = self.gatling_tx {
-                        if block_view > 0 {
-                            let event = crate::engine::GatlingEvent {
-                                instance_id: self.gatling_instance_id,
-                                view: block_view,
-                                block: block.clone(),
-                            };
-                            if let Err(e) = tx.unbounded_send(event) {
-                                warn!("[{}] Failed to send block to gatling: {}", engine_id, e);
-                            }
-                        } else {
-                            warn!("[{}] Skipping gatling event for block {} with invalid view 0", engine_id, block.height);
-                        }
-                    }
+                    // Use the view from the message (extracted from consensus proof by FinalizationPusher)
+                    let block_view = view;
                     
                     // Log finalized transactions (only if gatling is disabled)
                     if self.gatling_tx.is_none() && tx_count > 0 {

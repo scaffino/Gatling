@@ -7,7 +7,7 @@ use commonware_cryptography::{
 mod actor;
 pub use actor::Actor;
 mod ingress;
-pub use ingress::Mailbox;
+pub use ingress::{FinalizationPusher, Mailbox};
 pub mod mempool;
 
 use commonware_cryptography::sha256::Digest;

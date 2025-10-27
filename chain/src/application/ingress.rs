@@ -1,9 +1,14 @@
-use alto_types::{Block, Transaction};
+use alto_types::{Activity, Block, Transaction};
 use commonware_consensus::{
+    marshal,
     threshold_simplex::types::{Context, View},
-    Automaton, Relay, Reporter,
+    Automaton, Relay, Reporter, Viewable,
 };
-use commonware_cryptography::sha256::Digest;
+use commonware_cryptography::{
+    bls12381::primitives::variant::MinSig,
+    sha256::Digest,
+};
+use commonware_runtime::{Metrics, Spawner};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
@@ -47,6 +52,10 @@ impl Mailbox {
     pub(super) fn new(sender: mpsc::Sender<Message>) -> Self {
         Self { sender }
     }
+    
+    pub fn sender_clone(&self) -> mpsc::Sender<Message> {
+        self.sender.clone()
+    }
 
     /// Submit a transaction to the mempool.
     pub async fn submit_transaction(&mut self, transaction: Transaction) -> Result<(), String> {
@@ -54,6 +63,52 @@ impl Mailbox {
             .send(Message::SubmitTransaction { transaction })
             .await
             .map_err(|_| "Failed to send transaction".to_string())
+    }
+}
+
+/// Pusher that connects Reporter to the application actor
+#[derive(Clone)]
+pub struct FinalizationPusher<E: Spawner + Metrics> {
+    context: E,
+    sender: mpsc::Sender<Message>,
+    marshal: marshal::Mailbox<MinSig, Block>,
+}
+
+impl<E: Spawner + Metrics> FinalizationPusher<E> {
+    pub fn new(context: E, sender: mpsc::Sender<Message>, marshal: marshal::Mailbox<MinSig, Block>) -> Self {
+        Self { context, sender, marshal }
+    }
+}
+
+impl<E: Spawner + Metrics> Reporter for FinalizationPusher<E> {
+    type Activity = Activity;
+
+    async fn report(&mut self, activity: Self::Activity) {
+        match activity {
+            Activity::Finalization(finalization) => {
+                let view = finalization.view();
+                let payload = finalization.proposal.payload;
+                
+                // Spawn a task to subscribe to the block
+                let mut sender = self.sender.clone();
+                let mut marshal = self.marshal.clone();
+                let context = self.context.with_label("finalization_fetch");
+                context.spawn(move |_| async move {
+                    // Subscribe to get the block
+                    let block_result = marshal
+                        .subscribe(Some(view), payload)
+                        .await
+                        .await;
+                    
+                    if let Ok(block) = block_result {
+                        let _ = sender.send(Message::Finalized { view, block }).await;
+                    }
+                });
+            }
+            _ => {
+                // Ignore notarizations and other activities
+            }
+        }
     }
 }
 
@@ -121,6 +176,8 @@ impl Reporter for Mailbox {
     type Activity = Block;
 
     async fn report(&mut self, block: Self::Activity) {
+        // Marshal reports Block, so we need to look up the view
+        // This will be handled by the Finalized message handler in the actor
         self.sender
             .send(Message::Finalized { view: 0, block })
             .await

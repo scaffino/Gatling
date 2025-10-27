@@ -36,7 +36,7 @@ pub struct GatlingEvent {
 
 /// Reporter type for [threshold_simplex::Engine].
 type Reporter<E, I> =
-    Reporters<Activity, marshal::Mailbox<MinSig, Block>, Option<indexer::Pusher<E, I>>>;
+    Reporters<Activity, application::FinalizationPusher<E>, Option<indexer::Pusher<E, I>>>;
 
 /// To better support peers near tip during network instability, we multiply
 /// the consensus activity timeout by this factor.
@@ -95,7 +95,7 @@ pub struct Config<B: Blocker<PublicKey = PublicKey>, I: Indexer> {
     pub gatling_instance_id: usize,
 }
 
-/// The engine that drives the [application].
+    /// The engine that drives the [application].
 pub struct Engine<
     E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
     B: Blocker<PublicKey = PublicKey>,
@@ -200,9 +200,17 @@ impl<
             )
             .await;
 
-        // Create the reporter
-        let reporter = (
+        // Create the FinalizationPusher to send finalizations to the application  
+        let finalization_pusher = application::FinalizationPusher::new(
+            context.with_label("finalization_pusher"),
+            application_mailbox.sender_clone(),
             marshal_mailbox.clone(),
+        );
+        
+        // Create the reporter chain for consensus (sends Activity with finalizations)
+        // FinalizationPusher extracts view from Finalization proof and fetches block
+        let reporter = (
+            finalization_pusher,
             cfg.indexer.map(|indexer| {
                 indexer::Pusher::new(
                     context.with_label("indexer"),
@@ -323,7 +331,7 @@ impl<
 
         // Start marshal
         let marshal_handle = self.marshal.start(
-            self.application_mailbox,
+            self.application_mailbox.clone(),
             self.buffer_mailbox,
             backfill_network,
         );
