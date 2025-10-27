@@ -23,7 +23,7 @@ use std::{
     str::FromStr,
     time::Duration,
 };
-use tracing::{error, info, Level};
+use tracing::{debug, error, info, Level};
 
 const PENDING_CHANNEL: u32 = 0;
 const RECOVERED_CHANNEL: u32 = 1;
@@ -84,33 +84,51 @@ async fn gatling_thread(
         
         // Try to finalize blocks in global order
         loop {
-            // Find the next block that can be finalized
-            // Rules:
-            // 1. Sort by view number (ascending)  
-            // 2. For a given view V from instance N, all instances k < N must have completed view V
+            // Find the next block that can be finalized according to:
+            // Rule 1: Views are finalized in ascending order
+            // Rule 2: For the same view, instances finalize in order (0, 1, 2, ...)
             
             let mut can_finalize = None;
-            let mut min_view = u64::MAX;
-            let mut min_instance = usize::MAX;
             
-            // Find the minimum available view across all instances
-            for inst_idx in 0..num_instances {
-                let queue = &instance_queues[inst_idx];
-                
-                // Find the smallest view in this instance's queue
-                if let Some((&view, block)) = queue.iter().next() {
-                    // Check if all instances with index < inst_idx have completed this view or higher
-                    let can_proceed = (0..inst_idx).all(|k| finalized_views[k] >= view);
-                    
-                    if can_proceed {
-                        // This block is eligible for finalization
-                        // Check if it's the minimum view (or same view but lower instance)
-                        if view < min_view || (view == min_view && inst_idx < min_instance) {
-                            min_view = view;
-                            min_instance = inst_idx;
-                            can_finalize = Some((inst_idx, view, block.clone()));
+            // Step 1: Collect all unique pending views across ALL instances
+            let mut all_pending_views: Vec<u64> = Vec::new();
+            for k in 0..num_instances {
+                if let Some((&view, _)) = instance_queues[k].iter().next() {
+                    all_pending_views.push(view);
+                }
+            }
+            
+            // If no pending views, nothing to finalize
+            if all_pending_views.is_empty() {
+                break;
+            }
+            
+            // Step 2: Sort and deduplicate to get unique views in ascending order
+            all_pending_views.sort_unstable();
+            all_pending_views.dedup();
+            
+            // Step 3: Try to finalize views in order
+            // For each view, check each instance in order (0, 1, 2, ...)
+            for view in all_pending_views {
+                for inst_idx in 0..num_instances {
+                    if let Some((&pending_view, block)) = instance_queues[inst_idx].iter().next() {
+                        // Check if this instance has a block at this view
+                        if pending_view == view {
+                            // Check: all instances with index < inst_idx have finalized this view
+                            let all_lower_instances_finalized = (0..inst_idx).all(|k| finalized_views[k] >= view);
+                            
+                            if all_lower_instances_finalized {
+                                // This instance can finalize - it's the lowest index eligible for this view
+                                can_finalize = Some((inst_idx, view, block.clone()));
+                                break; // Exit inner loop
+                            }
                         }
                     }
+                }
+                
+                // If we found a block to finalize, exit the outer loop too
+                if can_finalize.is_some() {
+                    break;
                 }
             }
             
@@ -134,9 +152,27 @@ async fn gatling_thread(
                     );
                 }
                 
-                // Update tracking
+                // Update tracking - Rule 2: Implicit finalization of gaps
+                // When instance N finalizes view V, mark all views up to V as finalized
+                // If previous_finalized was 2 and we're finalizing view 5, then 3, 4, and 5 are now finalized
                 finalized_views[inst_idx] = view;
+                
+                // Remove the finalized block from queue
                 instance_queues[inst_idx].remove(&view);
+                
+                // Remove any pending blocks with views < v - they are now implicitly finalized
+                // If there was a gap (e.g., finalized view 2, now finalizing view 5), views 3 and 4 are implicitly finalized
+                let mut views_to_remove = Vec::new();
+                for (&queued_view, _) in instance_queues[inst_idx].iter() {
+                    if queued_view < view {
+                        views_to_remove.push(queued_view);
+                    }
+                }
+                for &view_to_remove in &views_to_remove {
+                    instance_queues[inst_idx].remove(&view_to_remove);
+                    debug!("Removed implicitly finalized block from instance {} at view {} (instance now finalized view {})", 
+                           instance_id, view_to_remove, view);
+                }
             } else {
                 // No more blocks can be finalized right now
                 break;

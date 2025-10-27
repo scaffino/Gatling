@@ -343,6 +343,18 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                     // Use the view from the message (extracted from consensus proof by FinalizationPusher)
                     let block_view = view;
                     
+                    // Send finalized block to gatling thread if enabled
+                    if let Some(ref gatling_tx) = self.gatling_tx {
+                        let event = crate::engine::GatlingEvent {
+                            instance_id: self.gatling_instance_id,
+                            view,
+                            block: block.clone(),
+                        };
+                        if let Err(e) = gatling_tx.unbounded_send(event) {
+                            warn!(error=?e, "Failed to send finalized block to gatling thread");
+                        }
+                    }
+                    
                     // Log finalized transactions (only if gatling is disabled)
                     if self.gatling_tx.is_none() && tx_count > 0 {
                         // Log each finalized transaction
