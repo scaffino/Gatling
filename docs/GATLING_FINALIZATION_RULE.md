@@ -6,19 +6,28 @@ The gatling finalization logic ensures strict global ordering of blocks across m
 
 ## Core Rules
 
-### Rule 1: View V of Instance K Finalizes After All Lower Instances Have Finalized View V
+### Rule 1: Instance K at View V Finalizes After All Lower Instances Have Moved Past View V
 
-**Definition:** Block at view V from instance K can only be finalized when all instances with index < K have already finalized view V.
+**Definition:** Block at view V from instance K can only be finalized when all instances with index < K have their next pending block at view > V (they've moved past this view).
 
 **Implementation:**
 ```rust
-let all_lower_instances_finalized = (0..inst_idx).all(|k| finalized_views[k] >= view);
+let all_lower_instances_ahead = (0..inst_idx).all(|k| {
+    if let Some((&pending_view, _)) = instance_queues[k].iter().next() {
+        pending_view > view  // Lower instance's next block must be beyond this view
+    } else {
+        true  // Empty queue means "ahead"
+    }
+});
 ```
 
 **Example:**
-- Instance 0 finalizes view 5 → `finalized_views[0] = 5`
-- Instance 1 can now finalize view 5 (checked: instance 0 has 5 >= 5 ✓)
-- Instance 2 can now finalize view 5 (checked: instances 0, 1 both have >= 5 ✓)
+- Instance 0 has block at view 4 (next pending: view 4)
+- Instance 1 has block at view 3 (next pending: view 3)
+- Instance 1 can finalize view 3 because instance 0's next block (view 4) is > 3 ✓
+- Instance 0 can then finalize view 4 ✓
+
+**Key difference from old rule:** Lower instances don't need to have *finalized* view V, they just need to have *moved past* it (their next block is at a higher view).
 
 ### Rule 2: Implicit Finalization of Gap Views
 
@@ -62,51 +71,49 @@ let mut finalized_views: Vec<u64> = vec![0; num_instances];
 
 ### Finalization Algorithm
 
-The gatling thread iteratively finalizes blocks using a **range-based approach**:
+The gatling thread iteratively finalizes blocks using a **(view, instance) ordering approach**:
 
-#### Step 1: Collect All Pending Views
+#### Step 1: Collect All Pending Blocks
 ```rust
-let mut all_pending_views: Vec<u64> = Vec::new();
-for k in 0..num_instances {
-    if let Some((&view, _)) = instance_queues[k].iter().next() {
-        all_pending_views.push(view);
+let mut pending_blocks: Vec<(usize, u64, Block)> = Vec::new();
+for inst_idx in 0..num_instances {
+    if let Some((&view, block)) = instance_queues[inst_idx].iter().next() {
+        pending_blocks.push((inst_idx, view, block.clone()));
     }
 }
 ```
 
-Collects the smallest pending view from each instance (if any).
+Collects the smallest pending (instance_idx, view, block) tuple from each instance (if any).
 
-#### Step 2: Sort and Deduplicate
+#### Step 2: Sort by (view, instance_idx)
 ```rust
-all_pending_views.sort_unstable();
-all_pending_views.dedup();
+pending_blocks.sort_by_key(|(inst_idx, view, _)| (*view, *inst_idx));
 ```
 
-Creates a sorted list of unique view numbers to try finalizing.
+Creates a sorted list of blocks prioritized by view first (ascending), then instance index (ascending). This ensures the lowest view of the lowest instance is considered first.
 
-#### Step 3: Try Finalization in Order
+#### Step 3: Try Finalization in Sorted Order
 ```rust
-for view in all_pending_views {
-    for inst_idx in 0..num_instances {
-        if pending_view == view {
-            let all_lower_instances_finalized = 
-                (0..inst_idx).all(|k| finalized_views[k] >= view);
-            
-            if all_lower_instances_finalized {
-                can_finalize = Some((inst_idx, view, block.clone()));
-                break;
-            }
+for (inst_idx, view, block) in pending_blocks {
+    let all_lower_instances_ahead = (0..inst_idx).all(|k| {
+        if let Some((&pending_view, _)) = instance_queues[k].iter().next() {
+            pending_view > view  // Lower instance's next block must be beyond this view
+        } else {
+            true  // Empty queue means "ahead"
         }
+    });
+    
+    if all_lower_instances_ahead {
+        can_finalize = Some((inst_idx, view, block));
+        break;
     }
-    if can_finalize.is_some() { break; }
 }
 ```
 
-For each view (ascending order):
-- Check each instance (lowest to highest index)
-- If instance has a block at this view
-- Verify all lower-indexed instances have finalized this view
-- Finalize the first eligible instance
+For each (instance, view, block) in sorted order:
+- Check if all lower-indexed instances have their next pending block at view > current view
+- If yes, finalize this block (it's the first eligible in sorted order)
+- This ensures blocks finalize in strict (view, instance) ascending order
 
 #### Step 4: Update Tracking
 ```rust
@@ -142,38 +149,22 @@ Instance 1 (index 1):
   queue = {view 5 -> BlockB, view 8 -> BlockC}
 ```
 
-### Iteration 1: Finding View to Finalize
+### Iteration 1: Finding Block to Finalize
 ```
-Step 1: all_pending_views = [7, 5]  (from instances 0, 1)
-Step 2: sorted = [5, 7]
+Step 1: pending_blocks = [(0, 7, BlockA), (1, 5, BlockB)]
+Step 2: sorted = [(1, 5, BlockB), (0, 7, BlockA)]  // view 5 comes before view 7
 
-Step 3: Try view 5
-  Instance 0: pending_view = 7, 7 != 5 → skip
-  Instance 1: pending_view = 5, 5 == 5
-    Check: lower instances finalized >= 5?
-      Instance 0: finalized_views[0] = 4, 4 < 5 → NO
-    Result: BLOCKED (instance 0 hasn't reached view 5)
+Step 3: Try (1, 5) - Instance 1 at view 5
+  Check: lower instances ahead?
+    Instance 0: next pending view = 7, is 7 > 5? YES ✓
+  Result: FINALIZE view 5 from instance 1
 
-Step 3: Try view 7
-  Instance 0: pending_view = 7, 7 == 7
-    Check: lower instances finalized >= 7?
-      No lower instances for instance 0 → YES
-    Result: FINALIZE view 7 from instance 0
-```
+After finalization: finalized_views[1] = 5, instance 1 queue: {8 -> BlockC}
 
-### After Finalization
-```
-finalized_views[0] = 7
-Instance 0 queue: {} (empty)
-
-Step 1: all_pending_views = [5, 8]  (from instance 1)
-Step 2: sorted = [5, 8]
-
-Step 3: Try view 5
-  Instance 1: pending_view = 5, 5 == 5
-    Check: lower instances finalized >= 5?
-      Instance 0: finalized_views[0] = 7, 7 >= 5 → YES
-    Result: FINALIZE view 5 from instance 1
+Step 3: Try (0, 7) - Instance 0 at view 7
+  Check: lower instances ahead?
+    No lower instances for instance 0 → YES
+  Result: FINALIZE view 7 from instance 0
 ```
 
 ### After Second Finalization
@@ -181,23 +172,22 @@ Step 3: Try view 5
 finalized_views[0] = 7
 finalized_views[1] = 5
 
-Step 1: all_pending_views = [8]
-Step 3: Try view 8
-  Instance 1: pending_view = 8, 8 == 8
-    Check: lower instances finalized >= 8?
-      Instance 0: finalized_views[0] = 7, 7 < 8 → NO
-    Result: BLOCKED (instance 0 hasn't reached view 8)
-
-Iteration complete, waiting for more blocks...
+Step 1: pending_blocks = [(1, 8, BlockC)]
+Step 3: Try (1, 8) - Instance 1 at view 8
+  Check: lower instances ahead?
+    Instance 0: no pending blocks (empty queue) → "ahead" ✓
+  Result: FINALIZE view 8 from instance 1
 ```
+
+**Key observation:** With the new algorithm, instance 1's view 5 finalizes *before* instance 0's view 7 because views are sorted first, then instances. The constraint ensures lower instances have moved past the view.
 
 ## Key Properties
 
-### 1. Global View Ordering
-Blocks are finalized in strictly ascending view order. View V cannot be finalized until all instances have progressed past V-1.
+### 1. Global (View, Instance) Ordering
+Blocks are finalized in strictly ascending (view, instance) order. The lowest view number finalizes first, and within the same view, the lowest instance index finalizes first.
 
-### 2. Per-View Instance Ordering
-Within the same view, instances finalize in ascending index order (0, 1, 2, ...).
+### 2. Constraint-Based Finalization
+Instance K at view V can finalize only if all instances with index < K have their next pending block at view > V. This ensures lower-indexed instances have "moved past" the view before higher-indexed instances can finalize it.
 
 ### 3. Gap Tolerance
 The system handles view gaps gracefully:
@@ -216,7 +206,7 @@ The range-based approach ensures progress:
 Instance 0: finalized_views[0] = 10, queue = {}
 Instance 1: finalized_views[1] = 10, queue = {15 -> Block}
 ```
-View 15 can finalize because all instances have finalized >= 15. The gap (views 11-14) is implicitly finalized.
+View 15 can finalize because instance 0 has no pending blocks (empty queue is considered "ahead"). The gap (views 11-14) is implicitly finalized.
 
 ### Case 2: Synchronized Finalization
 ```
@@ -237,6 +227,6 @@ Views 3-99 for instance 0 are implicitly finalized. View 100 can finalize once i
 
 The gatling finalization logic is implemented in:
 - File: `alto/chain/src/bin/validator.rs`
-- Function: `gatling_thread()` (lines 62-171)
-- Key logic: lines 93-144 (range-based finalization algorithm)
+- Function: `gatling_thread()` (lines 62-181)
+- Key logic: lines 95-129 ((view, instance) sorting and constraint-based finalization algorithm)
 

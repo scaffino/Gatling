@@ -242,8 +242,6 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                                         };
                                         
                                         if wait_ms > 0 {
-                                            info!("[{}] Instance {} on schedule, waiting {} ms (lag: {} views)", 
-                                                  engine_id, current_instance_id, wait_ms, lag);
                                             context.sleep(std::time::Duration::from_millis(wait_ms)).await;
                                         }
                                     }

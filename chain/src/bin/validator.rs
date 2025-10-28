@@ -86,49 +86,44 @@ async fn gatling_thread(
         // Try to finalize blocks in global order
         loop {
             // Find the next block that can be finalized according to:
-            // Rule 1: Views are finalized in ascending order
-            // Rule 2: For the same view, instances finalize in order (0, 1, 2, ...)
+            // Rule 1: Blocks finalize in (view, instance) ascending order
+            // Rule 2: Instance K at view V can finalize only if all instances with index < K
+            //         have their next pending block at view > V (they've moved past this view)
             
             let mut can_finalize = None;
             
-            // Step 1: Collect all unique pending views across ALL instances
-            let mut all_pending_views: Vec<u64> = Vec::new();
-            for k in 0..num_instances {
-                if let Some((&view, _)) = instance_queues[k].iter().next() {
-                    all_pending_views.push(view);
+            // Step 1: Collect all (instance_idx, view, block) tuples
+            let mut pending_blocks: Vec<(usize, u64, alto_types::Block)> = Vec::new();
+            for inst_idx in 0..num_instances {
+                if let Some((&view, block)) = instance_queues[inst_idx].iter().next() {
+                    pending_blocks.push((inst_idx, view, block.clone()));
                 }
             }
             
-            // If no pending views, nothing to finalize
-            if all_pending_views.is_empty() {
+            // If no pending blocks, nothing to finalize
+            if pending_blocks.is_empty() {
                 break;
             }
             
-            // Step 2: Sort and deduplicate to get unique views in ascending order
-            all_pending_views.sort_unstable();
-            all_pending_views.dedup();
+            // Step 2: Sort by (view, instance_idx) - lowest view first, then lowest instance
+            pending_blocks.sort_by_key(|(inst_idx, view, _)| (*view, *inst_idx));
             
-            // Step 3: Try to finalize views in order
-            // For each view, check each instance in order (0, 1, 2, ...)
-            for view in all_pending_views {
-                for inst_idx in 0..num_instances {
-                    if let Some((&pending_view, block)) = instance_queues[inst_idx].iter().next() {
-                        // Check if this instance has a block at this view
-                        if pending_view == view {
-                            // Check: all instances with index < inst_idx have finalized this view
-                            let all_lower_instances_finalized = (0..inst_idx).all(|k| finalized_views[k] >= view);
-                            
-                            if all_lower_instances_finalized {
-                                // This instance can finalize - it's the lowest index eligible for this view
-                                can_finalize = Some((inst_idx, view, block.clone()));
-                                break; // Exit inner loop
-                            }
-                        }
+            // Step 3: Try to finalize in sorted order with constraint check
+            for (inst_idx, view, block) in pending_blocks {
+                // NEW CONSTRAINT: All lower instances must have their next pending block at view > current view
+                let all_lower_instances_ahead = (0..inst_idx).all(|k| {
+                    // Get the next pending view for instance k
+                    if let Some((&pending_view, _)) = instance_queues[k].iter().next() {
+                        pending_view > view  // Lower instance's next block must be beyond this view
+                    } else {
+                        // If instance k has no pending blocks, it's effectively "ahead"
+                        true
                     }
-                }
+                });
                 
-                // If we found a block to finalize, exit the outer loop too
-                if can_finalize.is_some() {
+                if all_lower_instances_ahead {
+                    // This instance can finalize - lower instances have moved past this view
+                    can_finalize = Some((inst_idx, view, block));
                     break;
                 }
             }
@@ -486,7 +481,7 @@ fn main() {
                 gatling_tx: gatling_tx.clone(),
                 gatling_instance_id: chain_id,
                 instance_views: instance_views.clone(),
-                lag_threshold: 2, // Default threshold: skip wait if 2+ views behind
+                lag_threshold: 1, // Default threshold: skip wait if 1+ views behind
             };
             let engine = engine::Engine::new(
                 context.with_label(&format!("consensus_{}", chain_id)), 

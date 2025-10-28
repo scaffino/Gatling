@@ -20,7 +20,7 @@ use governor::Quota;
 use std::{
     collections::{HashMap, HashSet},
     num::NonZeroU32,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, atomic::AtomicU64},
     time::Duration,
 };
 use tracing::info;
@@ -198,6 +198,9 @@ fn test_transaction_flow() {
         // Create shared state for tracking included transactions
         let included_transactions = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
 
+        // Create shared state for tracking instance views (one consensus instance in these tests)
+        let instance_views: Arc<Vec<AtomicU64>> = Arc::new(vec![AtomicU64::new(0)]);
+
         // Store engines with their mailboxes
         let mut engines = Vec::new();
         let mut mailboxes = Vec::new();
@@ -235,6 +238,8 @@ fn test_transaction_flow() {
                 proposal_offset_ms: 0,
                 gatling_tx: None,
                 gatling_instance_id: 1,
+                instance_views: instance_views.clone(),
+                lag_threshold: 1,
             };
             
             let engine = engine::Engine::new(context.with_label(&uid), config).await;

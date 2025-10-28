@@ -65,6 +65,7 @@ mod tests {
     use std::{
         collections::{HashMap, HashSet},
         num::NonZeroU32,
+        sync::{Arc, atomic::AtomicU64},
         time::Duration,
     };
     use tracing::info;
@@ -184,6 +185,9 @@ mod tests {
             let (polynomial, shares) =
                 ops::generate_shares::<_, MinSig>(&mut context, None, n, threshold);
 
+            // Create shared state for tracking instance views (one consensus instance in these tests)
+            let instance_views: Arc<Vec<AtomicU64>> = Arc::new(vec![AtomicU64::new(0)]);
+
             // Create instances
             let mut public_keys = HashSet::new();
             for (idx, signer) in signers.into_iter().enumerate() {
@@ -221,6 +225,8 @@ mod tests {
                     proposal_offset_ms: 0,
                     gatling_tx: None,
                     gatling_instance_id: 1,
+                    instance_views: instance_views.clone(),
+                    lag_threshold: 1,
                 };
                 let engine = Engine::new(context.with_label(&uid), config).await;
 
@@ -362,6 +368,9 @@ mod tests {
             let (polynomial, shares) =
                 ops::generate_shares::<_, MinSig>(&mut context, None, n, threshold);
 
+            // Create shared state for tracking instance views (one consensus instance in these tests)
+            let instance_views: Arc<Vec<AtomicU64>> = Arc::new(vec![AtomicU64::new(0)]);
+
             // Create instances
             for (idx, signer) in signers.iter().enumerate() {
                 // Skip first
@@ -400,6 +409,8 @@ mod tests {
                     proposal_offset_ms: 0,
                     gatling_tx: None,
                     gatling_instance_id: 1,
+                    instance_views: instance_views.clone(),
+                    lag_threshold: 1,
                 };
                 let engine = Engine::new(context.with_label(&uid), config).await;
 
@@ -493,6 +504,8 @@ mod tests {
                 proposal_offset_ms: 0,
                 gatling_tx: None,
                 gatling_instance_id: 1,
+                instance_views: instance_views.clone(),
+                lag_threshold: 1,
             };
             let engine = Engine::new(context.with_label(&uid), config).await;
 
@@ -596,6 +609,9 @@ mod tests {
                 };
                 link_validators(&mut oracle, &validators, link, None).await;
 
+                // Create shared state for tracking instance views (one consensus instance in these tests)
+                let instance_views: Arc<Vec<AtomicU64>> = Arc::new(vec![AtomicU64::new(0)]);
+
                 // Create instances
                 let mut public_keys = HashSet::new();
                 for (idx, signer) in signers.into_iter().enumerate() {
@@ -633,6 +649,8 @@ mod tests {
                         proposal_offset_ms: 0,
                         gatling_tx: None,
                         gatling_instance_id: 1,
+                        instance_views: instance_views.clone(),
+                        lag_threshold: 1,
                     };
                     let engine = Engine::new(context.with_label(&uid), config).await;
 
@@ -772,6 +790,9 @@ mod tests {
             // Define mock indexer
             let indexer = Mock::new("", identity);
 
+            // Create shared state for tracking instance views (one consensus instance in these tests)
+            let instance_views: Arc<Vec<AtomicU64>> = Arc::new(vec![AtomicU64::new(0)]);
+
             // Create instances
             let mut public_keys = HashSet::new();
             for (idx, signer) in signers.into_iter().enumerate() {
@@ -809,6 +830,8 @@ mod tests {
                     proposal_offset_ms: 0,
                     gatling_tx: None,
                     gatling_instance_id: 1,
+                    instance_views: instance_views.clone(),
+                    lag_threshold: 1,
                 };
                 let engine = Engine::new(context.with_label(&uid), config).await;
 
