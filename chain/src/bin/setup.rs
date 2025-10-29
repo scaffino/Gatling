@@ -339,8 +339,9 @@ fn generate_local(
     println!("To start validators, run:");
     for (name, peer_config_file, _) in &configurations {
         let path = format!("{output}/{peer_config_file}");
-        let command =
-            format!("cargo run --bin {BINARY_NAME} -- --peers={peers_path} --config={path}");
+        let command = format!(
+            "cargo run --bin {BINARY_NAME} -- --peers={peers_path} --config={path} --gatling --consensus-instances 5"
+        );
         println!("{name}: {command}");
     }
     println!("To view metrics, run:");
