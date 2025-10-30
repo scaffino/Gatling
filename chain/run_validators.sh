@@ -46,7 +46,7 @@ MAX=4
 COUNT=0
 for CFG in "${VALIDATOR_CONFIGS[@]}"; do
   REL_CFG="${CFG}"
-  CMD="cd '${REPO_ROOT}/chain' && cargo run --bin validator -- --peers='${PEERS_FILE}' --config='${REL_CFG}' --gatling --consensus-instances 5"
+  CMD="cd '${REPO_ROOT}/chain' && cargo run --bin validator -- --peers='${PEERS_FILE}' --config='${REL_CFG}' --gatling --consensus-instances 2"
   CMDS+=("${CMD}")
   COUNT=$((COUNT+1))
   [[ ${COUNT} -ge ${MAX} ]] && break

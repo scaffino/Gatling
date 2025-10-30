@@ -116,7 +116,7 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
         // Compute genesis digest
         self.hasher.update(GENESIS);
         let genesis_parent = self.hasher.finalize();
-        let genesis = Block::new(genesis_parent, 0, 0, Vec::new());
+        let genesis = Block::new(genesis_parent, 0, 0, 0, Vec::new());
         let genesis_digest = genesis.digest();
         let built: Option<(View, Block)> = None;
         let built = Arc::new(Mutex::new(built));
@@ -187,7 +187,7 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                                         current = parent.timestamp + 1;
                                     }
                                     let block_height = parent.height + 1;
-                                    let block = Block::new(parent.digest(), block_height, current, transactions.clone());
+                                    let block = Block::new(parent.digest(), block_height, current, view as u64, transactions.clone());
                                     let digest = block.digest();
                                     
                                     // Mark transactions as included globally
@@ -366,6 +366,65 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                     // After an unclean shutdown, it is possible that the application may be asked to process a block it has already seen (which it can simply ignore).
                     let engine_id = self.engine_id.clone();
                     let tx_count = block.transactions.len();
+
+                    // Recursively finalize any missing ancestors before finalizing this block
+                    // Determine chain of missing ancestors by walking parents until we hit an already finalized block
+                    let mut missing_ancestors: Vec<Block> = Vec::new();
+                    let mut cursor_digest = block.parent;
+                    // Walk back through parents fetching by digest only
+                    while cursor_digest != genesis_digest {
+                        // Stop if we've already seen this ancestor finalized
+                        if self.finalized_seen.contains(&cursor_digest.to_vec()) {
+                            break;
+                        }
+                        // Fetch ancestor block
+                        match marshal.subscribe(None, cursor_digest).await.await {
+                            Ok(ancestor) => {
+                                // If ancestor already counted, stop
+                                if self.finalized_seen.contains(&ancestor.digest().to_vec()) {
+                                    break;
+                                }
+                                missing_ancestors.push(ancestor.clone());
+                                cursor_digest = ancestor.parent;
+                            }
+                            Err(_) => {
+                                // Could not fetch ancestor; stop attempting to synthesize
+                                break;
+                            }
+                        }
+                    }
+                    // Finalize ancestors in ascending height order
+                    missing_ancestors.reverse();
+                    for anc in missing_ancestors {
+                        let anc_tx_count = anc.transactions.len();
+                        // Send to gatling if enabled
+                        if let Some(ref gatling_tx) = self.gatling_tx {
+                            let event = crate::engine::GatlingEvent {
+                                instance_id: self.gatling_instance_id,
+                                view: anc.view as u64,
+                                block: anc.clone(),
+                            };
+                            let _ = gatling_tx.unbounded_send(event);
+                        }
+                        // Record metrics only once per unique block digest
+                        let anc_digest = anc.digest();
+                        if self.finalized_seen.insert(anc_digest.to_vec()) {
+                            // Use block.timestamp as proposal time and current epoch as finalization time
+                            self.finalized_blocks_counter.inc();
+                            let now_ms = self.context.current().epoch_millis();
+                            let latency_ms = now_ms.saturating_sub(anc.timestamp);
+                            self.block_latency_ms_histogram.observe(latency_ms as f64);
+                        }
+                        // Log synthetic finalization (treat like real)
+                        info!(
+                            "[{}] Validator {} finalized block {} (view {}) with {} transactions",
+                            engine_id,
+                            self.validator_index,
+                            anc.height,
+                            anc.view,
+                            anc_tx_count
+                        );
+                    }
                     
                     // Update shared view tracking for lag detection
                     // Convert 1-based instance ID to 0-based index
@@ -379,14 +438,11 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                         }
                     }
                     
-                    // Use the view from the message (extracted from consensus proof by FinalizationPusher)
-                    let block_view = view;
-                    
                     // Send finalized block to gatling thread if enabled
                     if let Some(ref gatling_tx) = self.gatling_tx {
                         let event = crate::engine::GatlingEvent {
                             instance_id: self.gatling_instance_id,
-                            view,
+                            view: block.view as u64,
                             block: block.clone(),
                         };
                         if let Err(e) = gatling_tx.unbounded_send(event) {
@@ -400,7 +456,7 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                         for tx in &block.transactions {
                             let tx_id = tx.digest();
                             info!("[{}] Transaction {:?} (timestamp: {} ms) is now final in block {} (view {})", 
-                                  engine_id, tx_id, tx.timestamp, block.height, block_view);
+                                  engine_id, tx_id, tx.timestamp, block.height, block.view);
                         }
                     }
                     
@@ -414,7 +470,7 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                         self.block_latency_ms_histogram.observe(latency_ms as f64);
                     }
                     info!("[{}] Validator {} finalized block {} (view {}) with {} transactions",
-                          engine_id, self.validator_index, block.height, block_view, tx_count);
+                          engine_id, self.validator_index, block.height, block.view, tx_count);
                 }
                 Message::SubmitTransaction { transaction } => {
                     // Verify transaction signature before adding to mempool
