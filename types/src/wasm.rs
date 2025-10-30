@@ -26,6 +26,7 @@ pub struct BlockJs {
     pub parent: Vec<u8>,
     pub height: u64,
     pub timestamp: u64,
+    pub view: u64,
     pub digest: Vec<u8>,
 }
 
@@ -77,6 +78,7 @@ pub fn parse_notarized(identity: Vec<u8>, bytes: Vec<u8>) -> JsValue {
             parent: notarized.block.parent.to_vec(),
             height: notarized.block.height,
             timestamp: notarized.block.timestamp,
+            view: notarized.block.view,
             digest: notarized.block.digest().to_vec(),
         },
     };
@@ -103,6 +105,7 @@ pub fn parse_finalized(identity: Vec<u8>, bytes: Vec<u8>) -> JsValue {
             parent: finalized.block.parent.to_vec(),
             height: finalized.block.height,
             timestamp: finalized.block.timestamp,
+            view: finalized.block.view,
             digest: finalized.block.digest().to_vec(),
         },
     };
@@ -118,6 +121,7 @@ pub fn parse_block(bytes: Vec<u8>) -> JsValue {
         parent: block.parent.to_vec(),
         height: block.height,
         timestamp: block.timestamp,
+        view: block.view,
         digest: block.digest().to_vec(),
     };
     serde_wasm_bindgen::to_value(&block_js).unwrap_or(JsValue::NULL)

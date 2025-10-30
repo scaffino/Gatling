@@ -63,7 +63,7 @@ mod tests {
 
         // Create a block
         let digest = Sha256::hash(b"hello world");
-        let block = Block::new(digest, 10, 100, Vec::new());
+        let block = Block::new(digest, 10, 100, 8, Vec::new());
         let proposal = Proposal::new(11, 8, block.digest());
 
         // Create a notarization
@@ -103,7 +103,7 @@ mod tests {
 
         // Create a block
         let digest = Sha256::hash(b"hello world");
-        let block = Block::new(digest, 10, 100, Vec::new());
+        let block = Block::new(digest, 10, 100, 8, Vec::new());
         let proposal = Proposal::new(11, 8, block.digest());
 
         // Create a finalization

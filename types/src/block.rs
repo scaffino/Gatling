@@ -21,6 +21,9 @@ pub struct Block {
     /// The timestamp of the block (in milliseconds since the Unix epoch).
     pub timestamp: u64,
 
+    /// The view in which the proposer cast the proposal for this block.
+    pub view: u64,
+
     /// Transactions included in this block.
     pub transactions: Vec<Transaction>,
 
@@ -29,24 +32,26 @@ pub struct Block {
 }
 
 impl Block {
-    fn compute_digest(parent: &Digest, height: u64, timestamp: u64, transactions: &[Transaction]) -> Digest {
+    fn compute_digest(parent: &Digest, height: u64, timestamp: u64, view: u64, transactions: &[Transaction]) -> Digest {
         let mut hasher = Sha256::new();
         hasher.update(parent);
         hasher.update(&height.to_be_bytes());
         hasher.update(&timestamp.to_be_bytes());
+        hasher.update(&view.to_be_bytes());
         for transaction in transactions {
             hasher.update(&transaction.digest());
         }
         hasher.finalize()
     }
 
-    pub fn new(parent: Digest, height: u64, timestamp: u64, transactions: Vec<Transaction>) -> Self {
+    pub fn new(parent: Digest, height: u64, timestamp: u64, view: u64, transactions: Vec<Transaction>) -> Self {
         assert!(transactions.len() <= MAX_BLOCK_TRANSACTIONS);
-        let digest = Self::compute_digest(&parent, height, timestamp, &transactions);
+        let digest = Self::compute_digest(&parent, height, timestamp, view, &transactions);
         Self {
             parent,
             height,
             timestamp,
+            view,
             transactions,
             digest,
         }
@@ -58,6 +63,7 @@ impl Write for Block {
         self.parent.write(writer);
         UInt(self.height).write(writer);
         UInt(self.timestamp).write(writer);
+        UInt(self.view).write(writer);
         self.transactions.write(writer);
     }
 }
@@ -69,17 +75,19 @@ impl Read for Block {
         let parent = Digest::read(reader)?;
         let height = UInt::read(reader)?.into();
         let timestamp = UInt::read(reader)?.into();
+        let view = UInt::read(reader)?.into();
         let transactions = Vec::<Transaction>::read_cfg(
             reader,
             &(RangeCfg::from(0..=MAX_BLOCK_TRANSACTIONS), ()),
         )?;
 
         // Pre-compute the digest
-        let digest = Self::compute_digest(&parent, height, timestamp, &transactions);
+        let digest = Self::compute_digest(&parent, height, timestamp, view, &transactions);
         Ok(Self {
             parent,
             height,
             timestamp,
+            view,
             transactions,
             digest,
         })
@@ -91,6 +99,7 @@ impl EncodeSize for Block {
         self.parent.encode_size()
             + UInt(self.height).encode_size()
             + UInt(self.timestamp).encode_size()
+            + UInt(self.view).encode_size()
             + self.transactions.encode_size()
     }
 }
