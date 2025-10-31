@@ -44,7 +44,7 @@ pub struct Actor<R: Rng + CryptoRng + Spawner + Metrics + Clock> {
     finalized_blocks_counter: PromCounter<u64>,
     block_latency_ms_histogram: PromHistogram,
     // Track finalized blocks we've already recorded to avoid double-counting
-    finalized_seen: HashSet<Vec<u8>>,
+    finalized_seen: Arc<Mutex<HashSet<Vec<u8>>>>,
     // Track transactions included in blocks across all consensus instances (shared)
     included_transactions: Arc<Mutex<HashSet<Digest>>>,
     // Time offset within each second for proposal timing (0-999ms)
@@ -94,7 +94,7 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                 validator_index,
                 finalized_blocks_counter,
                 block_latency_ms_histogram,
-                finalized_seen: HashSet::new(),
+                finalized_seen: Arc::new(Mutex::new(HashSet::new())),
                 included_transactions: config.included_transactions,
                 proposal_offset_ms: config.proposal_offset_ms,
                 gatling_tx: config.gatling_tx,
@@ -172,7 +172,6 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                         let engine_id = self.engine_id.clone();
                         let proposal_offset_ms = self.proposal_offset_ms;
                         let instance_views = self.instance_views.clone();
-                        let current_instance_id = self.gatling_instance_id;
                         let lag_threshold = self.lag_threshold;
                         move |context| async move {
                             let response_closed = OneshotClosedFut::new(&mut response);
@@ -366,64 +365,79 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                     // After an unclean shutdown, it is possible that the application may be asked to process a block it has already seen (which it can simply ignore).
                     let engine_id = self.engine_id.clone();
                     let tx_count = block.transactions.len();
-
-                    // Recursively finalize any missing ancestors before finalizing this block
-                    // Determine chain of missing ancestors by walking parents until we hit an already finalized block
-                    let mut missing_ancestors: Vec<Block> = Vec::new();
-                    let mut cursor_digest = block.parent;
-                    // Walk back through parents fetching by digest only
-                    while cursor_digest != genesis_digest {
-                        // Stop if we've already seen this ancestor finalized
-                        if self.finalized_seen.contains(&cursor_digest.to_vec()) {
-                            break;
-                        }
-                        // Fetch ancestor block
-                        match marshal.subscribe(None, cursor_digest).await.await {
-                            Ok(ancestor) => {
-                                // If ancestor already counted, stop
-                                if self.finalized_seen.contains(&ancestor.digest().to_vec()) {
+                    // Recursively fetch and finalize any missing ancestors in a separate task so we don't block progress
+                    {
+                        let mut marshal = marshal.clone();
+                        let engine_id_clone = engine_id.clone();
+                        let validator_index = self.validator_index;
+                        let gatling_tx = self.gatling_tx.clone();
+                        let gatling_instance_id = self.gatling_instance_id;
+                        let finalized_seen = self.finalized_seen.clone();
+                        let finalized_blocks_counter = self.finalized_blocks_counter.clone();
+                        let block_latency_ms_histogram = self.block_latency_ms_histogram.clone();
+                        let start_parent = block.parent;
+                        let genesis_digest_clone = genesis_digest.clone();
+                        self.context.with_label("finalize_ancestors").spawn(move |context| async move {
+                            // Determine chain of missing ancestors by walking parents until we hit an already finalized block
+                            let mut missing_ancestors: Vec<Block> = Vec::new();
+                            let mut cursor_digest = start_parent;
+                            while cursor_digest != genesis_digest_clone {
+                                // Stop if we've already seen this ancestor finalized
+                                if finalized_seen.lock().unwrap().contains(&cursor_digest.to_vec()) {
                                     break;
                                 }
-                                missing_ancestors.push(ancestor.clone());
-                                cursor_digest = ancestor.parent;
+                                // Fetch ancestor block
+                                match marshal.subscribe(None, cursor_digest).await.await {
+                                    Ok(ancestor) => {
+                                        // If ancestor already counted, stop
+                                        if finalized_seen.lock().unwrap().contains(&ancestor.digest().to_vec()) {
+                                            break;
+                                        }
+                                        cursor_digest = ancestor.parent;
+                                        missing_ancestors.push(ancestor);
+                                    }
+                                    Err(_) => {
+                                        // Could not fetch ancestor; stop attempting to synthesize
+                                        break;
+                                    }
+                                }
                             }
-                            Err(_) => {
-                                // Could not fetch ancestor; stop attempting to synthesize
-                                break;
+
+                            // Finalize ancestors in ascending height order
+                            missing_ancestors.reverse();
+                            for anc in missing_ancestors {
+                                let anc_tx_count = anc.transactions.len();
+                                // Send to gatling if enabled
+                                if let Some(ref gatling_tx) = gatling_tx {
+                                    let event = crate::engine::GatlingEvent {
+                                        instance_id: gatling_instance_id,
+                                        view: anc.view as u64,
+                                        block: anc.clone(),
+                                    };
+                                    let _ = gatling_tx.unbounded_send(event);
+                                }
+                                // Record metrics only once per unique block digest
+                                let anc_digest = anc.digest();
+                                let mut seen = finalized_seen.lock().unwrap();
+                                if seen.insert(anc_digest.to_vec()) {
+                                    finalized_blocks_counter.inc();
+                                    let now_ms = context.current().epoch_millis();
+                                    let latency_ms = now_ms.saturating_sub(anc.timestamp);
+                                    block_latency_ms_histogram.observe(latency_ms as f64);
+                                }
+                                drop(seen);
+
+                                // Log synthetic finalization (treat like real)
+                                info!(
+                                    "[{}] Validator {} finalized block {} (view {}) with {} transactions",
+                                    engine_id_clone,
+                                    validator_index,
+                                    anc.height,
+                                    anc.view,
+                                    anc_tx_count
+                                );
                             }
-                        }
-                    }
-                    // Finalize ancestors in ascending height order
-                    missing_ancestors.reverse();
-                    for anc in missing_ancestors {
-                        let anc_tx_count = anc.transactions.len();
-                        // Send to gatling if enabled
-                        if let Some(ref gatling_tx) = self.gatling_tx {
-                            let event = crate::engine::GatlingEvent {
-                                instance_id: self.gatling_instance_id,
-                                view: anc.view as u64,
-                                block: anc.clone(),
-                            };
-                            let _ = gatling_tx.unbounded_send(event);
-                        }
-                        // Record metrics only once per unique block digest
-                        let anc_digest = anc.digest();
-                        if self.finalized_seen.insert(anc_digest.to_vec()) {
-                            // Use block.timestamp as proposal time and current epoch as finalization time
-                            self.finalized_blocks_counter.inc();
-                            let now_ms = self.context.current().epoch_millis();
-                            let latency_ms = now_ms.saturating_sub(anc.timestamp);
-                            self.block_latency_ms_histogram.observe(latency_ms as f64);
-                        }
-                        // Log synthetic finalization (treat like real)
-                        info!(
-                            "[{}] Validator {} finalized block {} (view {}) with {} transactions",
-                            engine_id,
-                            self.validator_index,
-                            anc.height,
-                            anc.view,
-                            anc_tx_count
-                        );
+                        });
                     }
                     
                     // Update shared view tracking for lag detection
@@ -462,7 +476,7 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                     
                     // Record metrics for finalized block only once per unique block digest
                     let digest = block.digest();
-                    if self.finalized_seen.insert(digest.to_vec()) {
+                    if self.finalized_seen.lock().unwrap().insert(digest.to_vec()) {
                         // Use block.timestamp as proposal time and current epoch as finalization time
                         self.finalized_blocks_counter.inc();
                         let now_ms = self.context.current().epoch_millis();
