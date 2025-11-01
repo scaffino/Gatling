@@ -295,6 +295,10 @@ impl<
             impl Sender<PublicKey = PublicKey>,
             impl Receiver<PublicKey = PublicKey>,
         ),
+        ancestor_network: (
+            impl Sender<PublicKey = PublicKey>,
+            impl Receiver<PublicKey = PublicKey>,
+        ),
     ) -> Handle<()> {
         self.context.clone().spawn(|_| {
             self.run(
@@ -303,6 +307,7 @@ impl<
                 resolver_network,
                 broadcast_network,
                 backfill_network,
+                ancestor_network,
             )
         })
     }
@@ -330,9 +335,13 @@ impl<
             impl Sender<PublicKey = PublicKey>,
             impl Receiver<PublicKey = PublicKey>,
         ),
+        ancestor_network: (
+            impl Sender<PublicKey = PublicKey>,
+            impl Receiver<PublicKey = PublicKey>,
+        ),
     ) {
         // Start the application
-        let application_handle = self.application.start(self.marshal_mailbox);
+        let application_handle = self.application.start(self.marshal_mailbox, ancestor_network);
 
         // Start the buffer
         let buffer_handle = self.buffer.start(broadcast_network);

@@ -32,6 +32,7 @@ const RESOLVER_CHANNEL: u32 = 2;
 const BROADCASTER_CHANNEL: u32 = 3;
 const BACKFILL_BY_DIGEST_CHANNEL: u32 = 4;
 const TRANSACTION_CHANNEL: u32 = 5;
+const ANCESTOR_CHANNEL: u32 = 6;
 
 // Timeouts tuned for 1 proposal per second with rotating leaders
 // Goal: Each view completes in ~1 second, leader proposes at second boundary
@@ -467,6 +468,7 @@ fn main() {
         let resolver_limit = Quota::per_second(NonZeroU32::new(128).unwrap());
         let broadcaster_limit = Quota::per_second(NonZeroU32::new(8).unwrap());
         let backfill_quota = Quota::per_second(NonZeroU32::new(8).unwrap());
+        let ancestor_quota = Quota::per_second(NonZeroU32::new(16).unwrap());
         let transaction_limit = Quota::per_second(NonZeroU32::new(256).unwrap());
 
         let mut consensus_channels = Vec::new();
@@ -478,14 +480,16 @@ fn main() {
             let resolver_channel = base_channel + RESOLVER_CHANNEL;
             let broadcaster_channel = base_channel + BROADCASTER_CHANNEL;
             let backfill_channel = base_channel + BACKFILL_BY_DIGEST_CHANNEL;
+            let ancestor_channel = base_channel + ANCESTOR_CHANNEL;
 
             let pending = network.register(pending_channel, pending_limit, config.message_backlog);
             let recovered = network.register(recovered_channel, recovered_limit, config.message_backlog);
             let resolver = network.register(resolver_channel, resolver_limit, config.message_backlog);
             let broadcaster = network.register(broadcaster_channel, broadcaster_limit, config.message_backlog);
             let backfill = network.register(backfill_channel, backfill_quota, config.message_backlog);
+            let ancestor = network.register(ancestor_channel, ancestor_quota, config.message_backlog);
 
-            consensus_channels.push((pending, recovered, resolver, broadcaster, backfill));
+            consensus_channels.push((pending, recovered, resolver, broadcaster, backfill, ancestor));
         }
 
         // Register a shared transaction channel for gossip (shared across all consensus instances)
@@ -683,8 +687,8 @@ fn main() {
         // Start all independent consensus instances
         let mut started_consensus = Vec::new();
         for (_i, engine) in consensus_engines.into_iter().enumerate() {
-            let (pending, recovered, resolver, broadcaster, backfill) = consensus_channels.remove(0);
-            let started_engine = engine.start(pending, recovered, resolver, broadcaster, backfill);
+            let (pending, recovered, resolver, broadcaster, backfill, ancestor) = consensus_channels.remove(0);
+            let started_engine = engine.start(pending, recovered, resolver, broadcaster, backfill, ancestor);
             started_consensus.push(started_engine);
         }
 

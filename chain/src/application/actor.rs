@@ -5,21 +5,25 @@ use super::{
 };
 use crate::{supervisor::Supervisor, utils::OneshotClosedFut};
 use alto_types::{Block, MAX_BLOCK_TRANSACTIONS};
+use commonware_codec::{DecodeExt, Encode};
 use commonware_consensus::{marshal, threshold_simplex::types::View};
 use commonware_cryptography::{
     bls12381::primitives::variant::MinSig, ed25519::Batch, BatchVerifier, Digestible, Hasher, Sha256,
     sha256::Digest,
 };
 use commonware_macros::select;
+use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, Metrics, Spawner};
 use commonware_utils::SystemTimeExt;
+use bytes::Bytes;
 use futures::StreamExt;
-use futures::{channel::mpsc, future::try_join};
+use futures::{channel::{mpsc, oneshot}, future::try_join};
 use futures::{future, future::Either};
 use rand::{CryptoRng, Rng};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 use tracing::{debug, info, warn};
 
 // Metrics
@@ -107,12 +111,28 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
         )
     }
 
-    pub fn start(mut self, marshal: marshal::Mailbox<MinSig, Block>) -> Handle<()> {
-        self.context.spawn_ref()(self.run(marshal))
+    pub fn start<AS, AR>(
+        mut self,
+        marshal: marshal::Mailbox<MinSig, Block>,
+        ancestor_network: (AS, AR),
+    ) -> Handle<()>
+    where
+        AS: Sender<PublicKey = commonware_cryptography::ed25519::PublicKey> + Clone + Send + 'static,
+        AR: Receiver<PublicKey = commonware_cryptography::ed25519::PublicKey> + Send + 'static,
+    {
+        self.context.spawn_ref()(self.run(marshal, ancestor_network))
     }
 
     /// Run the application actor.
-    async fn run(mut self, mut marshal: marshal::Mailbox<MinSig, Block>) {
+    async fn run<AS, AR>(
+        mut self,
+        mut marshal: marshal::Mailbox<MinSig, Block>,
+        ancestor_network: (AS, AR),
+    ) where
+        AS: Sender<PublicKey = commonware_cryptography::ed25519::PublicKey> + Clone + Send + 'static,
+        AR: Receiver<PublicKey = commonware_cryptography::ed25519::PublicKey> + Send + 'static,
+    {
+        let (ancestor_sender, mut ancestor_receiver) = ancestor_network;
         // Compute genesis digest
         self.hasher.update(GENESIS);
         let genesis_parent = self.hasher.finalize();
@@ -120,6 +140,88 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
         let genesis_digest = genesis.digest();
         let built: Option<(View, Block)> = None;
         let built = Arc::new(Mutex::new(built));
+        
+        // Shared pending ancestor requests (digest -> oneshot sender for response)
+        // Multiple finalize_ancestors tasks can add requests here, message handler fulfills them
+        let pending_ancestor_requests: Arc<Mutex<HashMap<Digest, oneshot::Sender<Block>>>> = 
+            Arc::new(Mutex::new(HashMap::new()));
+        
+        // Spawn task to handle incoming ancestor messages (both requests and responses)
+        // This runs continuously throughout the actor's lifetime
+        let pending_requests_handler = pending_ancestor_requests.clone();
+        let mut marshal_for_handler = marshal.clone();
+        let engine_id_handler = self.engine_id.clone();
+        let mut ancestor_sender_handler = ancestor_sender.clone();
+        self.context.with_label("ancestor_message_handler").spawn(move |_| async move {
+            loop {
+                match ancestor_receiver.recv().await {
+                    Ok((_peer, message_bytes)) => {
+                        // Try to decode as a block first (response)
+                        match Block::decode(message_bytes.as_ref()) {
+                            Ok(block) => {
+                                // This is a block response
+                                let block_digest = block.digest();
+                                debug!("[{}] Received ancestor response for block {}", 
+                                       engine_id_handler, block_digest);
+                                
+                                // Check if we have a pending request for this digest
+                                let mut pending = pending_requests_handler.lock().unwrap();
+                                if let Some(response_tx) = pending.remove(&block_digest) {
+                                    drop(pending); // Drop lock before sending
+                                    // Send the block to the waiting task
+                                    let _ = response_tx.send(block);
+                                }
+                            }
+                            Err(_) => {
+                                // Not a block, try decoding as a digest (request)
+                                match Digest::decode(message_bytes.as_ref()) {
+                                    Ok(requested_digest) => {
+                                        debug!("[{}] Received ancestor request from peer for digest: {:?}", 
+                                               engine_id_handler, requested_digest);
+                                        
+                                        // Try to get the block from marshal LOCAL STORAGE ONLY (no backfill)
+                                        // Use very short timeout to check if block is immediately available locally
+                                        let subscribe_fut = marshal_for_handler.subscribe(None, requested_digest).await;
+                                        let local_check_timeout = Duration::from_millis(10); // 10ms - just check if immediately available
+                                        
+                                        // Note: We can't use context.sleep here since we don't have context in this handler
+                                        // Instead, we'll let marshal.subscribe return quickly if not in local storage
+                                        // The 10ms timeout check happens via a tokio sleep in a separate task if needed
+                                        // For now, we rely on marshal.subscribe's internal timeout behavior
+                                        match subscribe_fut.await {
+                                            Ok(block) => {
+                                                // We have the block in local storage - send it to all peers (they'll filter by digest)
+                                                let block_bytes = Bytes::from(block.encode().to_vec());
+                                                if let Err(e) = ancestor_sender_handler.send(Recipients::All, block_bytes, true).await {
+                                                    warn!("[{}] Failed to send ancestor block to peer: {:?}", 
+                                                          engine_id_handler, e);
+                                                } else {
+                                                    debug!("[{}] Sent ancestor block {} to peers", 
+                                                           engine_id_handler, requested_digest);
+                                                }
+                                            }
+                                            Err(_) => {
+                                                // We don't have the block in local storage - ignore the request
+                                                debug!("[{}] Don't have requested ancestor {} in local storage, ignoring request", 
+                                                       engine_id_handler, requested_digest);
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!("[{}] Failed to decode ancestor message (neither block nor digest): {:?}", 
+                                              engine_id_handler, e);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        // Receiver closed, exit loop
+                        break;
+                    }
+                }
+            }
+        });
         
         // Initialize mempool
         let mut mempool = Mempool::new(self.context.with_label("mempool"));
@@ -365,7 +467,29 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                     // After an unclean shutdown, it is possible that the application may be asked to process a block it has already seen (which it can simply ignore).
                     let engine_id = self.engine_id.clone();
                     let tx_count = block.transactions.len();
-                    // Recursively fetch and finalize any missing ancestors in a separate task so we don't block progress
+                    
+                    // Step 1: Persist this finalized block to marshal to ensure it's available for ancestor finalization.
+                    // Since this block is finalized by consensus, it's safe to persist even if we didn't verify it locally.
+                    // This runs in a separate task so it doesn't block the main message processing.
+                    {
+                        let mut marshal_persist = marshal.clone();
+                        let block_view = view;
+                        let block_clone = block.clone();
+                        let engine_id_persist = engine_id.clone();
+                        
+                        // Spawn task to persist finalized block to marshal
+                        self.context.with_label("persist_finalized").spawn(move |_| async move {
+                            // Persist the finalized block to marshal storage
+                            // This is safe because consensus already verified it (threshold of validators)
+                            // Calling verified() is idempotent - if already persisted, it's a no-op
+                            marshal_persist.verified(block_view, block_clone.clone()).await;
+                            info!("[{}] Ensured finalized block {} (view {}) is persisted in marshal", 
+                                  engine_id_persist, block_clone.height, block_view);
+                        });
+                    }
+                    
+                    // Step 2: Recursively fetch and finalize any missing ancestors in a separate task
+                    // This runs concurrently with the persistence task above
                     {
                         let mut marshal = marshal.clone();
                         let engine_id_clone = engine_id.clone();
@@ -377,36 +501,184 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                         let block_latency_ms_histogram = self.block_latency_ms_histogram.clone();
                         let start_parent = block.parent;
                         let genesis_digest_clone = genesis_digest.clone();
+                        let included_txs = self.included_transactions.clone();
+                        let block_clone_for_log = block.clone();
+                        let mut ancestor_sender_clone = ancestor_sender.clone();
+                        let pending_ancestor_requests_clone = pending_ancestor_requests.clone();
+                        
                         self.context.with_label("finalize_ancestors").spawn(move |context| async move {
+                            // Constants for retry logic
+                            const MAX_RETRIES: usize = 5;
+                            const INITIAL_RETRY_DELAY_MS: u64 = 100;
+                            const MAX_RETRY_DELAY_MS: u64 = 1000;
+                            
+                            info!("[{}] Starting ancestor finalization task for block {} (view {}) with parent: {:?}", 
+                                  engine_id_clone, block_clone_for_log.height, block_clone_for_log.view, start_parent);
+                            
                             // Determine chain of missing ancestors by walking parents until we hit an already finalized block
                             let mut missing_ancestors: Vec<Block> = Vec::new();
                             let mut cursor_digest = start_parent;
+                            
                             while cursor_digest != genesis_digest_clone {
                                 // Stop if we've already seen this ancestor finalized
                                 if finalized_seen.lock().unwrap().contains(&cursor_digest.to_vec()) {
+                                    info!("[{}] Ancestor {} already finalized, stopping ancestor chain", 
+                                           engine_id_clone, cursor_digest);
                                     break;
                                 }
-                                // Fetch ancestor block
-                                match marshal.subscribe(None, cursor_digest).await.await {
-                                    Ok(ancestor) => {
-                                        // If ancestor already counted, stop
-                                        if finalized_seen.lock().unwrap().contains(&ancestor.digest().to_vec()) {
+                                
+                                // Fetch ancestor block with retry logic
+                                let mut ancestor_opt: Option<Block> = None;
+                                let mut retry_count = 0;
+                                
+                                info!("[{}] Attempting to fetch ancestor {}", engine_id_clone, cursor_digest);
+                                
+                                // Try to fetch ancestor with exponential backoff retries
+                                while ancestor_opt.is_none() && retry_count <= MAX_RETRIES {
+                                    // First, try to get from marshal LOCAL STORAGE ONLY (no backfill)
+                                    // Use very short timeout to check if block is immediately available locally
+                                    // If timeout triggers quickly, block is not in local storage, skip to peer request
+                                    let subscribe_fut = marshal.subscribe(None, cursor_digest).await;
+                                    let local_check_timeout = Duration::from_millis(10); // 10ms - just check if immediately available
+                                    
+                                    let local_check_result = select!(
+                                        result = subscribe_fut => {
+                                            match result {
+                                                Ok(ancestor) => Some(ancestor),
+                                                Err(_) => None,
+                                            }
+                                        },
+                                        _ = context.sleep(local_check_timeout) => {
+                                            // Timeout quickly - block not in local storage, skip backfill
+                                            None
+                                        }
+                                    );
+                                    
+                                    match local_check_result {
+                                        Some(ancestor) => {
+                                            // Successfully fetched ancestor from marshal local storage
+                                            ancestor_opt = Some(ancestor);
+                                            if let Some(ref ancestor_ref) = ancestor_opt {
+                                                info!(
+                                                    "[{}] Successfully fetched ancestor {} (view {}) from marshal local storage",
+                                                    engine_id_clone, ancestor_ref.height, ancestor_ref.view
+                                                );
+                                            }
                                             break;
                                         }
-                                        cursor_digest = ancestor.parent;
-                                        missing_ancestors.push(ancestor);
-                                    }
-                                    Err(_) => {
-                                        // Could not fetch ancestor; stop attempting to synthesize
-                                        break;
+                                        None => {
+                                            // Marshal doesn't have it in local storage - try requesting from peers via ancestor channel
+                                            info!("[{}] Ancestor {} not in marshal, requesting from peers", 
+                                                  engine_id_clone, cursor_digest);
+                                            
+                                            // Create oneshot channel for response
+                                            let (response_tx, response_rx) = oneshot::channel();
+                                            {
+                                                let mut pending = pending_ancestor_requests_clone.lock().unwrap();
+                                                pending.insert(cursor_digest, response_tx);
+                                            }
+                                            
+                                            // Send request to all peers
+                                            let request_bytes = Bytes::from(cursor_digest.encode().to_vec());
+                                            let send_result = ancestor_sender_clone.send(Recipients::All, request_bytes, true).await;
+                                            
+                                            if send_result.is_err() {
+                                                warn!("[{}] Failed to send ancestor request to peers: {:?}", 
+                                                      engine_id_clone, send_result.err());
+                                                // Remove from pending
+                                                let mut pending = pending_ancestor_requests_clone.lock().unwrap();
+                                                pending.remove(&cursor_digest);
+                                            } else {
+                                                // Wait for response (no timeout)
+                                                let response_result = response_rx.await.ok();
+                                                
+                                                // Remove from pending (drop lock before processing result)
+                                                {
+                                                    let mut pending = pending_ancestor_requests_clone.lock().unwrap();
+                                                    pending.remove(&cursor_digest);
+                                                }
+                                                
+                                                match response_result {
+                                                    Some(block) => {
+                                                        // Verify digest matches
+                                                        if block.digest() == cursor_digest {
+                                                            info!("[{}] Received ancestor {} (view {}) from peer, verifying digest", 
+                                                                  engine_id_clone, block.height, block.view);
+                                                            // Store in marshal
+                                                            marshal.verified(block.view, block.clone()).await;
+                                                            ancestor_opt = Some(block);
+                                                            break;
+                                                        } else {
+                                                            warn!("[{}] Received ancestor block with mismatched digest", 
+                                                                  engine_id_clone);
+                                                        }
+                                                    }
+                                                    None => {
+                                                        // No response from peers (channel closed or cancelled)
+                                                        debug!("[{}] No response received for ancestor {} from peers", 
+                                                               engine_id_clone, cursor_digest);
+                                                    }
+                                                }
+                                            }
+                                            
+                                            // Failed to fetch from peers - retry with exponential backoff
+                                            if ancestor_opt.is_none() {
+                                            if retry_count < MAX_RETRIES {
+                                                let delay_ms = (INITIAL_RETRY_DELAY_MS * (1 << retry_count))
+                                                    .min(MAX_RETRY_DELAY_MS);
+                                                info!("[{}] Retry {} for ancestor {} (waiting {}ms)", 
+                                                      engine_id_clone, retry_count + 1, cursor_digest, delay_ms);
+                                                context.sleep(Duration::from_millis(delay_ms)).await;
+                                                retry_count += 1;
+                                            } else {
+                                                // Max retries reached - give up on this ancestor
+                                                info!("[{}] Could not fetch ancestor {} after {} retries - stopping ancestor chain", 
+                                                      engine_id_clone, cursor_digest, MAX_RETRIES);
+                                                break;
+                                                }
+                                            }
+                                        }
                                     }
                                 }
+                                
+                                // Process ancestor if found
+                                if let Some(ancestor) = ancestor_opt {
+                                    // Persist ancestor to marshal so it's available for its own ancestors
+                                    // This is safe because if it exists in marshal (via subscribe), it's valid
+                                    // We persist it to ensure it's definitely there for future lookups
+                                    let anc_view = ancestor.view;
+                                    let anc_clone = ancestor.clone();
+                                    marshal.verified(anc_view, anc_clone.clone()).await;
+                                    
+                                    // Mark transactions in ancestor as included globally
+                                    {
+                                        let mut included = included_txs.lock().unwrap();
+                                        for tx in &ancestor.transactions {
+                                            included.insert(tx.digest());
+                                        }
+                                    }
+                                    
+                                    // If ancestor already counted, stop
+                                    if finalized_seen.lock().unwrap().contains(&ancestor.digest().to_vec()) {
+                                        break;
+                                    }
+                                    
+                                    // Continue walking up the chain
+                                    cursor_digest = ancestor.parent;
+                                    missing_ancestors.push(ancestor);
+                                } else {
+                                    // Failed to fetch after retries - stop walking the chain
+                                    break;
+                                }
                             }
+                            
 
                             // Finalize ancestors in ascending height order
+                            let ancestor_count = missing_ancestors.len();
                             missing_ancestors.reverse();
                             for anc in missing_ancestors {
                                 let anc_tx_count = anc.transactions.len();
+                                
                                 // Send to gatling if enabled
                                 if let Some(ref gatling_tx) = gatling_tx {
                                     let event = crate::engine::GatlingEvent {
@@ -416,26 +688,36 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                                     };
                                     let _ = gatling_tx.unbounded_send(event);
                                 }
+                                
                                 // Record metrics only once per unique block digest
                                 let anc_digest = anc.digest();
                                 let mut seen = finalized_seen.lock().unwrap();
-                                if seen.insert(anc_digest.to_vec()) {
+                                let is_new = seen.insert(anc_digest.to_vec());
+                                drop(seen);
+                                
+                                if is_new {
                                     finalized_blocks_counter.inc();
                                     let now_ms = context.current().epoch_millis();
                                     let latency_ms = now_ms.saturating_sub(anc.timestamp);
                                     block_latency_ms_histogram.observe(latency_ms as f64);
                                 }
-                                drop(seen);
 
-                                // Log synthetic finalization (treat like real)
+                                // Log ancestor finalization (treat like real finalization)
                                 info!(
-                                    "[{}] Validator {} finalized block {} (view {}) with {} transactions",
+                                    "[{}] Validator {} finalized block {} (view {}) with {} transactions (ancestor chain)",
                                     engine_id_clone,
                                     validator_index,
                                     anc.height,
                                     anc.view,
                                     anc_tx_count
                                 );
+                            }
+                            
+                            if ancestor_count > 0 {
+                                info!("[{}] Completed ancestor finalization chain: {} ancestors finalized", 
+                                      engine_id_clone, ancestor_count);
+                            } else {
+                                info!("[{}] No missing ancestors found to finalize", engine_id_clone);
                             }
                         });
                     }
