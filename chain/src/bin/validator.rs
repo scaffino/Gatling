@@ -24,7 +24,7 @@ use std::{
     sync::{Arc, atomic::AtomicU64},
     time::Duration,
 };
-use tracing::{debug, error, info, Level};
+use tracing::{error, info, Level};
 
 const PENDING_CHANNEL: u32 = 0;
 const RECOVERED_CHANNEL: u32 = 1;
@@ -62,6 +62,10 @@ const BLOCKS_FREEZER_TABLE_INITIAL_SIZE: u32 = 2u32.pow(21); // 100MB
 const FINALIZED_FREEZER_TABLE_INITIAL_SIZE: u32 = 2u32.pow(21); // 100MB
 
 /// Gatling thread that orders blocks from all consensus instances by view and instance number.
+/// 
+/// Uses a cursor-based algorithm to finalize blocks strictly in ascending order of (view, instance).
+/// The algorithm maintains a cursor that always points to the top-leftmost unfinalized cell in the
+/// matrix of instances (rows) × views (columns), ensuring strict ordering guarantees.
 async fn gatling_thread(
     mut rx: futures::channel::mpsc::UnboundedReceiver<engine::GatlingEvent>,
     validator_index: usize,
@@ -69,154 +73,167 @@ async fn gatling_thread(
 ) {
     use std::collections::BTreeMap;
     
-    // Per-instance queues of finalized blocks, keyed by view number
-    let mut instance_queues: Vec<BTreeMap<u64, alto_types::Block>> = 
+    // ============================================================================
+    // DATA STRUCTURES
+    // ============================================================================
+    
+    // Per-instance queues of finalized blocks, keyed by view number (from block.view, not proof)
+    // - Some(block) = view that has a finalized block from consensus (directly finalized view)
+    // - None = view marked as finalized without a block (indirectly finalized view) to fill gaps when instances skip views
+    // Note: All blocks are finalized with the same event - what differs is how VIEWS are finalized (directly vs indirectly)
+    let mut instance_queues: Vec<BTreeMap<u64, Option<alto_types::Block>>> = 
         (0..num_instances).map(|_| BTreeMap::new()).collect();
     
-    // Track the highest view we've gatling-finalized for each instance
-    let mut gatling_finalized_views: Vec<u64> = vec![0; num_instances];
+    // Per-instance highest directly finalized view (only tracks views with actual blocks from consensus)
+    // Used to track progress: if finalized_up_to[k] >= v, then all views <= v for instance k are already finalized
+    let mut finalized_up_to: Vec<u64> = vec![0; num_instances];
     
-    // v*: maximum view where all instances have been gatling-finalized (starts at 0)
-    let mut v_star: u64 = 0;
-    // k*: maximum instance (0-indexed) that has been gatling-finalized at view v* + 1
-    // None means no instances finalized at v*+1 yet, Some(k) means instances 0..k have been finalized
-    let mut k_star: Option<usize> = None;
+    // Global cursor position: always points to the next top-leftmost unfinalized cell
+    // Cursor moves lexicographically: (view, instance) = (1,0), (1,1), ..., (1,K-1), (2,0), ...
+    let mut cursor_view: u64 = 1;
+    let mut cursor_instance: usize = 0;
     
     info!("[gatling] Gatling thread started for {} instances", num_instances);
     
+    // ============================================================================
+    // MAIN EVENT LOOP: Process finalized blocks from all instances
+    // ============================================================================
+    
     while let Some(event) = rx.next().await {
-        let instance_idx = event.instance_id - 1; // Convert 1-based to 0-based for indexing
+        // Convert 1-based instance ID to 0-based index
+        let instance_idx = event.instance_id - 1;
         
-        // Add the block to the instance's queue
-        instance_queues[instance_idx].insert(event.view, event.block);
+        // Get view number directly from the block (not from finalization proof)
+        let view = event.block.view;
         
-        // Try to advance v* and k* using the two-phase algorithm
-        loop {
-            // Phase 1: Try to advance v*
-            // Find the maximum v* such that for all v' <= v*+1, all instances k have blocks at view v'
-            // We check if all instances have blocks at view v* + 1 (either explicitly or implicitly via higher views)
-            let next_v_star = v_star + 1;
-            let all_instances_have_next_view = (0..num_instances).all(|k| {
-                // Check if instance has already gatling-finalized this view or higher (implicit finalization)
-                if gatling_finalized_views[k] >= next_v_star {
-                    true
-                } else {
-                    // Check if there's a block in the queue at this view or higher
-                    // If instance has view v >= next_v_star, it implicitly has next_v_star
-                    instance_queues[k].keys().any(|&v| v >= next_v_star)
+        // ========================================================================
+        // STEP 1: Insert the new block and fill any gaps
+        // ========================================================================
+        
+        // Find the highest view we've seen for this instance (either finalized or queued)
+        let highest_queued_view = instance_queues[instance_idx]
+            .keys()
+            .max()
+            .copied()
+            .unwrap_or(0);
+        let highest_seen_view = finalized_up_to[instance_idx].max(highest_queued_view);
+        
+        // If the new block creates a gap (e.g., we have view V and now receive view V+3),
+        // mark the intermediate views as indirectly finalized (no blocks, but views are finalized)
+        if view > highest_seen_view + 1 && highest_seen_view > 0 {
+            for gap_view in (highest_seen_view + 1)..view {
+                if !instance_queues[instance_idx].contains_key(&gap_view) {
+                    instance_queues[instance_idx].insert(gap_view, None); // Indirectly finalized view
                 }
-            });
+            }
+        }
+        
+        // Insert the block into the queue at this view (view is directly finalized with a block)
+        instance_queues[instance_idx].insert(view, Some(event.block));
+        
+        // ========================================================================
+        // STEP 2: Try to finalize as much as possible using cursor-based algorithm
+        // ========================================================================
+        
+        loop {
+            // Safety check: ensure cursor is within valid bounds
+            if cursor_view == 0 || cursor_instance >= num_instances {
+                break;
+            }
             
-            if all_instances_have_next_view {
-                // All instances have consensus-finalized (or gatling-finalized) view v* + 1
-                // Gatling-finalize blocks for all instances at view v* + 1 in order
-                for k in 0..num_instances {
-                    // Only process if we haven't already gatling-finalized this view or higher
-                    if gatling_finalized_views[k] < next_v_star {
-                        // Get block from queue at this exact view (if it exists)
-                        if let Some(block) = instance_queues[k].remove(&next_v_star) {
-                            let instance_id = k + 1; // Convert back to 1-based for display
-                            let tx_count = block.transactions.len();
-                            
-                            // Log the globally finalized block
-                            info!(
-                                "[gatling] Validator {} finalized block {} from instance {} (view {}) with {} transactions",
-                                validator_index, block.height, instance_id, next_v_star, tx_count
-                            );
-                            
-                            // Log each transaction in the block
-                            for tx in &block.transactions {
-                                let tx_id = tx.digest();
-                                info!(
-                                    "[gatling] Transaction {:?} (timestamp: {} ms) is now final in block {} from instance {} (view {})",
-                                    tx_id, tx.timestamp, block.height, instance_id, next_v_star
-                                );
-                            }
-                            
-                            // Update tracking: mark all views up to current as gatling-finalized for this instance
-                            gatling_finalized_views[k] = next_v_star;
-                            
-                            // Remove any pending blocks with views < next_v_star - they are implicitly finalized
-                            let mut views_to_remove = Vec::new();
-                            for (&queued_view, _) in instance_queues[k].iter() {
-                                if queued_view < next_v_star {
-                                    views_to_remove.push(queued_view);
-                                }
-                            }
-                            for &view_to_remove in &views_to_remove {
-                                instance_queues[k].remove(&view_to_remove);
-                                debug!("Removed implicitly finalized block from instance {} at view {} (instance now gatling-finalized view {})", 
-                                       instance_id, view_to_remove, next_v_star);
-                            }
+            // Check if this view has already been finalized
+            // Since finalized_up_to tracks the highest directly finalized view, and finalizing a view
+            // at V implies all views <= V are finalized, we can skip if cursor_view <= finalized_up_to
+            if finalized_up_to[cursor_instance] >= cursor_view {
+                advance_cursor(&mut cursor_view, &mut cursor_instance, num_instances);
+                continue;
+            }
+            
+            // Check what's at the cursor position (view cursor_view for instance cursor_instance)
+            match instance_queues[cursor_instance].remove(&cursor_view) {
+                Some(Some(block)) => {
+                    // ============================================================
+                    // Directly finalized view: view has a block from consensus - finalize it with logging
+                    // ============================================================
+                    
+                    finalize_block_at_view(
+                        &block,
+                        cursor_view,
+                        cursor_instance,
+                        validator_index,
+                        &mut instance_queues[cursor_instance],
+                        &mut finalized_up_to[cursor_instance],
+                    );
+                    
+                    advance_cursor(&mut cursor_view, &mut cursor_instance, num_instances);
+                    continue;
+                }
+                Some(None) => {
+                    // ============================================================
+                    // Indirectly finalized view: view is marked as finalized but has no block
+                    // Just advance cursor (no logging, no update to finalized_up_to)
+                    // ============================================================
+                    
+                    advance_cursor(&mut cursor_view, &mut cursor_instance, num_instances);
+                    continue;
+                }
+                None => {
+                    // No entry at this view - check if instance has moved past it
+                    let has_higher_view = instance_queues[cursor_instance]
+                        .keys()
+                        .any(|&v| v > cursor_view);
+                    
+                    if has_higher_view {
+                        // Instance has moved past cursor_view, so cursor_view is a gap
+                        // Mark this view as indirectly finalized (no block, but view is finalized)
+                        instance_queues[cursor_instance].insert(cursor_view, None);
+                        
+                        advance_cursor(&mut cursor_view, &mut cursor_instance, num_instances);
+                        continue;
                         } else {
-                            // Instance doesn't have a block at this exact view, but has a higher view
-                            // This means the instance has implicitly finalized this view via gap finalization
-                            // Mark it as gatling-finalized at this view (it's already past it)
-                            gatling_finalized_views[k] = next_v_star;
-                            debug!("Instance {} has implicitly finalized view {} (instance has higher views)", k + 1, next_v_star);
-                        }
+                        // Cannot make progress: waiting for block at cursor_view or evidence
+                        // that this instance has moved past it
+                        break;
                     }
                 }
-                v_star = next_v_star;
-                k_star = Some(num_instances - 1); // All instances finalized this view (0-indexed, so num_instances - 1)
-                continue; // Continue loop to check if we can advance further
             }
-            
-            // Phase 2: Try to advance k* (if we can't advance v*)
-            // Find the maximum k such that for all k' <= k, instance k' has finalized view v* + 1
-            // We need to find the next contiguous sequence starting from k* + 1 (or 0 if k* is None)
-            let start_k = match k_star {
-                None => 0, // No instances finalized yet, start from instance 0
-                Some(k) => k + 1, // Continue from the next instance after k*
-            };
-            
-            // Find the maximum consecutive k starting from start_k where all instances have view >= v* + 1
-            let mut new_k_star = match k_star {
-                None => None,
-                Some(k) => Some(k),
-            };
-            
-            for k in start_k..num_instances {
-                // Check if instance k has block at view v* + 1 (either explicitly or implicitly via higher views)
-                let has_block = if gatling_finalized_views[k] >= v_star + 1 {
-                    true
-                    } else {
-                    // Check if there's a block in the queue at view >= v* + 1
-                    instance_queues[k].keys().any(|&v| v >= v_star + 1)
-                };
-                
-                if has_block {
-                    // Instance k has finalized view v* + 1, can extend k* to include it
-                    new_k_star = Some(k);
-                } else {
-                    // Instance k doesn't have view >= v* + 1, can't extend k* further
-                    // Break early - we need contiguous sequence
-                    break;
-                }
-            }
-            
-            // If we found a new k* (or extended it), finalize the instances
-            if let Some(new_k) = new_k_star {
-                if k_star.map_or(true, |old_k| new_k > old_k) {
-                    // Finalize all instances from (k_star + 1) to new_k at view v* + 1
-                    let start_finalize = match k_star {
-                        None => 0,
-                        Some(k) => k + 1,
-                    };
-                    
-                    for next_k_star in start_finalize..=new_k {
-                        // Instance has finalized view v* + 1 (either explicitly or implicitly)
-                        // Gatling-finalize its block at view v* + 1 (if not already done)
-                        if gatling_finalized_views[next_k_star] < v_star + 1 {
-                            // Try to get block from queue at this exact view
-                            if let Some(block) = instance_queues[next_k_star].remove(&(v_star + 1)) {
-                            let instance_id = next_k_star + 1; // Convert back to 1-based for display
+        }
+    }
+    
+    info!("[gatling] Gatling thread stopped");
+}
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+/// Advance the cursor to the next position in lexicographic order.
+/// Moves through instances first, then increments view.
+fn advance_cursor(cursor_view: &mut u64, cursor_instance: &mut usize, num_instances: usize) {
+    *cursor_instance += 1;
+    if *cursor_instance >= num_instances {
+        *cursor_instance = 0;
+        *cursor_view += 1;
+    }
+}
+
+/// Finalize a block at a directly finalized view: log the block and its transactions, update state, and clean up old entries.
+/// This view has a block from consensus (directly finalized view), so we log it and update finalized_up_to.
+fn finalize_block_at_view(
+    block: &alto_types::Block,
+    view: u64,
+    instance_idx: usize,
+    validator_index: usize,
+    queue: &mut std::collections::BTreeMap<u64, Option<alto_types::Block>>,
+    finalized_up_to: &mut u64,
+) {
+    let instance_id = instance_idx + 1; // Convert to 1-based for display
                 let tx_count = block.transactions.len();
                 
-                // Log the globally finalized block
+    // Log the globally finalized block (all blocks are finalized the same way)
                 info!(
                     "[gatling] Validator {} finalized block {} from instance {} (view {}) with {} transactions",
-                                validator_index, block.height, instance_id, v_star + 1, tx_count
+        validator_index, block.height, instance_id, view, tx_count
                 );
                 
                 // Log each transaction in the block
@@ -224,45 +241,22 @@ async fn gatling_thread(
                     let tx_id = tx.digest();
                     info!(
                         "[gatling] Transaction {:?} (timestamp: {} ms) is now final in block {} from instance {} (view {})",
-                                    tx_id, tx.timestamp, block.height, instance_id, v_star + 1
-                                );
-                            }
-                            
-                            // Update tracking: mark all views up to current as gatling-finalized for this instance
-                            gatling_finalized_views[next_k_star] = v_star + 1;
-                            
-                            // Remove any pending blocks with views < v_star + 1 - they are implicitly finalized
-                let mut views_to_remove = Vec::new();
-                            for (&queued_view, _) in instance_queues[next_k_star].iter() {
-                                if queued_view < v_star + 1 {
-                        views_to_remove.push(queued_view);
-                    }
-                }
-                for &view_to_remove in &views_to_remove {
-                                instance_queues[next_k_star].remove(&view_to_remove);
-                                debug!("Removed implicitly finalized block from instance {} at view {} (instance now gatling-finalized view {})", 
-                                       instance_id, view_to_remove, v_star + 1);
-                            }
-                        } else {
-                            // Instance doesn't have a block at this exact view, but has a higher view
-                            // This means the instance has implicitly finalized this view via gap finalization
-                            // Mark it as gatling-finalized at this view (it's already past it)
-                            gatling_finalized_views[next_k_star] = v_star + 1;
-                            debug!("Instance {} has implicitly finalized view {} (instance has higher views)", next_k_star + 1, v_star + 1);
-                        }
-                    }
-                    }
-                    k_star = Some(new_k);
-                    continue; // Continue loop to check if we can advance further
-                }
-            }
-            
-            // No progress possible
-            break;
-        }
+            tx_id, tx.timestamp, block.height, instance_id, view
+        );
     }
     
-    info!("[gatling] Gatling thread stopped");
+    // Update highest directly finalized view (only when a view has a block from consensus)
+    *finalized_up_to = view;
+    
+    // Clean up: remove any entries for views < view (they've already been processed)
+    let views_to_remove: Vec<u64> = queue
+        .keys()
+        .copied()
+        .filter(|&v| v < view)
+        .collect();
+    for view_to_remove in views_to_remove {
+        queue.remove(&view_to_remove);
+    }
 }
 
 fn main() {

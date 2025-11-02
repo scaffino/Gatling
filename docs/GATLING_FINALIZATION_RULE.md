@@ -2,253 +2,209 @@
 
 ## Overview
 
-The gatling finalization logic ensures strict global ordering of blocks across multiple consensus instances using a two-phase algorithm. Blocks are finalized by gatling in strict order: all instances for view 1, then all instances for view 2, and so on. Within each view, instances are finalized in ascending order (0, 1, 2, ..., K-1).
+Gatling combines blocks from multiple consensus instances into a single globally ordered sequence. It enforces strict ordering guarantees: a block at position (view v, instance k) can only be finalized after all blocks at positions (view ≤ v, instance ≤ k) have been finalized in lexicographic order.
 
-## Two-Phase Algorithm
+**Critical distinction**: All blocks are finalized using the same finalization event. What differs is how **views** are finalized:
+- **Directly finalized views**: Views that have a finalized block from consensus
+- **Indirectly finalized views**: Views that are marked as finalized (without blocks) to fill gaps when instances skip views
 
-The algorithm maintains two key variables:
+## The Matrix View
 
-- **v***: The maximum view number where ALL instances have been gatling-finalized. Starts at 0.
-- **k***: The maximum instance (0-indexed) that has been gatling-finalized at view v* + 1. Starts as `None` (no instances finalized at v*+1 yet), becomes `Some(k)` when instances 0..k have been finalized.
+Conceptually, Gatling maintains a 2D matrix where:
+- **Rows** = consensus instances (0, 1, 2, ...)
+- **Columns** = views (1, 2, 3, ...)
+- **Cell (v, k)** = the block (if any) finalized by instance k at view v
 
-When a consensus-finalized block arrives, the algorithm attempts to advance v* and k* using a two-phase approach:
+The algorithm always processes cells in lexicographic order: (1,0), (1,1), ..., (1,K-1), (2,0), (2,1), ...
 
-### Phase 1: Advance v* (Complete View)
-
-If all instances have consensus-finalized (or gatling-finalized) view v* + 1:
-
-1. Gatling-finalize blocks for ALL instances (0 to K-1) at view v* + 1, in order
-2. Set v* = v* + 1
-3. Set k* = K - 1 (all instances have been finalized for this view)
-
-This happens when the system is making synchronized progress across all instances.
-
-### Phase 2: Advance k* (Partial Next View)
-
-If we cannot advance v* (not all instances have view v* + 1 yet), find the maximum contiguous k where all instances k' ≤ k have finalized view v* + 1:
-
-1. Starting from k* + 1 (or 0 if k* is None), find the maximum consecutive k where all instances have view >= v* + 1
-2. Gatling-finalize all instances from (k* + 1) to the new k at view v* + 1 (in order)
-3. Set k* = the new maximum k
-
-This happens when some instances are ahead of others - we finalize all ready instances in a contiguous sequence at the current "head" view, not just one at a time.
-
-## Output Order
-
-The algorithm produces blocks in strict order:
-
-1. All instances [0..K-1] for view 1
-2. All instances [0..K-1] for view 2
-3. ...
-4. All instances [0..K-1] for view v*
-5. Instances [0..k*] for view v* + 1
-
-This creates the ordering: (0,1), (1,1), ..., (K-1,1), (0,2), (1,2), ..., (K-1,2), ..., (0,v*), (1,v*), ..., (K-1,v*), (0,v*+1), ..., (k*,v*+1)
-
-## Implementation Details
-
-### Data Structures
+## Data Structures
 
 ```rust
-// Per-instance queues of consensus-finalized blocks, keyed by view number
-let mut instance_queues: Vec<BTreeMap<u64, Block>> = 
+// Per-instance queues of finalized blocks, keyed by view number (from block.view, not proof)
+// - Some(block) = view that has a finalized block from consensus (directly finalized view)
+// - None = view marked as finalized without a block (indirectly finalized view)
+// Note: All blocks are finalized the same way - what differs is how VIEWS are finalized
+let mut instance_queues: Vec<BTreeMap<u64, Option<Block>>> = 
     (0..num_instances).map(|_| BTreeMap::new()).collect();
 
-// Track the highest view we've gatling-finalized for each instance
-let mut gatling_finalized_views: Vec<u64> = vec![0; num_instances];
+// Per-instance highest directly finalized view (only tracks views with actual blocks from consensus)
+// If finalized_up_to[k] >= v, then all views <= v for instance k are already finalized
+let mut finalized_up_to: Vec<u64> = vec![0; num_instances];
 
-// v*: maximum view where all instances have been gatling-finalized
-let mut v_star: u64 = 0;
-
-// k*: maximum instance (0-indexed) that has been gatling-finalized at view v* + 1
-// None means no instances finalized at v*+1 yet, Some(k) means instances 0..k have been finalized
-let mut k_star: Option<usize> = None;
+// Global cursor for next top-leftmost unfinalized cell
+let mut cursor_view: u64 = 1;
+let mut cursor_instance: usize = 0;
 ```
 
-### Algorithm Pseudocode
+### Key Points:
+1. **`instance_queues[k]`**: Stores blocks and view markers for instance k, keyed by view number
+   - `Some(block)` = directly finalized view (has a block from consensus)
+   - `None` = indirectly finalized view (no block, but view is finalized)
+2. **`finalized_up_to[k]`**: Highest view for instance k that has been directly finalized (has a block)
+   - Only updated when finalizing a view that has a block
+   - If `finalized_up_to[k] = V`, then all views ≤ V for instance k are finalized
+3. **Cursor**: Always points to the next cell to process in lexicographic order
 
+## Algorithm: Detailed Step-by-Step
+
+### Phase 1: When a Block Arrives (GatlingEvent Processing)
+
+When a `GatlingEvent` arrives for instance k with a block at view v:
+
+#### Step 1.1: Extract View Number
+```rust
+let view = event.block.view;  // View comes from block itself, NOT from finalization proof
 ```
-When consensus-finalized block arrives for instance i at view v:
-  1. Add block to instance_queues[i]
+
+#### Step 1.2: Detect and Fill Gaps
+- Find the highest view seen for this instance: `highest_seen_view = max(finalized_up_to[k], highest_queued_view)`
+- If `view > highest_seen_view + 1`, there is a gap between the highest seen view and the new view
+  - Example: Previously had view 5, now receiving view 8 → gap at views 6, 7
+- Action: For each gap view, insert `None` into the queue to mark it as an indirectly finalized view
+- Purpose: Ensures continuity - if an instance jumps from view 5 to 8, views 6-7 are marked as finalized (indirectly) even though they have no blocks
+
+#### Step 1.3: Insert the Block
+```rust
+instance_queues[k].insert(view, Some(block));
+```
+- The block is stored at its view number
+- This view is a directly finalized view (has a block from consensus)
+
+### Phase 2: Cursor-Based Finalization Loop
+
+After inserting the block, the algorithm attempts to finalize as many cells as possible by processing them in strict order:
+
+#### Step 2.1: Cursor Safety Check
+- Ensure cursor is within valid bounds
+- If not, stop processing
+
+#### Step 2.2: Check if View Already Finalized
+```rust
+if finalized_up_to[cursor_instance] >= cursor_view {
+    // This view and all lower views are already finalized
+    advance_cursor(...);
+    continue;
+}
+```
+
+**Why this works**: When a view V is directly finalized (has a block), `finalized_up_to[k] = V`. This means all views ≤ V for instance k have been processed. If the cursor is at view v ≤ V, we've already handled it.
+
+#### Step 2.3: Process Current Cursor Cell
+
+The algorithm checks what's at position `(cursor_view, cursor_instance)`:
+
+**CASE A: Directly Finalized View (`Some(block)`)**
+- Meaning: This view has a block from consensus that needs to be finalized
+- Actions:
+  1. Remove the block from the queue
+  2. **Log the block and all its transactions** (this is when the block becomes globally finalized)
+  3. Update `finalized_up_to[k] = cursor_view` (marks highest directly finalized view)
+  4. Clean up: Remove all queue entries for views < cursor_view (already processed)
+  5. Advance cursor to next position
+
+**CASE B: Indirectly Finalized View (`None`)**
+- Meaning: This view was marked as finalized (gap filler) but has no block
+- Actions:
+  1. Remove the `None` entry from queue
+  2. Advance cursor (no logging, no `finalized_up_to` update)
   
-  2. Loop until no progress:
-     a. Phase 1: Try to advance v*
-        If all instances k have blocks at view v* + 1:
-          - Gatling-finalize all instances at view v* + 1 (in order)
-          - v* = v* + 1
-          - k* = K - 1
-          - Continue loop
-     
-     b. Phase 2: Try to advance k*
-        Find the maximum contiguous k starting from k*+1 (or 0 if k* is None) 
-        where all instances k' ≤ k have block at view v* + 1:
-          - Finalize all instances from (k*+1) to the new k at view v* + 1 (in order)
-          - k* = new maximum k
-          - Continue loop
-     
-     c. No progress possible, break
+**Why no logging or update?**: 
+- No block exists, so nothing to log
+- `finalized_up_to` only tracks views with actual blocks (directly finalized views)
+
+**CASE C: No Entry, But Instance Has Moved Past**
+- Check: Does this instance have any entry at view > cursor_view?
+- If yes: The instance has finalized views beyond cursor_view, so cursor_view is a gap
+  - Action: Insert `None` at cursor_view to mark it as an indirectly finalized view
+  - Advance cursor (no logging, no `finalized_up_to` update)
+- If no: Cannot make progress - waiting for a block at cursor_view or evidence the instance has moved past it
+  - Action: Break and wait for next event
+
+#### Step 2.4: Cursor Advancement
+```rust
+fn advance_cursor(cursor_view, cursor_instance, num_instances) {
+    cursor_instance += 1;
+    if cursor_instance >= num_instances {
+        cursor_instance = 0;
+        cursor_view += 1;
+    }
+}
 ```
 
-### Checking for Blocks
+The cursor moves lexicographically: (1,0) → (1,1) → ... → (1,K-1) → (2,0) → (2,1) → ...
 
-An instance k is considered to have a block at view v if either:
+## Detailed Example Walkthrough
 
-1. There is a block in `instance_queues[k]` at view v (consensus-finalized but not yet gatling-finalized)
-2. `gatling_finalized_views[k] >= v` (already gatling-finalized this view or higher, implicit finalization)
+**Initial State:**
+- Instance 0: queue = {}, `finalized_up_to[0] = 0`
+- Instance 1: queue = {}, `finalized_up_to[1] = 0`
+- Cursor: (1, 0)
 
-The second condition handles gap views - if an instance finalizes view 10, views 1-10 are all considered finalized.
+**Event 1: Instance 1 finalizes block at view 3**
+- Step 1: Extract view = 3
+- Step 2: Gap detection: highest_seen_view = 0, new view = 3
+  - Gap detected at views 1, 2
+  - Insert indirect finalizations: queue[1] = {1: None, 2: None}
+- Step 3: Insert block: queue[1] = {1: None, 2: None, 3: Some(block)}
+- Cursor loop:
+  - Cursor (1,0): No entry, no higher view → break (waiting)
+  - Final state: queue[1] = {1: None, 2: None, 3: Some(block)}
 
-## Examples
+**Event 2: Instance 0 finalizes block at view 1**
+- Step 1: Extract view = 1
+- Step 2: No gap (highest_seen_view = 0, new view = 1)
+- Step 3: Insert block: queue[0] = {1: Some(block)}
+- Cursor loop:
+  - Cursor (1,0): Has `Some(block)` → Finalize block (log block + transactions), set `finalized_up_to[0] = 1`
+  - Cursor (1,1): Has `None` → Advance cursor (no logging, views 1 is indirectly finalized)
+  - Cursor (2,0): No entry, no higher view → break
+  - Finalized: View 1 for instance 0 ✓ (directly), View 1 for instance 1 ✓ (indirectly)
 
-### Example 1: Synchronized Progress
+**Event 3: Instance 1 finalizes block at view 5**
+- Step 1: Extract view = 5
+- Step 2: Gap detection: highest_seen_view = 3, new view = 5
+  - Gap detected at view 4
+  - Insert indirect finalization: queue[1] = {3: Some(block), 4: None, 5: Some(block)}
+- Step 3: Insert block
+- Cursor loop:
+  - Cursor (2,0): No entry, no higher view → break
+  - Final state: queue[1] = {3: Some(block), 4: None, 5: Some(block)}
 
-**State:**
-- All instances have finalized view 2
-- v* = 0, k* = 0
+**Event 4: Instance 0 finalizes block at view 2**
+- Step 1: Extract view = 2
+- Step 2: No gap (highest_seen_view = 1, new view = 2)
+- Step 3: Insert block: queue[0] = {2: Some(block)}
+- Cursor loop:
+  - Cursor (2,0): Has `Some(block)` → Finalize block (log), set `finalized_up_to[0] = 2`
+  - Cursor (2,1): No entry at view 2, but has view 3 > 2 → Create indirect at view 2, advance
+  - Cursor (3,0): No entry, no higher view → break
+  - Finalized: View 2 for instance 0 ✓ (directly), View 2 for instance 1 ✓ (indirectly)
 
-**When all instances finalize view 3:**
-1. Phase 1 check: All instances have view 3? YES
-2. Gatling-finalize: instances 0, 1, 2, 3, 4 at view 3 (in order)
-3. Update: v* = 3, k* = 4
+## Key Properties and Invariants
 
-**Output order:** (0,1), (1,1), ..., (4,1), (0,2), (1,2), ..., (4,2), (0,3), (1,3), ..., (4,3)
+1. **Strict Ordering**: A block at (v', k') is finalized only after all blocks at (v, k) ≤ (v', k') (lexicographically) are finalized
+2. **View Finalization Types**:
+   - Directly finalized views: Have a block from consensus, are logged, update `finalized_up_to`
+   - Indirectly finalized views: No block, are not logged, don't update `finalized_up_to`
+3. **All Blocks Treated Equally**: All blocks are finalized using the same finalization event and logging mechanism
+4. **Gap Handling**: Views between observed finalizations are automatically marked as indirectly finalized
+5. **Progress Guarantee**: Always processes the top-leftmost unfinalized cell first
+6. **finalized_up_to Semantics**: Only tracks directly finalized views (views with blocks); indirectly finalized views don't affect it
 
-### Example 2: Partial Progress
+## Why This Design Works
 
-**State:**
-- v* = 2, k* = None (no instances finalized at view 3 yet)
-- Instance 0 has view 4
-- Instances 1-4 have view 3
+- **Cursor ensures strict ordering**: By always processing the top-leftmost cell, we guarantee lexicographic order
+- **Gap detection maintains continuity**: When blocks arrive, gaps are immediately filled, preventing inconsistencies
+- **finalized_up_to tracks actual progress**: Only views with blocks update it, providing an accurate measure of real progress
+- **Indirect finalizations are lightweight**: They maintain state consistency without logging or tracking overhead
 
-**When instance 1 finalizes view 4:**
-1. Phase 1 check: All instances have view 3? YES (already done)
-2. Phase 1 check: All instances have view 4? NO (instances 2-4 don't)
-3. Phase 2: Find max contiguous k starting from 0 where all have view 3
-   - Instance 0 has view >= 3? YES (has view 4)
-   - Instance 1 has view >= 3? YES (has view 4)
-   - Instance 2 has view >= 3? YES (has view 3)
-   - Instance 3 has view >= 3? YES (has view 3)
-   - Instance 4 has view >= 3? YES (has view 3)
-   - new_k* = 4
-4. Gatling-finalize: all instances 0-4 at view 3 (in order)
-5. Update: k* = Some(4)
+## Logging Behavior
 
-**Note:** With the current implementation, once all instances have view 3, k* advances to include all of them at once, rather than one at a time.
-
-### Example 3: User's Scenario
-
-**State:**
-- Instance 4 finalizes view 2
-- Instance 5 finalizes view 2
-- Instance 1 finalizes view 4
-- v* = 0, k* = None initially
-
-**Execution:**
-1. When instance 4 (index 3) finalizes view 2:
-   - Phase 1: All instances have view 1? Check each instance...
-   - Phase 2: Instance 4 has view 1? If yes, gatling-finalize and k* = 3
-   
-2. When instance 5 (index 4) finalizes view 2:
-   - Phase 1: All instances have view 1? Continue checking...
-   - Phase 2: Instance 5 has view 1? If yes, gatling-finalize and k* = 4
-   
-3. When all instances have view 1:
-   - Phase 1: All instances have view 1? YES
-   - Gatling-finalize: all instances at view 1
-   - v* = 1, k* = 4
-
-4. When all instances have view 2:
-   - Phase 1: All instances have view 2? YES
-   - Gatling-finalize: all instances at view 2
-   - v* = 2, k* = 4
-
-**Output order:** (0,1), (1,1), (2,1), (3,1), (4,1), (0,2), (1,2), (2,2), (3,2), (4,2), ...
-
-## Edge Cases
-
-### Case 1: Gap Views (Implicit Finalization)
-
-**Scenario:** Instance 1 finalizes view 10 after view 5 (views 6-9 were skipped).
-
-**Behavior:**
-- When instance 1 gatling-finalizes view 10, `gatling_finalized_views[1] = 10`
-- The algorithm considers instance 1 to have blocks at views 1-10
-- Views 6-9 are implicitly finalized (no blocks need to exist for them)
-
-**Key insight:** The algorithm handles view gaps gracefully through implicit finalization.
-
-### Case 2: Out-of-Order Arrival
-
-**Scenario:** Blocks arrive at different times:
-- t=0: Instance 4 view 87 arrives
-- t=1: Instance 2 view 86 arrives
-- t=2: Instance 1 view 86 arrives
-
-**Behavior:**
-1. Blocks are added to queues as they arrive
-2. Algorithm checks if v* can advance (needs all instances at view v*+1)
-3. When instance 0 view 86 arrives, v* advances and all instances at view 86 are finalized
-4. Block ordering is determined by v*/k*, not arrival time
-
-**Key insight:** Queues buffer out-of-order arrivals, algorithm processes in correct global order.
-
-### Case 3: Initial Bootstrap
-
-**Scenario:** System just started, v* = 0, k* = None, no blocks finalized yet.
-
-**Behavior:**
-- When first block arrives (e.g., instance 0 view 1):
-  - Phase 1: All instances have view 1? NO
-  - Phase 2: Find max contiguous k starting from 0 where all have view 1
-    - Instance 0 has view >= 1? YES
-    - Instance 1 has view >= 1? Check queue... (may or may not have it yet)
-    - If only instance 0 has it: k* = Some(0), finalize instance 0
-- When more instances finalize view 1:
-  - Phase 2 runs again, finds more consecutive instances with view >= 1
-  - k* advances to include all ready instances in contiguous range
-- When all instances have view 1:
-  - Phase 1: All instances have view 1? YES
-  - Gatling-finalize: all instances at view 1
-  - v* = 1, k* = Some(K-1)
-
-**Key insight:** System starts with partial progress (advancing k*), then makes full progress (advancing v*).
-
-### Case 4: Stalled Instance
-
-**Scenario:** Instance 0 stops making progress at view 5, while others continue.
-
-**Behavior:**
-- v* cannot advance beyond 5 until instance 0 reaches view 6+
-- k* can still advance for view 6 if instances 1+ have view 6
-- But v* remains at 5, so only view 6 blocks for instances beyond instance 0 can be finalized
-
-**Key insight:** By design, one stalled instance prevents v* from advancing, ensuring strict ordering.
-
-## Key Properties
-
-### 1. Strict Global Ordering
-
-Blocks are finalized in strictly ascending (view, instance) order. The lowest view number finalizes first, and within the same view, the lowest instance index finalizes first.
-
-### 2. Two-Phase Progress
-
-- **Phase 1 (Complete views):** When all instances are synchronized, entire views are finalized at once
-- **Phase 2 (Partial views):** When instances are at different views, we finalize the next ready instance incrementally
-
-### 3. Implicit Finalization
-
-When an instance finalizes view V, all views 1 to V are considered finalized for that instance. This handles:
-- View gaps (timeouts, nullifications)
-- Consensus protocol variations
-- System restarts
-
-### 4. Deadlock Prevention
-
-The algorithm doesn't create deadlocks - it only orders blocks that consensus has already finalized. If consensus makes progress (which it's designed to do), gatling will too.
+- **Blocks at directly finalized views**: Fully logged (block info + all transactions)
+- **Indirectly finalized views**: No logs (no block exists to log)
 
 ## Code Location
 
-The gatling finalization logic is implemented in:
-- File: `alto/chain/src/bin/validator.rs`
-- Function: `gatling_thread()` (lines 64-220)
-- Key logic: Two-phase v*/k* algorithm (lines 92-216)
+- `chain/src/bin/validator.rs`: `gatling_thread()` implements the cursor-based rule
+- `chain/src/engine.rs`: `GatlingEvent` carries `instance_id` and `block`; view is taken from `block.view`
+- `chain/src/application/actor.rs`: Sends `GatlingEvent` when blocks are finalized by consensus
