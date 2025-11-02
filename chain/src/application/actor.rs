@@ -483,7 +483,7 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                             // This is safe because consensus already verified it (threshold of validators)
                             // Calling verified() is idempotent - if already persisted, it's a no-op
                             marshal_persist.verified(block_view, block_clone.clone()).await;
-                            info!("[{}] Ensured finalized block {} (view {}) is persisted in marshal", 
+                            debug!("[{}] Ensured finalized block {} (view {}) is persisted in marshal", 
                                   engine_id_persist, block_clone.height, block_view);
                         });
                     }
@@ -512,7 +512,7 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                             const INITIAL_RETRY_DELAY_MS: u64 = 100;
                             const MAX_RETRY_DELAY_MS: u64 = 1000;
                             
-                            info!("[{}] Starting ancestor finalization task for block {} (view {}) with parent: {:?}", 
+                            debug!("[{}] Starting ancestor finalization task for block {} (view {}) with parent: {:?}", 
                                   engine_id_clone, block_clone_for_log.height, block_clone_for_log.view, start_parent);
                             
                             // Determine chain of missing ancestors by walking parents until we hit an already finalized block
@@ -522,7 +522,7 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                             while cursor_digest != genesis_digest_clone {
                                 // Stop if we've already seen this ancestor finalized
                                 if finalized_seen.lock().unwrap().contains(&cursor_digest.to_vec()) {
-                                    info!("[{}] Ancestor {} already finalized, stopping ancestor chain", 
+                                    debug!("[{}] Ancestor {} already finalized, stopping ancestor chain", 
                                            engine_id_clone, cursor_digest);
                                     break;
                                 }
@@ -531,7 +531,7 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                                 let mut ancestor_opt: Option<Block> = None;
                                 let mut retry_count = 0;
                                 
-                                info!("[{}] Attempting to fetch ancestor {}", engine_id_clone, cursor_digest);
+                                debug!("[{}] Attempting to fetch ancestor {}", engine_id_clone, cursor_digest);
                                 
                                 // Try to fetch ancestor with exponential backoff retries
                                 while ancestor_opt.is_none() && retry_count <= MAX_RETRIES {
@@ -559,7 +559,7 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                                             // Successfully fetched ancestor from marshal local storage
                                             ancestor_opt = Some(ancestor);
                                             if let Some(ref ancestor_ref) = ancestor_opt {
-                                                info!(
+                                                debug!(
                                                     "[{}] Successfully fetched ancestor {} (view {}) from marshal local storage",
                                                     engine_id_clone, ancestor_ref.height, ancestor_ref.view
                                                 );
@@ -568,7 +568,7 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                                         }
                                         None => {
                                             // Marshal doesn't have it in local storage - try requesting from peers via ancestor channel
-                                            info!("[{}] Ancestor {} not in marshal, requesting from peers", 
+                                            debug!("[{}] Ancestor {} not in marshal, requesting from peers", 
                                                   engine_id_clone, cursor_digest);
                                             
                                             // Create oneshot channel for response
@@ -602,7 +602,7 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                                                     Some(block) => {
                                                         // Verify digest matches
                                                         if block.digest() == cursor_digest {
-                                                            info!("[{}] Received ancestor {} (view {}) from peer, verifying digest", 
+                                                            debug!("[{}] Received ancestor {} (view {}) from peer, verifying digest", 
                                                                   engine_id_clone, block.height, block.view);
                                                             // Store in marshal
                                                             marshal.verified(block.view, block.clone()).await;
@@ -626,13 +626,13 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                                             if retry_count < MAX_RETRIES {
                                                 let delay_ms = (INITIAL_RETRY_DELAY_MS * (1 << retry_count))
                                                     .min(MAX_RETRY_DELAY_MS);
-                                                info!("[{}] Retry {} for ancestor {} (waiting {}ms)", 
+                                                debug!("[{}] Retry {} for ancestor {} (waiting {}ms)", 
                                                       engine_id_clone, retry_count + 1, cursor_digest, delay_ms);
                                                 context.sleep(Duration::from_millis(delay_ms)).await;
                                                 retry_count += 1;
                                             } else {
                                                 // Max retries reached - give up on this ancestor
-                                                info!("[{}] Could not fetch ancestor {} after {} retries - stopping ancestor chain", 
+                                                debug!("[{}] Could not fetch ancestor {} after {} retries - stopping ancestor chain", 
                                                       engine_id_clone, cursor_digest, MAX_RETRIES);
                                                 break;
                                                 }
@@ -703,7 +703,7 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                                 }
 
                                 // Log ancestor finalization (treat like real finalization)
-                                info!(
+                                debug!(
                                     "[{}] Validator {} finalized block {} (view {}) with {} transactions (ancestor chain)",
                                     engine_id_clone,
                                     validator_index,
@@ -714,10 +714,10 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                             }
                             
                             if ancestor_count > 0 {
-                                info!("[{}] Completed ancestor finalization chain: {} ancestors finalized", 
+                                debug!("[{}] Completed ancestor finalization chain: {} ancestors finalized", 
                                       engine_id_clone, ancestor_count);
                             } else {
-                                info!("[{}] No missing ancestors found to finalize", engine_id_clone);
+                                debug!("[{}] No missing ancestors found to finalize", engine_id_clone);
                             }
                         });
                     }
