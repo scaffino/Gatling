@@ -99,6 +99,12 @@ pub struct Config<B: Blocker<PublicKey = PublicKey>, I: Indexer> {
     
     /// Number of views an instance must be behind to skip its scheduled wait.
     pub lag_threshold: u64,
+
+    /// Total number of consensus instances (K)
+    pub total_instances: usize,
+
+    /// Genesis timestamp in seconds
+    pub genesis_timestamp_secs: u64,
 }
 
     /// The engine that drives the [application].
@@ -159,6 +165,8 @@ impl<
                 gatling_instance_id: cfg.gatling_instance_id,
                 instance_views: cfg.instance_views,
                 lag_threshold: cfg.lag_threshold,
+                total_instances: cfg.total_instances,
+                genesis_timestamp_secs: cfg.genesis_timestamp_secs,
             },
         ); 
 

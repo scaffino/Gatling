@@ -281,6 +281,13 @@ fn generate_local(
 
     // Generate instance configurations
     let mut port = start_port;
+    // Compute genesis timestamp (seconds) rounded up to the next minute once for all peers
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let genesis_timestamp = ((now_secs / 60) + 1) * 60;
+    println!("genesis timestamp: {}", genesis_timestamp);
     let mut addresses = HashMap::new();
     let mut configurations = Vec::new();
     for (signer, share) in peer_signers.iter().zip(shares.iter()) {
@@ -312,6 +319,7 @@ fn generate_local(
             deque_size,
 
             indexer: None,
+            genesis_timestamp,
         };
         configurations.push((name, peer_config_file.clone(), peer_config));
         port += 2;
@@ -432,6 +440,13 @@ fn generate_remote(
         regions.len() <= peers,
         "must be at least one peer per specified region"
     );
+    // Compute genesis timestamp (seconds) rounded up to the next minute once for all peers
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let genesis_timestamp = ((now_secs / 60) + 1) * 60;
+    println!("genesis timestamp: {}", genesis_timestamp);
     let mut instance_configs = Vec::new();
     let mut peer_configs = Vec::new();
     for (index, signer) in peer_signers.iter().enumerate() {
@@ -458,6 +473,7 @@ fn generate_remote(
             deque_size,
 
             indexer: None,
+            genesis_timestamp,
         };
         peer_configs.push((peer_config_file.clone(), peer_config));
 

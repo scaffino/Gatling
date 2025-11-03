@@ -30,6 +30,8 @@ pub struct Config {
     pub deque_size: usize,
 
     pub indexer: Option<String>,
+    /// Unix timestamp (seconds) for genesis start, rounded up to the next minute
+    pub genesis_timestamp: u64,
 }
 
 /// A list of peers provided when a validator is run locally.
@@ -86,6 +88,7 @@ mod tests {
             (Sender<PublicKey>, Receiver<PublicKey>),
             (Sender<PublicKey>, Receiver<PublicKey>),
             (Sender<PublicKey>, Receiver<PublicKey>),
+            (Sender<PublicKey>, Receiver<PublicKey>),
         ),
     > {
         let mut registrations = HashMap::new();
@@ -100,6 +103,8 @@ mod tests {
                 oracle.register(validator.clone(), 3).await.unwrap();
             let (backfill_sender, backfill_receiver) =
                 oracle.register(validator.clone(), 4).await.unwrap();
+            let (ancestor_sender, ancestor_receiver) =
+                oracle.register(validator.clone(), 5).await.unwrap();
             registrations.insert(
                 validator.clone(),
                 (
@@ -108,6 +113,7 @@ mod tests {
                     (resolver_sender, resolver_receiver),
                     (broadcast_sender, broadcast_receiver),
                     (backfill_sender, backfill_receiver),
+                    (ancestor_sender, ancestor_receiver),
                 ),
             );
         }
@@ -227,15 +233,17 @@ mod tests {
                     gatling_instance_id: 1,
                     instance_views: instance_views.clone(),
                     lag_threshold: 1,
+                    total_instances: 1,
+                    genesis_timestamp_secs: 0,
                 };
                 let engine = Engine::new(context.with_label(&uid), config).await;
 
                 // Get networking
-                let (pending, recovered, resolver, broadcast, backfill) =
+                let (pending, recovered, resolver, broadcast, backfill, ancestor) =
                     registrations.remove(&public_key).unwrap();
 
                 // Start engine
-                engine.start(pending, recovered, resolver, broadcast, backfill);
+                engine.start(pending, recovered, resolver, broadcast, backfill, ancestor);
             }
 
             // Poll metrics
@@ -411,15 +419,17 @@ mod tests {
                     gatling_instance_id: 1,
                     instance_views: instance_views.clone(),
                     lag_threshold: 1,
+                    total_instances: 1,
+                    genesis_timestamp_secs: 0,
                 };
                 let engine = Engine::new(context.with_label(&uid), config).await;
 
                 // Get networking
-                let (pending, recovered, resolver, broadcast, backfill) =
+                let (pending, recovered, resolver, broadcast, backfill, ancestor) =
                     registrations.remove(&public_key).unwrap();
 
                 // Start engine
-                engine.start(pending, recovered, resolver, broadcast, backfill);
+                engine.start(pending, recovered, resolver, broadcast, backfill, ancestor);
             }
 
             // Poll metrics
@@ -506,15 +516,17 @@ mod tests {
                 gatling_instance_id: 1,
                 instance_views: instance_views.clone(),
                 lag_threshold: 1,
+                total_instances: 1,
+                genesis_timestamp_secs: 0,
             };
             let engine = Engine::new(context.with_label(&uid), config).await;
 
             // Get networking
-            let (pending, recovered, resolver, broadcast, backfill) =
+            let (pending, recovered, resolver, broadcast, backfill, ancestor) =
                 registrations.remove(&public_key).unwrap();
 
             // Start engine
-            engine.start(pending, recovered, resolver, broadcast, backfill);
+            engine.start(pending, recovered, resolver, broadcast, backfill, ancestor);
 
             // Poll metrics
             loop {
@@ -651,15 +663,17 @@ mod tests {
                         gatling_instance_id: 1,
                         instance_views: instance_views.clone(),
                         lag_threshold: 1,
+                        total_instances: 1,
+                        genesis_timestamp_secs: 0,
                     };
                     let engine = Engine::new(context.with_label(&uid), config).await;
 
                     // Get networking
-                    let (pending, recovered, resolver, broadcast, backfill) =
+                    let (pending, recovered, resolver, broadcast, backfill, ancestor) =
                         registrations.remove(&public_key).unwrap();
 
                     // Start engine
-                    engine.start(pending, recovered, resolver, broadcast, backfill);
+                    engine.start(pending, recovered, resolver, broadcast, backfill, ancestor);
                 }
 
                 // Poll metrics
@@ -832,15 +846,17 @@ mod tests {
                     gatling_instance_id: 1,
                     instance_views: instance_views.clone(),
                     lag_threshold: 1,
+                    total_instances: 1,
+                    genesis_timestamp_secs: 0,
                 };
                 let engine = Engine::new(context.with_label(&uid), config).await;
 
                 // Get networking
-                let (pending, recovered, resolver, broadcast, backfill) =
+                let (pending, recovered, resolver, broadcast, backfill, ancestor) =
                     registrations.remove(&public_key).unwrap();
 
                 // Start engine
-                engine.start(pending, recovered, resolver, broadcast, backfill);
+                engine.start(pending, recovered, resolver, broadcast, backfill, ancestor);
             }
 
             // Poll metrics

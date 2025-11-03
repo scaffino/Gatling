@@ -329,6 +329,19 @@ fn main() {
     let signer = PrivateKey::decode(key.as_ref()).expect("Private key is invalid");
     let public_key = signer.public_key();
 
+    // Gate startup until genesis timestamp (no runtime/network/consensus before this time)
+    {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        if now_secs < config.genesis_timestamp {
+            let wait_secs = config.genesis_timestamp - now_secs;
+            info!(genesis_timestamp = config.genesis_timestamp, wait_secs, "waiting for genesis timestamp before starting validator");
+            std::thread::sleep(std::time::Duration::from_secs(wait_secs));
+        }
+    }
+
     // Initialize runtime
     let cfg = tokio::Config::default()
         .with_tcp_nodelay(Some(true))
@@ -354,6 +367,12 @@ fn main() {
             )),
             None,
         );
+
+        // Log genesis time (UTC) once after telemetry is initialized
+        let genesis_time_utc = chrono::DateTime::<chrono::Utc>::from_timestamp(config.genesis_timestamp as i64, 0)
+            .map(|dt| dt.format("%H:%M:%S.%3f UTC").to_string())
+            .unwrap_or_else(|| "invalid-ts".to_string());
+        info!(genesis = %genesis_time_utc, "genesis time");
 
         // Load peers
         let (ip, peers, bootstrappers) = if let Some(hosts_file) = hosts_file {
@@ -565,6 +584,8 @@ fn main() {
                 gatling_instance_id: chain_id,
                 instance_views: instance_views.clone(),
                 lag_threshold: 1, // Default threshold: skip wait if 1+ views behind
+                total_instances: consensus_instances,
+                genesis_timestamp_secs: config.genesis_timestamp,
             };
             let engine = engine::Engine::new(
                 context.with_label(&format!("consensus_{}", chain_id)), 

@@ -61,9 +61,20 @@ pub struct Actor<R: Rng + CryptoRng + Spawner + Metrics + Clock> {
     instance_views: Arc<Vec<AtomicU64>>,
     // Lag threshold for adaptive timing
     lag_threshold: u64,
+    // Total number of consensus instances (K)
+    total_instances: usize,
+    // Genesis timestamp in seconds
+    genesis_timestamp_secs: u64,
 }
 
 impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
+    /// Compute absolute proposal time in milliseconds for given view and instance.
+    /// tproposal = genesis_timestamp + v + (k-1)/K
+    pub fn tproposal(genesis_ts_secs: u64, k_total: u64, k: u64, v: u64) -> u128 {
+        let base_ms = (genesis_ts_secs + v) as u128 * 1000;
+        let frac_ms = ((k.saturating_sub(1)) as u128 * 1000) / (k_total as u128);
+        base_ms + frac_ms
+    }
     /// Create a new application actor.
     pub fn new(context: R, config: Config) -> (Self, Supervisor, Mailbox) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
@@ -105,6 +116,8 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                 gatling_instance_id: config.gatling_instance_id,
                 instance_views: config.instance_views,
                 lag_threshold: config.lag_threshold,
+                total_instances: config.total_instances,
+                genesis_timestamp_secs: config.genesis_timestamp_secs,
             },
             Supervisor::new(config.polynomial, config.participants, config.share),
             Mailbox::new(sender),
@@ -182,7 +195,6 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                                         // Try to get the block from marshal LOCAL STORAGE ONLY (no backfill)
                                         // Use very short timeout to check if block is immediately available locally
                                         let subscribe_fut = marshal_for_handler.subscribe(None, requested_digest).await;
-                                        let local_check_timeout = Duration::from_millis(10); // 10ms - just check if immediately available
                                         
                                         // Note: We can't use context.sleep here since we don't have context in this handler
                                         // Instead, we'll let marshal.subscribe return quickly if not in local storage
@@ -272,9 +284,9 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                     self.context.with_label("propose").spawn({
                         let built = built.clone();
                         let engine_id = self.engine_id.clone();
-                        let proposal_offset_ms = self.proposal_offset_ms;
-                        let instance_views = self.instance_views.clone();
-                        let lag_threshold = self.lag_threshold;
+                        let total_instances = self.total_instances as u64;
+                        let instance_number = self.gatling_instance_id as u64;
+                        let genesis_ts_secs = self.genesis_timestamp_secs;
                         move |context| async move {
                             let response_closed = OneshotClosedFut::new(&mut response);
                             select! {
@@ -312,48 +324,28 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                                         *built = Some((view, block));
                                     }
 
-                                    // Adaptive timing: Check if this instance is lagging behind others
-                                    let current_view = view;
-                                    let max_view = instance_views.iter()
-                                        .map(|v| v.load(Ordering::Relaxed))
-                                        .max()
-                                        .unwrap_or(0);
-                                    let lag = max_view.saturating_sub(current_view);
-                                    
-                                    // Track if this is a catch-up proposal
-                                    let is_catchup = lag >= lag_threshold;
-                                    
-                                    // Skip wait if lagging by threshold or more
-                                    if is_catchup {
-                                        // Instance is catching up - skip wait, will be marked in proposal log
-                                    } else {
-                                        // Wait until the precise time (X.000s + offset) before sending the proposal
-                                        // This ensures all proposals happen at exact second boundaries for regularity
-                                        let current_ms = context.current().epoch_millis();
-                                        let current_ms_in_second = current_ms % 1000;
-                                        let target_ms_in_second = proposal_offset_ms;
-                                        
-                                        // Calculate how many milliseconds to wait
-                                        let wait_ms = if current_ms_in_second <= target_ms_in_second {
-                                            // Target is later in this second
-                                            target_ms_in_second - current_ms_in_second
-                                        } else {
-                                            // Target is in the next second
-                                            1000 - current_ms_in_second + target_ms_in_second
-                                        };
-                                        
-                                        if wait_ms > 0 {
-                                            context.sleep(std::time::Duration::from_millis(wait_ms)).await;
-                                        }
+                                    // Timely proposal: wait until tproposal if in the future, else propose immediately upon entering view
+                                    let target_ms = Self::tproposal(genesis_ts_secs, total_instances, instance_number, view as u64);
+                                    let now_ms = context.current().epoch_millis() as u128;
+                                    let is_catchup = now_ms >= target_ms;
+                                    if !is_catchup {
+                                        let wait = (target_ms - now_ms) as u64;
+                                        context.sleep(Duration::from_millis(wait)).await;
                                     }
 
-                                    // Send the digest to the consensus at the precise time
+                                    // Send the digest to the consensus (no further delay)
                                     let _result = response.send(digest);
-                                    let proposal_timestamp = context.current().epoch_millis();
+                                    let proposal_timestamp_ms = context.current().epoch_millis();
+                                    let cast_time_utc = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(proposal_timestamp_ms as i64)
+                                        .map(|dt| dt.format("%H:%M:%S.%3f UTC").to_string())
+                                        .unwrap_or_else(|| "invalid-ts".to_string());
                                     let validator_idx = self.validator_index;
+                                    let computed_time_utc = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(target_ms as i64)
+                                        .map(|dt| dt.format("%H:%M:%S.%3f UTC").to_string())
+                                        .unwrap_or_else(|| "invalid-ts".to_string());
                                     let catchup_msg = if is_catchup { " (catch up proposal)" } else { "" };
-                                    info!("[{}] Validator {} proposed block {} (view {}) with {} transactions at Unix timestamp {} ms{}", 
-                                          engine_id, validator_idx, block_height, view, tx_count, proposal_timestamp, catchup_msg);
+                                    info!("[{}] Validator {} proposed block {} (view {}) with {} transactions at {} (computed {}){}", 
+                                          engine_id, validator_idx, block_height, view, tx_count, cast_time_utc, computed_time_utc, catchup_msg);
                                 },
                                 _ = response_closed => {
                                     // The response was cancelled
@@ -539,7 +531,6 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                                     // Use very short timeout to check if block is immediately available locally
                                     // If timeout triggers quickly, block is not in local storage, skip to peer request
                                     let subscribe_fut = marshal.subscribe(None, cursor_digest).await;
-                                    let local_check_timeout = Duration::from_millis(10); // 10ms - just check if immediately available
                                     
                                     let local_check_result = select!(
                                         result = subscribe_fut => {
@@ -548,7 +539,7 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                                                 Err(_) => None,
                                             }
                                         },
-                                        _ = context.sleep(local_check_timeout) => {
+                                        _ = context.sleep(Duration::from_millis(10)) => {
                                             // Timeout quickly - block not in local storage, skip backfill
                                             None
                                         }

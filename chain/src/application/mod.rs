@@ -54,4 +54,10 @@ pub struct Config {
     
     /// Number of views an instance must be behind to skip its scheduled wait.
     pub lag_threshold: u64,
+
+    /// Total number of consensus instances (K)
+    pub total_instances: usize,
+
+    /// Genesis timestamp in seconds
+    pub genesis_timestamp_secs: u64,
 }
