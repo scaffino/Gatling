@@ -6,6 +6,7 @@ use commonware_cryptography::{
 
 mod actor;
 pub use actor::Actor;
+pub use actor::run_buffer;
 mod ingress;
 pub use ingress::{FinalizationPusher, Mailbox};
 pub mod mempool;
@@ -45,6 +46,10 @@ pub struct Config {
     
     /// Channel to send finalized blocks to the gatling thread (if enabled).
     pub gatling_tx: Option<futures::channel::mpsc::UnboundedSender<crate::engine::GatlingEvent>>,
+    
+    /// Per-instance channel to buffer finalized blocks before forwarding to gatling (if enabled).
+    /// When present, application and ancestor finalizer forward blocks here instead of directly to gatling.
+    pub buffer_tx: Option<futures::channel::mpsc::UnboundedSender<alto_types::Block>>,
     
     /// Instance ID for this consensus engine (1-based, used for gatling ordering).
     pub gatling_instance_id: usize,

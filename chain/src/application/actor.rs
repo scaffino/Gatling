@@ -20,7 +20,7 @@ use futures::StreamExt;
 use futures::{channel::{mpsc, oneshot}, future::try_join};
 use futures::{future, future::Either};
 use rand::{CryptoRng, Rng};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, BTreeMap};
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -55,6 +55,8 @@ pub struct Actor<R: Rng + CryptoRng + Spawner + Metrics + Clock> {
     proposal_offset_ms: u64,
     // Channel to send finalized blocks to the gatling thread (if enabled)
     gatling_tx: Option<futures::channel::mpsc::UnboundedSender<crate::engine::GatlingEvent>>,
+    // Per-instance channel to buffer finalized blocks before forwarding to gatling (if enabled)
+    buffer_tx: Option<futures::channel::mpsc::UnboundedSender<Block>>,
     // Instance ID for this consensus engine (1-based, used for gatling ordering)
     gatling_instance_id: usize,
     // Shared view tracking across all instances
@@ -113,6 +115,7 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                 included_transactions: config.included_transactions,
                 proposal_offset_ms: config.proposal_offset_ms,
                 gatling_tx: config.gatling_tx,
+                buffer_tx: config.buffer_tx,
                 gatling_instance_id: config.gatling_instance_id,
                 instance_views: config.instance_views,
                 lag_threshold: config.lag_threshold,
@@ -486,8 +489,7 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                         let mut marshal = marshal.clone();
                         let engine_id_clone = engine_id.clone();
                         let validator_index = self.validator_index;
-                        let gatling_tx = self.gatling_tx.clone();
-                        let gatling_instance_id = self.gatling_instance_id;
+                        let buffer_tx = self.buffer_tx.clone();
                         let finalized_seen = self.finalized_seen.clone();
                         let finalized_blocks_counter = self.finalized_blocks_counter.clone();
                         let block_latency_ms_histogram = self.block_latency_ms_histogram.clone();
@@ -670,14 +672,9 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                             for anc in missing_ancestors {
                                 let anc_tx_count = anc.transactions.len();
                                 
-                                // Send to gatling if enabled
-                                if let Some(ref gatling_tx) = gatling_tx {
-                                    let event = crate::engine::GatlingEvent {
-                                        instance_id: gatling_instance_id,
-                                        view: anc.view as u64,
-                                        block: anc.clone(),
-                                    };
-                                    let _ = gatling_tx.unbounded_send(event);
+                                // Forward to per-instance buffer if enabled
+                                if let Some(ref tx) = buffer_tx {
+                                    let _ = tx.unbounded_send(anc.clone());
                                 }
                                 
                                 // Record metrics only once per unique block digest
@@ -725,15 +722,10 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                         }
                     }
                     
-                    // Send finalized block to gatling thread if enabled
-                    if let Some(ref gatling_tx) = self.gatling_tx {
-                        let event = crate::engine::GatlingEvent {
-                            instance_id: self.gatling_instance_id,
-                            view: block.view as u64,
-                            block: block.clone(),
-                        };
-                        if let Err(e) = gatling_tx.unbounded_send(event) {
-                            warn!(error=?e, "Failed to send finalized block to gatling thread");
+                    // Forward finalized block to per-instance buffer if enabled
+                    if let Some(ref tx) = self.buffer_tx {
+                        if let Err(e) = tx.unbounded_send(block.clone()) {
+                            warn!(error=?e, "Failed to send finalized block to buffer");
                         }
                     }
                     
@@ -769,6 +761,43 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                     }
                 }
             }
+        }
+    }
+}
+
+/// Per-instance buffer task ensuring height-contiguous forwarding to gatling.
+/// Receives blocks finalized locally (direct or ancestor), buffers out-of-order arrivals,
+/// and only forwards a block when all lower heights have been forwarded for this instance.
+pub async fn run_buffer(
+    mut rx: mpsc::UnboundedReceiver<Block>,
+    gatling: futures::channel::mpsc::UnboundedSender<crate::engine::GatlingEvent>,
+    instance_id: usize,
+) {
+    let mut next_expected_height: u64 = 1;
+    let mut pending: BTreeMap<u64, Block> = BTreeMap::new();
+    let mut seen: HashSet<Vec<u8>> = HashSet::new();
+
+    while let Some(block) = rx.next().await {
+        let d = block.digest();
+        if !seen.insert(d.to_vec()) {
+            continue;
+        }
+        let h = block.height;
+        pending.entry(h).or_insert(block);
+
+        loop {
+            if let Some(b) = pending.remove(&next_expected_height) {
+                let event = crate::engine::GatlingEvent {
+                    instance_id,
+                    view: b.view as u64,
+                    block: b,
+                };
+                // Ignore send errors (receiver may be gone)
+                let _ = gatling.unbounded_send(event);
+                next_expected_height = next_expected_height.saturating_add(1);
+                continue;
+            }
+            break;
         }
     }
 }

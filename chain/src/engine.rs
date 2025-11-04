@@ -148,6 +148,15 @@ impl<
 
     /// Create a new [Engine].
     pub async fn new(context: E, cfg: Config<B, I>) -> Self {
+        // Prepare optional per-instance buffer channel (only when gatling is enabled)
+        let gatling_sender_opt = cfg.gatling_tx.clone();
+        let (app_buffer_tx_opt, buffer_rx_opt) = if gatling_sender_opt.is_some() {
+            let (tx, rx) = futures::channel::mpsc::unbounded::<Block>();
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
+
         // Create the application
         let identity = *public::<MinSig>(&cfg.polynomial);
         let (application, supervisor, application_mailbox) = application::Actor::new(
@@ -161,7 +170,8 @@ impl<
                 public_key: cfg.signer.public_key(),
                 included_transactions: cfg.included_transactions,
                 proposal_offset_ms: cfg.proposal_offset_ms,
-                gatling_tx: cfg.gatling_tx,
+                gatling_tx: gatling_sender_opt.clone(),
+                buffer_tx: app_buffer_tx_opt.clone(),
                 gatling_instance_id: cfg.gatling_instance_id,
                 instance_views: cfg.instance_views,
                 lag_threshold: cfg.lag_threshold,
@@ -169,6 +179,14 @@ impl<
                 genesis_timestamp_secs: cfg.genesis_timestamp_secs,
             },
         ); 
+
+        // Spawn per-instance buffer task if enabled
+        if let (Some(buffer_rx), Some(g_tx)) = (buffer_rx_opt, gatling_sender_opt) {
+            let instance_id = cfg.gatling_instance_id;
+            context.with_label("instance_buffer").spawn(move |_| async move {
+                application::run_buffer(buffer_rx, g_tx, instance_id).await
+            });
+        }
 
         // Create the buffer
         let (buffer, buffer_mailbox) = buffered::Engine::new(
