@@ -3,49 +3,22 @@
 set -euo pipefail
 
 # Usage:
-#   ./run.sh [NUM_VALIDATORS] [NUM_INSTANCES]
+#   ./run_validators.sh [OUTPUT_DIR]
 #
-# - NUM_VALIDATORS is optional (default: 4) and sets how many peers to generate
-#   and how many validators to launch.
-# - NUM_INSTANCES is optional (default: 2) and sets --consensus-instances.
+# OUTPUT_DIR is the directory created by `setup generate ... --output <OUTPUT_DIR>`
+# It must contain `peers.yaml` and one or more `<public_key>.yaml` validator configs.
 
-NUM_VALIDATORS="${1:-4}"
-NUM_INSTANCES="${2:-2}"
+OUTPUT_DIR="${1:-test}"
 
 # Resolve absolute paths
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-# If script is under chain/, REPO_ROOT is parent; else REPO_ROOT is SCRIPT_DIR
-if [[ "$(basename "${SCRIPT_DIR}")" == "chain" ]]; then
-  REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-else
-  REPO_ROOT="${SCRIPT_DIR}"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+OUTPUT_DIR_ABS="${REPO_ROOT}/${OUTPUT_DIR}"
+
+if [[ ! -d "${OUTPUT_DIR_ABS}" ]]; then
+  echo "Error: output dir does not exist: ${OUTPUT_DIR_ABS}" >&2
+  exit 1
 fi
-
-# Fixed output dir under chain/
-OUTPUT_DIR="test"
-OUTPUT_DIR_ABS="${REPO_ROOT}/chain/${OUTPUT_DIR}"
-
-# Clean previous output
-if [[ -d "${OUTPUT_DIR_ABS}" ]]; then
-  echo "Removing existing ${OUTPUT_DIR_ABS}..."
-  rm -rf "${OUTPUT_DIR_ABS}"
-fi
-
-echo "Generating configs for ${NUM_VALIDATORS} peers into ${OUTPUT_DIR}..."
-(
-  cd "${REPO_ROOT}/chain" && \
-  cargo run --bin setup -- generate \
-    --peers "${NUM_VALIDATORS}" \
-    --bootstrappers 1 \
-    --worker-threads 3 \
-    --log-level info \
-    --message-backlog 16384 \
-    --mailbox-size 16384 \
-    --deque-size 10 \
-    --output "${OUTPUT_DIR}" \
-    local \
-    --start-port 3000
-)
 
 PEERS_FILE="${OUTPUT_DIR_ABS}/peers.yaml"
 if [[ ! -f "${PEERS_FILE}" ]]; then
@@ -53,7 +26,7 @@ if [[ ! -f "${PEERS_FILE}" ]]; then
   exit 1
 fi
 
-# Collect validator config files
+# Collect validator config files (exclude non-validator YAMLs) – portable across macOS bash
 VALIDATOR_CONFIGS=()
 while IFS= read -r line; do
   [[ -n "$line" ]] && VALIDATOR_CONFIGS+=("$line")
@@ -67,20 +40,13 @@ if [[ ${#VALIDATOR_CONFIGS[@]} -eq 0 ]]; then
   exit 1
 fi
 
-# Ensure validator log directory exists under repo root
-LOG_ROOT="${REPO_ROOT}/logs"
-VALIDATOR_LOGS_DIR="${LOG_ROOT}/validators"
-mkdir -p "${VALIDATOR_LOGS_DIR}"
-
-# Take up to NUM_VALIDATORS configs
+# Take up to the first 4 configs
 CMDS=()
-MAX="${NUM_VALIDATORS}"
+MAX=4
 COUNT=0
 for CFG in "${VALIDATOR_CONFIGS[@]}"; do
   REL_CFG="${CFG}"
-  IDX=$((COUNT+1))
-  LOG_FILE="${VALIDATOR_LOGS_DIR}/validator_${IDX}.log"
-  CMD="cd '${REPO_ROOT}/chain' && cargo run --bin validator -- --peers='${PEERS_FILE}' --config='${REL_CFG}' --gatling --consensus-instances ${NUM_INSTANCES}  2>&1 | tee >(sed 's/\\x1b\[[0-9;]*m//g' > '${LOG_FILE}')"
+  CMD="cd '${REPO_ROOT}/chain' && cargo run --bin validator -- --peers='${PEERS_FILE}' --config='${REL_CFG}' --gatling --consensus-instances 2"
   CMDS+=("${CMD}")
   COUNT=$((COUNT+1))
   [[ ${COUNT} -ge ${MAX} ]] && break
@@ -105,7 +71,7 @@ open_in_terminal() {
   done
 
   /usr/bin/osascript <<APPLESCRIPT
- tell application "Terminal"
+tell application "Terminal"
   activate
 ${WINDOW_CMDS}end tell
 APPLESCRIPT
@@ -125,7 +91,7 @@ open_in_iterm() {
   fi
 
   /usr/bin/osascript <<APPLESCRIPT
- tell application "iTerm"
+tell application "iTerm"
   activate
   set newWindow to (create window with default profile)
   tell current session of newWindow
@@ -143,3 +109,5 @@ else
 fi
 
 echo "Launched ${#CMDS[@]} validator(s) in new terminal tab(s)."
+
+
