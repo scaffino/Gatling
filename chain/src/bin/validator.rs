@@ -71,7 +71,7 @@ async fn gatling_thread(
     validator_index: usize,
     num_instances: usize,
 ) {
-    use std::collections::{BTreeMap, HashSet};
+    use std::collections::BTreeMap;
     
     // ============================================================================
     // DATA STRUCTURES
@@ -93,10 +93,6 @@ async fn gatling_thread(
     let mut cursor_view: u64 = 1;
     let mut cursor_instance: usize = 0;
     
-    // Deduplication set to avoid logging the same block multiple times if it arrives
-    // more than once (e.g., directly finalized and later as an ancestor for another block)
-    let mut seen_block_digests: HashSet<Vec<u8>> = HashSet::new();
-    
     info!("[gatling] Gatling thread started for {} instances", num_instances);
     
     // ============================================================================
@@ -104,35 +100,11 @@ async fn gatling_thread(
     // ============================================================================
     
     while let Some(event) = rx.next().await {
-        // Deduplicate by block digest
-        let digest = event.block.digest();
-        if !seen_block_digests.insert(digest.to_vec()) {
-            // Already processed/logged this block; skip
-            continue;
-        }
         // Convert 1-based instance ID to 0-based index
         let instance_idx = event.instance_id - 1;
         
         // Get view number directly from the block (not from finalization proof)
         let view = event.block.view;
-        
-        // If this finalized block corresponds to a (view, instance) that is already
-        // past the global cursor, we won't revisit it in the cursor-driven loop.
-        // Emit an immediate gatling info log to record its finalization as an ancestor.
-        let is_past_cursor = view < cursor_view || (view == cursor_view && instance_idx < cursor_instance);
-        if is_past_cursor {
-            let tx_count = event.block.transactions.len();
-            info!(
-                "[gatling] Validator {} finalized block {} from instance {} (view {}) with {} transactions - ancestor",
-                validator_index,
-                event.block.height,
-                event.instance_id,
-                view,
-                tx_count
-            );
-            // Do not enqueue; this position is already past the cursor.
-            continue;
-        }
         
         // ========================================================================
         // STEP 1: Insert the new block and fill any gaps
