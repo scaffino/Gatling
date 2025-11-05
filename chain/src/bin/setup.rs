@@ -348,10 +348,11 @@ fn generate_local(
     for (name, peer_config_file, _) in &configurations {
         let path = format!("{output}/{peer_config_file}");
         let command = format!(
-            "cargo run --bin {BINARY_NAME} -- --peers={peers_path} --config={path} --gatling --consensus-instances 5"
+            "cargo run --bin {BINARY_NAME} -- --peers={peers_path} --config={path} --gatling"
         );
         println!("{name}: {command}");
     }
+    println!("(Note: --consensus-instances is optional; default is 1. run.sh will use the correct value.)");
     println!("To view metrics, run:");
     for (name, _, peer_config) in configurations {
         println!(

@@ -3,7 +3,7 @@
 set -euo pipefail
 
 # Usage:
-#   ./run.sh [NUM_VALIDATORS] [NUM_INSTANCES]
+#   ./run.sh [NUM_VALIDATORS] [NUM_INSTANCES] [RUN_INDEX] [--headless]
 #
 # - NUM_VALIDATORS is optional (default: 4) and sets how many peers to generate
 #   and how many validators to launch.
@@ -11,6 +11,12 @@ set -euo pipefail
 
 NUM_VALIDATORS="${1:-4}"
 NUM_INSTANCES="${2:-2}"
+RUN_INDEX="${3:-1}"
+# Optional 4th arg or env var enables headless mode (no Terminal/iTerm windows)
+HEADLESS="${HEADLESS:-0}"
+if [[ "${4:-}" == "--headless" ]]; then
+  HEADLESS=1
+fi
 
 # Resolve absolute paths
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -72,6 +78,9 @@ LOG_ROOT="${REPO_ROOT}/logs"
 VALIDATOR_LOGS_DIR="${LOG_ROOT}/validators"
 mkdir -p "${VALIDATOR_LOGS_DIR}"
 
+# Session tag used to label tabs/windows for later cleanup by orchestrator
+SESSION_TAG="alto_${NUM_VALIDATORS}v_${NUM_INSTANCES}i_${RUN_INDEX}r_$(date +%s)"
+
 # Take up to NUM_VALIDATORS configs
 CMDS=()
 MAX="${NUM_VALIDATORS}"
@@ -79,8 +88,8 @@ COUNT=0
 for CFG in "${VALIDATOR_CONFIGS[@]}"; do
   REL_CFG="${CFG}"
   IDX=$((COUNT+1))
-  LOG_FILE="${VALIDATOR_LOGS_DIR}/validator_${IDX}_${NUM_INSTANCES}.log"
-  CMD="cd '${REPO_ROOT}/chain' && cargo run --bin validator -- --peers='${PEERS_FILE}' --config='${REL_CFG}' --no-gossip-txs --gatling --consensus-instances ${NUM_INSTANCES}  2>&1 | tee >(sed 's/\\x1b\[[0-9;]*m//g' > '${LOG_FILE}')"
+  LOG_FILE="${VALIDATOR_LOGS_DIR}/v${IDX}_i${NUM_INSTANCES}_r${RUN_INDEX}.log"
+  CMD="printf '\\e]1;${SESSION_TAG}\\a'; printf '\\e]0;${SESSION_TAG}\\a'; ulimit -n 65536 && cd '${REPO_ROOT}/chain' && cargo run --bin validator -- --peers='${PEERS_FILE}' --config='${REL_CFG}' --no-gossip-txs --gatling --consensus-instances ${NUM_INSTANCES}  2>&1 | tee >(sed 's/\\x1b\[[0-9;]*m//g' > '${LOG_FILE}')"
   CMDS+=("${CMD}")
   COUNT=$((COUNT+1))
   [[ ${COUNT} -ge ${MAX} ]] && break
@@ -91,18 +100,31 @@ if [[ ${#CMDS[@]} -lt 1 ]]; then
   exit 1
 fi
 
-# Escape commands for AppleScript (quotes and backslashes)
-ESC_CMDS=()
-for _cmd in "${CMDS[@]}"; do
-  ESC_CMDS+=("$(printf '%s' "${_cmd}" | sed 's/\\/\\\\/g; s/"/\\"/g')")
-done
+if [[ "${HEADLESS}" == "0" ]]; then
+  # Escape commands for AppleScript (quotes and backslashes)
+  ESC_CMDS=()
+  for _cmd in "${CMDS[@]}"; do
+    ESC_CMDS+=("$(printf '%s' "${_cmd}" | sed 's/\\/\\\\/g; s/"/\\"/g')")
+  done
+fi
 
 open_in_terminal() {
   # Open each command in its own Terminal window (no Accessibility/keystroke required)
   local WINDOW_CMDS=""
-  for esc in "${ESC_CMDS[@]}"; do
-    WINDOW_CMDS+="  do script \"${esc}\""$'\n'
-  done
+  if [[ ${#ESC_CMDS[@]} -ge 1 ]]; then
+    # First command: open (new window) and set custom title
+    WINDOW_CMDS+="  set firstTab to do script \"${ESC_CMDS[0]}\""$'\n'
+    WINDOW_CMDS+="  set custom title of firstTab to \"${SESSION_TAG}\""$'\n'
+  fi
+  if [[ ${#ESC_CMDS[@]} -ge 2 ]]; then
+    # Subsequent commands: open in front window as new tabs and set custom title
+    for ((i=1; i<${#ESC_CMDS[@]}; i++)); do
+      WINDOW_CMDS+=$'  tell front window\n'
+      WINDOW_CMDS+="    set newTab to do script \"${ESC_CMDS[$i]}\""$'\n'
+      WINDOW_CMDS+="    set custom title of newTab to \"${SESSION_TAG}\""$'\n'
+      WINDOW_CMDS+=$'  end tell\n'
+    done
+  fi
 
   /usr/bin/osascript <<APPLESCRIPT
  tell application "Terminal"
@@ -118,6 +140,7 @@ open_in_iterm() {
       TAB_CMDS+=$'  tell current window\n'
       TAB_CMDS+=$'    create tab with default profile\n'
       TAB_CMDS+=$'    tell current session\n'
+      TAB_CMDS+="      set name to \"${SESSION_TAG}\""$'\n'
       TAB_CMDS+="      write text \"${ESC_CMDS[$i]}\""$'\n'
       TAB_CMDS+=$'    end tell\n'
       TAB_CMDS+=$'  end tell\n'
@@ -129,20 +152,36 @@ open_in_iterm() {
   activate
   set newWindow to (create window with default profile)
   tell current session of newWindow
+    set name to "${SESSION_TAG}"
     write text "${ESC_CMDS[0]}"
   end tell
 ${TAB_CMDS}end tell
 APPLESCRIPT
 }
 
-# Prefer iTerm if installed and running; otherwise use Terminal
-if /usr/bin/osascript -e 'id of application "iTerm"' >/dev/null 2>&1; then
-  open_in_iterm
+if [[ "${HEADLESS}" == "1" ]]; then
+  # Headless mode: launch validators as background processes, log to files only
+  IDX=0
+  for CFG in "${VALIDATOR_CONFIGS[@]}"; do
+    IDX=$((IDX+1))
+    [[ ${IDX} -gt ${MAX} ]] && break
+    LOG_FILE="${VALIDATOR_LOGS_DIR}/v${IDX}_i${NUM_INSTANCES}_r${RUN_INDEX}.log"
+    # Build the plain validator command without terminal title escape sequences
+    VAL_CMD="ulimit -n 65536 && cd '${REPO_ROOT}/chain' && cargo run --bin validator -- --peers='${PEERS_FILE}' --config='${CFG}' --no-gossip-txs --gatling --consensus-instances ${NUM_INSTANCES} 2>&1 | sed 's/\\x1b\[[0-9;]*m//g' >> '${LOG_FILE}'"
+    nohup bash -lc "${VAL_CMD}" >/dev/null 2>&1 &
+  done
+  echo "Launched ${MAX} validator(s) headlessly. Logs: ${VALIDATOR_LOGS_DIR}"
+  echo "SESSION_TAG=${SESSION_TAG}"
 else
-  open_in_terminal
+  # Prefer iTerm if installed and running; otherwise use Terminal
+  if /usr/bin/osascript -e 'id of application "iTerm"' >/dev/null 2>&1; then
+    open_in_iterm
+  else
+    open_in_terminal
+  fi
+  echo "Launched ${#CMDS[@]} validator(s) in new terminal tab(s)."
+  echo "SESSION_TAG=${SESSION_TAG}"
 fi
-
-echo "Launched ${#CMDS[@]} validator(s) in new terminal tab(s)."
 
 # Build submit_tx binary if it doesn't exist
 if [[ ! -f "${REPO_ROOT}/target/release/submit_tx" ]]; then
@@ -176,17 +215,47 @@ if [[ ! -x "${REPO_ROOT}/target/release/submit_tx" ]]; then
   exit 1
 fi
 
-# Schedule submitTx after 3 minutes
+# Schedule submit transactions at 1.5, 2.0, and 2.5 minutes
 mkdir -p "${LOG_ROOT}"
 SUBMIT_LOG_FILE="${LOG_ROOT}/submitTx.log"
 (
-  sleep 120
-  echo "[submitTx] Starting after 2 minutes..." | tee -a "${SUBMIT_LOG_FILE}"
+  sleep 100
+  echo "[submitTx] Starting 20 tx after 100 seconds..." | tee -a "${SUBMIT_LOG_FILE}"
   cd "${REPO_ROOT}"
   if [[ -x "./submitTx.sh" ]]; then
-    ./submitTx.sh 100 2>&1 | tee -a "${SUBMIT_LOG_FILE}"
+    ./submitTx.sh 25 2>&1 | tee -a "${SUBMIT_LOG_FILE}"
   else
     echo "[submitTx] ERROR: submitTx.sh not found or not executable in ${REPO_ROOT}" | tee -a "${SUBMIT_LOG_FILE}"
   fi
 ) &
-echo "Scheduled submitTx.sh to run in 2 minutes (logs: ${SUBMIT_LOG_FILE})."
+(
+  sleep 120
+  echo "[submitTx] Starting 100 tx after 150 seconds..." | tee -a "${SUBMIT_LOG_FILE}"
+  cd "${REPO_ROOT}"
+  if [[ -x "./submitTx.sh" ]]; then
+    ./submitTx.sh 25 2>&1 | tee -a "${SUBMIT_LOG_FILE}"
+  else
+    echo "[submitTx] ERROR: submitTx.sh not found or not executable in ${REPO_ROOT}" | tee -a "${SUBMIT_LOG_FILE}"
+  fi
+) &
+(
+  sleep 140
+  echo "[submitTx] Starting 100 tx after 150 seconds..." | tee -a "${SUBMIT_LOG_FILE}"
+  cd "${REPO_ROOT}"
+  if [[ -x "./submitTx.sh" ]]; then
+    ./submitTx.sh 25 2>&1 | tee -a "${SUBMIT_LOG_FILE}"
+  else
+    echo "[submitTx] ERROR: submitTx.sh not found or not executable in ${REPO_ROOT}" | tee -a "${SUBMIT_LOG_FILE}"
+  fi
+) &
+(
+  sleep 160
+  echo "[submitTx] Starting 100 tx after 150 seconds..." | tee -a "${SUBMIT_LOG_FILE}"
+  cd "${REPO_ROOT}"
+  if [[ -x "./submitTx.sh" ]]; then
+    ./submitTx.sh 25 2>&1 | tee -a "${SUBMIT_LOG_FILE}"
+  else
+    echo "[submitTx] ERROR: submitTx.sh not found or not executable in ${REPO_ROOT}" | tee -a "${SUBMIT_LOG_FILE}"
+  fi
+) &
+echo "Scheduled submitTx.sh waves at 100s (20), 150s (100). Logs: ${SUBMIT_LOG_FILE}."
