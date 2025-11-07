@@ -516,10 +516,6 @@ fn main() {
         if let Some(uri) = config.indexer {
             indexer = Some(Client::new(&uri, identity));
         }
-
-        // Create shared state for tracking included transactions across all consensus instances
-        // This prevents the same transaction from being included in multiple independent blockchains
-        let included_transactions = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
         
         // Create shared state for tracking the highest view reached by each consensus instance
         // This allows instances to detect if they're lagging and skip their scheduled wait time
@@ -578,7 +574,6 @@ fn main() {
                 fetch_concurrent: FETCH_CONCURRENT,
                 fetch_rate_per_peer: resolver_limit,
                 indexer: indexer.clone(),
-                included_transactions: included_transactions.clone(),
                 proposal_offset_ms,
                 gatling_tx: gatling_tx.clone(),
                 gatling_instance_id: chain_id,

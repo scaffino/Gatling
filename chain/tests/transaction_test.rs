@@ -195,9 +195,6 @@ fn test_transaction_flow() {
         // Create block tracker
         let tracker = BlockTracker::new();
 
-        // Create shared state for tracking included transactions
-        let included_transactions = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
-
         // Create shared state for tracking instance views (one consensus instance in these tests)
         let instance_views: Arc<Vec<AtomicU64>> = Arc::new(vec![AtomicU64::new(0)]);
 
@@ -234,7 +231,6 @@ fn test_transaction_flow() {
                 fetch_concurrent: 10,
                 fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(10).unwrap()),
                 indexer: Some(TrackingIndexer::new("", identity, tracker.clone())),
-                included_transactions: included_transactions.clone(),
                 proposal_offset_ms: 0,
                 gatling_tx: None,
                 gatling_instance_id: 1,

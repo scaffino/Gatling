@@ -11,9 +11,7 @@ mod ingress;
 pub use ingress::{FinalizationPusher, Mailbox};
 pub mod mempool;
 
-use commonware_cryptography::sha256::Digest;
-use std::collections::HashSet;
-use std::sync::{Arc, Mutex, atomic::AtomicU64};
+use std::sync::{Arc, atomic::AtomicU64};
 
 /// Configuration for the application.
 pub struct Config {
@@ -35,10 +33,6 @@ pub struct Config {
     
     /// Public key of this validator (for determining validator index).
     pub public_key: PublicKey,
-    
-    /// Shared set of transaction digests that have been included in blocks across all consensus instances.
-    /// This prevents the same transaction from being included in multiple instances.
-    pub included_transactions: Arc<Mutex<HashSet<Digest>>>,
     
     /// Time offset within each second (in milliseconds, 0-999) for when this engine should send proposals.
     /// For example: 0 means X.000s, 500 means X.500s. This allows staggering multiple consensus instances.

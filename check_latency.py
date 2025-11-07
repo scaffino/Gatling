@@ -4,9 +4,9 @@ Aggregate transaction finalization latency from Gatling logs.
 
 Reads all files under logs/gatling named gatling_v{V}_i{I}_r{R}.log,
 extracts finalization events, deduplicates per transaction per validator
-(using only the first finalization event per validator), computes median
+(using only the first finalization event per validator), computes average
 latency across validators for each transaction, then computes the overall
-median latency per instance count, writes a CSV, and plots latency vs
+average latency per instance count, writes a CSV, and plots latency vs
 instances.
 """
 
@@ -41,19 +41,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--csv",
         dest="csv",
-        default=os.path.join("logs", "gatling", "latency_by_instances.csv"),
+        default=os.path.join("logs", "gatling", "latency_vs_instances.csv"),
         help="Output CSV path",
     )
     parser.add_argument(
         "--png",
         dest="png",
-        default=os.path.join("logs", "gatling", "latency_by_instances.png"),
+        default=os.path.join("logs", "gatling", "latency_vs_instances.png"),
         help="Output PNG path",
     )
     return parser.parse_args()
 
 
-def iter_gatling_files(dir_path: str) -> Iterable[Tuple[str, int, int]]:
+def iter_gatling_files(dir_path: str) -> Iterable[Tuple[str, int, int, int]]:
     try:
         entries = sorted(os.listdir(dir_path))
     except FileNotFoundError:
@@ -65,10 +65,79 @@ def iter_gatling_files(dir_path: str) -> Iterable[Tuple[str, int, int]]:
         if not m:
             # Skip non-matching files silently
             continue
-        v = int(m.group(1))
-        i = int(m.group(2))
-        _r = int(m.group(3))
-        yield os.path.join(dir_path, name), i, v
+        v = int(m.group(1))  # validator id
+        i = int(m.group(2))  # instances count
+        r = int(m.group(3))  # run index
+        yield os.path.join(dir_path, name), i, v, r
+
+
+def check_consistency(dir_path: str) -> None:
+    """
+    Performs basic consistency checks over discovered Gatling logs:
+    - Files must follow expected naming:
+      gatling_v{validator}_i{instances}_r{run}.log
+    - For each instances count, all runs should have the same
+      validator set
+    - Reports the number of runs per instances and validators
+      discovered.
+    Exits with non-zero status on hard inconsistencies.
+    """
+    by_instances_runs: Dict[int, Dict[int, set]] = defaultdict(
+        lambda: defaultdict(set)
+    )
+    any_file = False
+    for _, instances, validator, run_idx in iter_gatling_files(dir_path):
+        any_file = True
+        by_instances_runs[instances][run_idx].add(validator)
+
+    if not any_file:
+        print(
+            (
+                "Error: no gatling logs found matching expected pattern in "
+                "{0}"
+            ).format(dir_path)
+        )
+        sys.exit(1)
+
+    hard_error = False
+    for instances, runs_map in sorted(by_instances_runs.items()):
+        if not runs_map:
+            print("Warning: instances={0} has no runs".format(instances))
+            continue
+        # Establish reference validator set from the smallest run index
+        ref_run = min(runs_map.keys())
+        ref_validators = runs_map[ref_run]
+        # Compare all runs' validator sets
+        for run_idx, vals in sorted(runs_map.items()):
+            if vals != ref_validators:
+                print(
+                    (
+                        "ERROR: instances={0} run={1} validators {2} "
+                        "!= run={3} validators {4}"
+                    ).format(
+                        instances,
+                        run_idx,
+                        sorted(vals),
+                        ref_run,
+                        sorted(ref_validators),
+                    )
+                )
+                hard_error = True
+
+        print(
+            "consistency: instances={0}: runs={1}, validators={2}".format(
+                instances, sorted(runs_map.keys()), sorted(ref_validators)
+            )
+        )
+
+    if hard_error:
+        print(
+            (
+                "Fatal: inconsistent validator sets across runs detected. "
+                "Aborting."
+            )
+        )
+        sys.exit(2)
 
 
 def parse_log_line(line: str) -> Optional[Tuple[int, str, int]]:
@@ -82,9 +151,9 @@ def parse_log_line(line: str) -> Optional[Tuple[int, str, int]]:
 
     log_ts_str = ts_m.group(1).rstrip("Z")
     log_dt = datetime.strptime(log_ts_str, "%Y-%m-%dT%H:%M:%S.%f")
-    log_ts_ms = (
-        calendar.timegm(log_dt.timetuple()) * 1000 + int(log_dt.microsecond / 1000.0)
-    )
+    base_seconds_ms = calendar.timegm(log_dt.timetuple()) * 1000
+    micros_ms = int(log_dt.microsecond / 1000.0)
+    log_ts_ms = base_seconds_ms + micros_ms
     tx_hash = fin_m.group(1)
     tx_ts_ms = int(fin_m.group(2))
     return log_ts_ms, tx_hash, tx_ts_ms
@@ -119,7 +188,12 @@ def aggregate_by_instances(dir_path: str) -> Dict[int, Dict[str, List[int]]]:
     # Track first occurrence per transaction per validator file
     seen_per_file: Dict[Tuple[int, int, str], bool] = {}
     any_file = False
-    for file_path, instances, validator in iter_gatling_files(dir_path):
+    for (
+        file_path,
+        instances,
+        validator,
+        _run_idx,
+    ) in iter_gatling_files(dir_path):
         any_file = True
         for tx_hash, latency_ms in parse_latency_occurrences(file_path):
             # Only keep the first occurrence of each transaction per file
@@ -129,7 +203,9 @@ def aggregate_by_instances(dir_path: str) -> Dict[int, Dict[str, List[int]]]:
                 by_instances[instances][tx_hash].append(latency_ms)
     if not any_file:
         print(
-            "Error: no gatling_v*_i*_r*.log files found in {0}".format(dir_path)
+            (
+                "Error: no gatling_v*_i*_r*.log files found in {0}"
+            ).format(dir_path)
         )
         sys.exit(1)
     return by_instances
@@ -137,58 +213,175 @@ def aggregate_by_instances(dir_path: str) -> Dict[int, Dict[str, List[int]]]:
 
 def compute_instance_stats(
     by_instances: Dict[int, Dict[str, List[int]]]
-) -> Dict[int, Tuple[float, int]]:
+) -> Dict[int, Tuple[float, float, int]]:
     """
     For each instance count I:
-    1. For each transaction, compute median of latency values from all
+    1. For each transaction, compute average of latency values from all
        validators (each validator contributes its first finalization event)
-    2. Compute overall median across all unique transactions
-    Returns mapping: I -> (median_latency_ms, num_unique_transactions).
+    2. Compute overall average across all unique transactions
+    3. Compute standard deviation across per-transaction averages
+    Returns mapping:
+    I -> (average_latency_ms, stddev_latency_ms, num_unique_transactions).
     """
-    result: Dict[int, Tuple[float, int]] = {}
+    result: Dict[int, Tuple[float, float, int]] = {}
     for instances, tx_map in sorted(by_instances.items()):
-        per_tx_medians: List[float] = []
+        per_tx_averages: List[float] = []
         for tx_hash, validator_latencies in tx_map.items():
             if not validator_latencies:
                 continue
-            # Median latency across all validators for this transaction
-            tx_median = statistics.median(validator_latencies)
-            per_tx_medians.append(tx_median)
-        if per_tx_medians:
-            overall_median = statistics.median(per_tx_medians)
-            result[instances] = (overall_median, len(per_tx_medians))
+            # Average latency across all validators for this transaction
+            tx_average = statistics.mean(validator_latencies)
+            per_tx_averages.append(tx_average)
+        if per_tx_averages:
+            overall_average = statistics.mean(per_tx_averages)
+            overall_std = (
+                statistics.stdev(per_tx_averages)
+                if len(per_tx_averages) >= 2
+                else 0.0
+            )
+            result[instances] = (
+                overall_average,
+                overall_std,
+                len(per_tx_averages),
+            )
         else:
-            result[instances] = (0.0, 0)
+            result[instances] = (0.0, 0.0, 0)
     return result
 
 
-def write_csv(stats: Dict[int, Tuple[float, int]], csv_path: str) -> None:
+def write_csv(
+    stats: Dict[int, Tuple[float, float, int]], csv_path: str
+) -> None:
     os.makedirs(os.path.dirname(csv_path), exist_ok=True)
     with open(csv_path, "w") as f:
-        f.write("instances,median_latency_ms,num_transactions\n")
+        f.write(
+            (
+                "instances,average_latency_ms,stddev_latency_ms,"
+                "num_transactions\n"
+            )
+        )
         for instances in sorted(stats.keys()):
-            median_ms, n = stats[instances]
-            f.write(f"{instances},{median_ms:.3f},{n}\n")
+            average_ms, std_ms, n = stats[instances]
+            f.write(f"{instances},{average_ms:.3f},{std_ms:.3f},{n}\n")
 
 
-def plot_png(stats: Dict[int, Tuple[float, int]], png_path: str) -> None:
+def plot_png(
+    by_instances: Dict[int, Dict[str, List[int]]], png_path: str
+) -> None:
     try:
         import matplotlib.pyplot as plt
+        from matplotlib.patches import Rectangle
+        import numpy as np
     except Exception as e:
-        print("Warning: matplotlib not available; skipping plot: {0}".format(e))
+        print(
+            (
+                "Warning: matplotlib/numpy not available; "
+                "skipping plot: {0}"
+            ).format(e)
+        )
         return
-    xs = sorted(stats.keys())
-    ys = [stats[i][0] for i in xs]
+
+    # Extract all latency values for each instance count
+    data_for_boxplot = []
+    instance_labels = []
+    percentile_data = []
+    for instances in sorted(by_instances.keys()):
+        all_latencies = []
+        for tx_hash, validator_latencies in by_instances[instances].items():
+            all_latencies.extend(validator_latencies)
+        if all_latencies:
+            data_for_boxplot.append(all_latencies)
+            instance_labels.append(instances)
+            # Calculate 10th, 50th (median), and 90th percentiles, plus min/max
+            p10 = np.percentile(all_latencies, 10)
+            p50 = np.percentile(all_latencies, 50)
+            p90 = np.percentile(all_latencies, 90)
+            p_min = np.min(all_latencies)
+            p_max = np.max(all_latencies)
+            percentile_data.append((p10, p50, p90, p_min, p_max))
+
+    if not data_for_boxplot:
+        print("Warning: no data to plot")
+        return
+
     plt.figure(figsize=(7, 4))
-    plt.plot(xs, ys, marker="o")
-    plt.xlabel("Number of instances")
-    plt.ylabel("Median latency (ms)")
-    plt.title("Median transaction latency vs consensus instances")
-    # Force integer ticks from 0 to 11 on the x-axis
+
+    # Manually create box plot with 10th-90th percentiles
+    positions = range(1, len(instance_labels) + 1)
+    box_width = 0.6
+
+    for i, (pos, (p10, p50, p90, p_min, p_max)) in enumerate(
+        zip(positions, percentile_data)
+    ):
+        x_center = pos
+        x_left = x_center - box_width / 2
+        x_right = x_center + box_width / 2
+
+        # Draw box (rectangle from p10 to p90)
+        box_height = p90 - p10
+        rect = Rectangle(
+            (x_left, p10),
+            box_width,
+            box_height,
+            facecolor='lightblue',
+            alpha=0.7,
+            edgecolor='black',
+            linewidth=1
+        )
+        plt.gca().add_patch(rect)
+
+        # Draw median line
+        plt.plot(
+            [x_left, x_right],
+            [p50, p50],
+            color='black',
+            linewidth=1.5
+        )
+
+        # Draw whiskers (extend from box edges to min/max)
+        whisker_width = box_width * 0.3
+        # Lower whisker (from p10 to p_min)
+        plt.plot(
+            [x_center, x_center],
+            [p_min, p10],
+            color='black',
+            linewidth=1
+        )
+        # Upper whisker (from p90 to p_max)
+        plt.plot(
+            [x_center, x_center],
+            [p90, p_max],
+            color='black',
+            linewidth=1
+        )
+
+        # Draw caps (horizontal lines at whisker ends)
+        # Lower cap at p_min
+        plt.plot(
+            [x_center - whisker_width / 2, x_center + whisker_width / 2],
+            [p_min, p_min],
+            color='black',
+            linewidth=1
+        )
+        # Upper cap at p_max
+        plt.plot(
+            [x_center - whisker_width / 2, x_center + whisker_width / 2],
+            [p_max, p_max],
+            color='black',
+            linewidth=1
+        )
+
+    # Set x-axis labels and limits
+    plt.xticks(positions, instance_labels)
+    # Force x-axis to show 0 to 11
     ticks = list(range(0, 12))
     plt.xticks(ticks, ticks)
-    plt.xlim(0, 11)
-    plt.grid(True, linestyle=":", alpha=0.6)
+    plt.xlim(0.5, 11.5)
+
+    plt.xlabel("Number of instances")
+    plt.ylabel("Latency (ms)")
+    plt.title("Transaction latency distribution vs consensus instances")
+    plt.grid(True, linestyle=":", alpha=0.6, axis='y')
     os.makedirs(os.path.dirname(png_path), exist_ok=True)
     plt.tight_layout()
     plt.savefig(png_path, dpi=160)
@@ -197,19 +390,21 @@ def plot_png(stats: Dict[int, Tuple[float, int]], png_path: str) -> None:
 
 def main() -> None:
     args = parse_args()
+    # Run consistency checks before aggregation to catch mismatches early
+    check_consistency(args.dir)
     by_instances = aggregate_by_instances(args.dir)
     stats = compute_instance_stats(by_instances)
 
     # Console summary
     for instances in sorted(stats.keys()):
-        median_ms, n = stats[instances]
+        average_ms, std_ms, n = stats[instances]
         print(
-            "instances={0}: median_latency_ms={1:.3f}, "
-            "unique_transactions={2}".format(instances, median_ms, n)
+            "instances={0}: average_latency_ms={1:.3f}, stddev_ms={2:.3f}, "
+            "unique_transactions={3}".format(instances, average_ms, std_ms, n)
         )
 
     write_csv(stats, args.csv)
-    plot_png(stats, args.png)
+    plot_png(by_instances, args.png)
 
 
 if __name__ == "__main__":

@@ -3,16 +3,17 @@
 set -euo pipefail
 
 # Orchestrates sequential runs of run.sh with:
-# - 4 validators
-# - instances = 1..10, each repeated 10 times
+# - validators: configurable via env var NUM_VALIDATORS (default: 2)
+# - instances = 1..MAX_INSTANCES, each repeated RUNS_PER_INSTANCES times
 
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="${SCRIPT_DIR}"
-
-RUNS_PER_INSTANCES=2
+RUNS_PER_INSTANCES=1
 SLEEP_SECONDS=240
 SETTLE_SECONDS=4
+NUM_VALIDATORS="${NUM_VALIDATORS:-2}"
+MAX_INSTANCES="${MAX_INSTANCES:-10}"
 
 close_terminal_tabs_by_tag() {
   local tag="$1"
@@ -144,7 +145,7 @@ kill_fallback_processes() {
   pkill -f "submit_tx" || true
 }
 
-for instances in $(seq 1 10); do
+for instances in $(seq 1 ${MAX_INSTANCES}); do
   for runIndex in $(seq 1 ${RUNS_PER_INSTANCES}); do
     echo "[orchestrator] Starting run: instances=${instances}, run=${runIndex}"
     # Pre-run cleanup to avoid blocking in setup generate due to leftover processes/locks
@@ -155,7 +156,7 @@ for instances in $(seq 1 10); do
     close_all_by_tag "alto_" || true
     sleep 3
     # Capture SESSION_TAG line from run.sh output
-    SESSION_TAG=$("${REPO_ROOT}/run.sh" 4 "${instances}" "${runIndex}" --headless \
+    SESSION_TAG=$("${REPO_ROOT}/run.sh" "${NUM_VALIDATORS}" "${instances}" "${runIndex}" --headless \
       | tee >(cat >&2) \
       | sed -n 's/^SESSION_TAG=//p' \
       | tail -1 || true)

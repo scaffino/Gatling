@@ -83,7 +83,7 @@ for key in ${unique_groups}; do
     idx=$((idx+1))
   done
 
-  echo "- Checking group instance=i${iidx}, round=r${ridx} (files=${#files[@]})"
+  #echo "- Checking group instance=i${iidx}, round=r${ridx} (files=${#files[@]})"
   if ! python3 "${REPO_ROOT}/verify_gatling_logs.py" --dir "${tmpdir}"; then
     echo "Group i${iidx} r${ridx}: verification FAILED" >&2
     overall_ok=1

@@ -23,7 +23,7 @@ use futures::future::try_join_all;
 use governor::clock::Clock as GClock;
 use governor::Quota;
 use rand::{CryptoRng, Rng};
-use std::{collections::HashSet, num::NonZero, sync::{Arc, Mutex, atomic::AtomicU64}, time::Duration};
+use std::{num::NonZero, sync::{Arc, atomic::AtomicU64}, time::Duration};
 use tracing::{error, warn};
 
 /// Event sent to the gatling thread when a block is finalized.
@@ -80,9 +80,6 @@ pub struct Config<B: Blocker<PublicKey = PublicKey>, I: Indexer> {
     pub fetch_rate_per_peer: Quota,
 
     pub indexer: Option<I>,
-    
-    /// Shared set of transaction digests that have been included in blocks across all consensus instances.
-    pub included_transactions: Arc<Mutex<HashSet<Digest>>>,
     
     /// Time offset within each second (in milliseconds, 0-999) for when this engine should send proposals.
     /// For example: 0 means X.000s, 500 means X.500s. This allows staggering multiple consensus instances.
@@ -168,7 +165,6 @@ impl<
                 mailbox_size: cfg.mailbox_size,
                 engine_id: cfg.partition_prefix.clone(),
                 public_key: cfg.signer.public_key(),
-                included_transactions: cfg.included_transactions,
                 proposal_offset_ms: cfg.proposal_offset_ms,
                 gatling_tx: gatling_sender_opt.clone(),
                 buffer_tx: app_buffer_tx_opt.clone(),

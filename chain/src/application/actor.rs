@@ -49,8 +49,6 @@ pub struct Actor<R: Rng + CryptoRng + Spawner + Metrics + Clock> {
     block_latency_ms_histogram: PromHistogram,
     // Track finalized blocks we've already recorded to avoid double-counting
     finalized_seen: Arc<Mutex<HashSet<Vec<u8>>>>,
-    // Track transactions included in blocks across all consensus instances (shared)
-    included_transactions: Arc<Mutex<HashSet<Digest>>>,
     // Time offset within each second for proposal timing (0-999ms)
     proposal_offset_ms: u64,
     // Channel to send finalized blocks to the gatling thread (if enabled)
@@ -112,7 +110,6 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                 finalized_blocks_counter,
                 block_latency_ms_histogram,
                 finalized_seen: Arc::new(Mutex::new(HashSet::new())),
-                included_transactions: config.included_transactions,
                 proposal_offset_ms: config.proposal_offset_ms,
                 gatling_tx: config.gatling_tx,
                 buffer_tx: config.buffer_tx,
@@ -253,25 +250,14 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                     parent,
                     mut response,
                 } => {
-                    // Collect transactions from mempool, filtering out already-included ones
+                    // Collect transactions from mempool
                     let mut transactions = Vec::new();
-                    let included_txs = self.included_transactions.clone();
-                    
                     while transactions.len() < MAX_BLOCK_TRANSACTIONS {
-                        let Some(tx) = mempool.next() else {
+                        if let Some(tx) = mempool.next() {
+                            transactions.push(tx);
+                        } else {
                             break;
-                        };
-                        
-                        // Skip if this transaction was already included in another consensus instance
-                        let tx_digest = tx.digest();
-                        {
-                            let included = included_txs.lock().unwrap();
-                            if included.contains(&tx_digest) {
-                                continue;
-                            }
                         }
-                        
-                        transactions.push(tx);
                     }
                     let tx_count = transactions.len();
 
@@ -305,14 +291,6 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                                     let block_height = parent.height + 1;
                                     let block = Block::new(parent.digest(), block_height, current, view as u64, transactions.clone());
                                     let digest = block.digest();
-                                    
-                                    // Mark transactions as included globally
-                                    {
-                                        let mut included = included_txs.lock().unwrap();
-                                        for tx in &transactions {
-                                            included.insert(tx.digest());
-                                        }
-                                    }
                                     
                                     // Log each transaction included in the block
                                     let validator_idx = self.validator_index;
@@ -395,7 +373,6 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                     self.context.with_label("verify").spawn({
                         let mut marshal = marshal.clone();
                         let engine_id = self.engine_id.clone();
-                        let included_txs = self.included_transactions.clone();
                         move |mut context| async move {
                             let requester =
                                 try_join(parent_request, marshal.subscribe(None, payload).await);
@@ -434,14 +411,6 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                                         return;
                                     }
 
-                                    // Mark transactions in this block as included globally
-                                    {
-                                        let mut included = included_txs.lock().unwrap();
-                                        for tx in &block.transactions {
-                                            included.insert(tx.digest());
-                                        }
-                                    }
-                                    
                                     // Persist the verified block
                                     marshal.verified(view, block).await;
 
@@ -495,7 +464,6 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                         let block_latency_ms_histogram = self.block_latency_ms_histogram.clone();
                         let start_parent = block.parent;
                         let genesis_digest_clone = genesis_digest.clone();
-                        let included_txs = self.included_transactions.clone();
                         let block_clone_for_log = block.clone();
                         let mut ancestor_sender_clone = ancestor_sender.clone();
                         let pending_ancestor_requests_clone = pending_ancestor_requests.clone();
@@ -642,14 +610,6 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                                     let anc_view = ancestor.view;
                                     let anc_clone = ancestor.clone();
                                     marshal.verified(anc_view, anc_clone.clone()).await;
-                                    
-                                    // Mark transactions in ancestor as included globally
-                                    {
-                                        let mut included = included_txs.lock().unwrap();
-                                        for tx in &ancestor.transactions {
-                                            included.insert(tx.digest());
-                                        }
-                                    }
                                     
                                     // If ancestor already counted, stop
                                     if finalized_seen.lock().unwrap().contains(&ancestor.digest().to_vec()) {

@@ -83,17 +83,23 @@ def check_no_holes(blocks: Set[int]) -> Tuple[bool, List[int]]:
 
 def extract_instance_count_from_filename(path: str) -> Optional[int]:
     """Extract instance count from filename.
-    Supports both formats: gatling_X.log and gatling_X_X.log
-    Returns None if format doesn't match."""
+    Preferred format: gatling_v{validator}_i{instances}_r{run}.log
+    Back-compat: gatling_{a}_{b}.log (instances=b) and gatling_{a}.log.
+    Returns None if format doesn't match or instances unspecified.
+    """
     base = os.path.basename(path)
-    # Match gatling_X_X.log format (new format)
-    m = re.match(r"^gatling_\d+_(\d+)\.log$", base, re.IGNORECASE)
+    # New format: gatling_vX_iY_rZ.log -> return Y
+    m = re.match(r"^gatling_v(\d+)_i(\d+)_r(\d+)\.log$", base, re.IGNORECASE)
     if m:
-        return int(m.group(1))
-    # Match gatling_X.log format (old format, assume instance count 1 or None)
-    m = re.match(r"^gatling_\d+\.log$", base, re.IGNORECASE)
+        return int(m.group(2))
+    # Intermediate format: gatling_A_B.log -> return B
+    m = re.match(r"^gatling_(\d+)_(\d+)\.log$", base, re.IGNORECASE)
     if m:
-        return None  # Old format - no instance count specified
+        return int(m.group(2))
+    # Old format: gatling_A.log -> instances unknown
+    m = re.match(r"^gatling_(\d+)\.log$", base, re.IGNORECASE)
+    if m:
+        return None
     return None
 
 
@@ -122,10 +128,14 @@ def verify_group(
         sequences[p] = seq
         per_file_blocks[p] = blocks_by_instance
 
+    # Create instance message only if instance_count is available
     instance_msg = (
-        f"instance_count={instance_count}" if instance_count else "old_format"
+        f"instance_count={instance_count}"
+        if instance_count is not None
+        else ""
     )
-    print(f"Verifying group ({instance_msg}, files={len(paths)})...")
+    if instance_msg:
+        print(f"Verifying group ({instance_msg}, files={len(paths)})...")
 
     # Verify all files show same ordering of (block, view, instance)
     sorted_list = sorted(sequences.keys())
@@ -159,10 +169,13 @@ def verify_group(
 
                 ref_base = os.path.basename(ref_file)
                 p_base = os.path.basename(p)
+                group_info = (
+                    f"  group: {instance_msg}\n" if instance_msg else ""
+                )
                 print(
                     (
                         "ERROR: Order mismatch detected\n"
-                        f"  group: {instance_msg}\n"
+                        f"{group_info}"
                         f"  at index {idx}:\n"
                         f"    {ref_base} -> {fmt(ref_seq[idx])}\n"
                         f"    {p_base} -> {fmt(seq[idx])}\n"
@@ -179,11 +192,13 @@ def verify_group(
                 mismatch_count += 1
 
     if mismatch_count == 0:
-        print(f"  Check: sequence consistency ({instance_msg}) - OK")
+        msg_suffix = f" ({instance_msg})" if instance_msg else ""
+        print(f"  Check: sequence consistency{msg_suffix} - OK")
     else:
+        msg_suffix = f" ({instance_msg})" if instance_msg else ""
         print(
             (
-                f"  Check: sequence consistency ({instance_msg}) - FAIL "
+                f"  Check: sequence consistency{msg_suffix} - FAIL "
                 f"(mismatches={mismatch_count})"
             )
         )
@@ -205,13 +220,15 @@ def verify_group(
                 holes_count += 1
 
     if holes_count == 0:
+        msg_suffix = f" ({instance_msg})" if instance_msg else ""
         print(
-            f"  Check: per-instance block completeness ({instance_msg}) - OK"
+            f"  Check: per-instance block completeness{msg_suffix} - OK"
         )
     else:
+        msg_suffix = f" ({instance_msg})" if instance_msg else ""
         print(
             (
-                f"  Check: per-instance block completeness ({instance_msg}) "
+                f"  Check: per-instance block completeness{msg_suffix} "
                 f"- FAIL (instances_with_holes={holes_count})"
             )
         )
@@ -230,8 +247,9 @@ def main() -> int:
         "--dir",
         default=None,
         help=(
-            "Directory containing gatling_X.log or gatling_X_X.log files "
-            "(defaults to <repo>/logs/gatling). Files are grouped by "
+            "Directory containing gatling_v*_i*_r*.log (preferred), "
+            "or legacy gatling_*.log files (defaults to <repo>/logs/gatling). "
+            "Files are grouped by "
             "instance count and verified separately."
         ),
     )
@@ -245,7 +263,12 @@ def main() -> int:
         print(f"ERROR: Directory not found: {target_dir}", file=sys.stderr)
         return 2
 
-    paths = sorted(glob(os.path.join(target_dir, "gatling_*.log")))
+    # Prefer new-format files first; fall back to legacy if none found
+    preferred = sorted(glob(os.path.join(target_dir, "gatling_v*_i*_r*.log")))
+    if preferred:
+        paths = preferred
+    else:
+        paths = sorted(glob(os.path.join(target_dir, "gatling_*.log")))
     if not paths:
         print(
             f"ERROR: No gatling_*.log files found in {target_dir}",
@@ -261,11 +284,11 @@ def main() -> int:
         parsed[p] = entries
         total_matched += len(entries)
 
-    parsed_msg = (
-        f"Parsed gatling logs - OK (files={len(paths)}, "
-        f"matched_lines={total_matched})"
-    )
-    print(parsed_msg)
+    #parsed_msg = (
+    #    f"Parsed gatling logs - OK (files={len(paths)}, "
+    #    f"matched_lines={total_matched})"
+    #)
+    #print(parsed_msg)
 
     # 2) Group files by instance count
     groups: Dict[Optional[int], List[str]] = {}
@@ -273,7 +296,7 @@ def main() -> int:
         instance_count = extract_instance_count_from_filename(p)
         groups.setdefault(instance_count, []).append(p)
 
-    print(f"Grouped files by instance count - OK (groups={len(groups)})")
+    #print(f"Grouped files by instance count - OK (groups={len(groups)})")
 
     # 3) Verify each group separately
     all_ok = True
@@ -281,9 +304,9 @@ def main() -> int:
         if not verify_group(group_paths, parsed, instance_count):
             all_ok = False
 
-    print()
     if all_ok:
         print("All gatling logs are consistent.")
+        print()
         return 0
     else:
         return 1

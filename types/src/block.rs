@@ -8,7 +8,7 @@ use commonware_cryptography::{
 };
 use crate::Transaction;
 
-pub const MAX_BLOCK_TRANSACTIONS: usize = 100;
+pub const MAX_BLOCK_TRANSACTIONS: usize = 10000;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Block {
