@@ -32,7 +32,7 @@ set -euo pipefail
 # If PUBLIC_KEY is not provided, the script will try to auto-detect it from available config files
 #
 # Transaction Submission:
-#   The orchestrator automatically calls run-remote.sh to submit transactions to all validators
+#   The orchestrator automatically calls submitTx-remote.sh to submit transactions to all validators
 #   during each run. Transactions are submitted in waves starting after TX_START_DELAY seconds.
 
 # ============================================================================
@@ -61,7 +61,7 @@ mkdir -p "${LOG_DIR}"
 REPO_ROOT="${REPO_ROOT:-/root/alto}"
 
 # Transaction submission script
-RUN_REMOTE_SCRIPT="${REPO_ROOT}/run-remote.sh"
+RUN_REMOTE_SCRIPT="${REPO_ROOT}/submitTx-remote.sh"
 
 # Transaction submission settings (can be disabled by setting ENABLE_TX_SUBMISSION=0)
 ENABLE_TX_SUBMISSION="${ENABLE_TX_SUBMISSION:-1}"
@@ -340,7 +340,7 @@ for instances in $(seq 1 ${MAX_INSTANCES}); do
             --gatling \
             --no-gossip-txs \
             --consensus-instances ${instances} \
-            2>&1 | sed 's/\\x1b\[[0-9;]*m//g' | tee -a '${LOG_FILE}'"
+            2>&1 | sed 's/\\x1b\[[0-9;]*m//g' >> '${LOG_FILE}'"
         
         # Run validator in background and capture PID
         bash -c "${VAL_CMD}" &
@@ -359,7 +359,7 @@ for instances in $(seq 1 ${MAX_INSTANCES}); do
                     sleep ${DELAY}
                     echo "[orchestrator-remote] [Wave ${wave}/${TX_WAVES}] Submitting ${TX_COUNT} transactions after ${DELAY}s..."
                     cd "${REPO_ROOT}"
-                    BASE_DIR="${BASE_DIR}" "${RUN_REMOTE_SCRIPT}" "${TX_COUNT}" 2>&1 | tee -a "${LOG_DIR}/tx_submit_i${instances}_r${runIndex}_wave${wave}.log" || {
+                    BASE_DIR="${BASE_DIR}" "${RUN_REMOTE_SCRIPT}" "${TX_COUNT}" >/dev/null 2>&1 || {
                         echo "[orchestrator-remote] [Wave ${wave}] Transaction submission failed (this is non-fatal)" >&2
                     }
                 ) &
@@ -373,7 +373,7 @@ for instances in $(seq 1 ${MAX_INSTANCES}); do
                 echo "  Wave ${wave}: ${TX_COUNT} tx after ${DELAY}s"
             done
         elif [[ "${ENABLE_TX_SUBMISSION}" == "1" ]]; then
-            echo "[orchestrator-remote] Warning: Transaction submission enabled but run-remote.sh not found or not executable" >&2
+            echo "[orchestrator-remote] Warning: Transaction submission enabled but submitTx-remote.sh not found or not executable" >&2
             echo "[orchestrator-remote] Expected at: ${RUN_REMOTE_SCRIPT}" >&2
         fi
         
