@@ -21,10 +21,19 @@ set -euo pipefail
 # Environment variables (override defaults):
 #   BASE_DIR: Directory containing config files (default: /root/alto/deploy/manual)
 #   VALIDATOR_BINARY: Path to validator binary (auto-detected if not set)
-#   LOG_DIR: Directory for log files (default: /root/alto/logs/validators)
+#   LOG_DIR: Directory for log files (default: /root/alto/logs/validator)
 #   REPO_ROOT: Repository root directory (default: /root/alto)
+#   ENABLE_TX_SUBMISSION: Enable transaction submission (default: 1, set to 0 to disable)
+#   TX_COUNT: Number of transactions per submission wave (default: 25)
+#   TX_WAVES: Number of submission waves (default: 4)
+#   TX_INTERVAL: Seconds between submission waves (default: 20)
+#   TX_START_DELAY: Seconds to wait before first submission (default: 100)
 #
 # If PUBLIC_KEY is not provided, the script will try to auto-detect it from available config files
+#
+# Transaction Submission:
+#   The orchestrator automatically calls run-remote.sh to submit transactions to all validators
+#   during each run. Transactions are submitted in waves starting after TX_START_DELAY seconds.
 
 # ============================================================================
 # CONFIGURATION
@@ -45,11 +54,21 @@ BASE_DIR="${BASE_DIR:-/root/alto/deploy/manual}"
 VALIDATOR_BINARY="${VALIDATOR_BINARY:-}"
 
 # Log directory
-LOG_DIR="${LOG_DIR:-/root/alto/logs/validators}"
+LOG_DIR="${LOG_DIR:-/root/alto/logs/validator}"
 mkdir -p "${LOG_DIR}"
 
 # Repo root (for cargo run fallback)
 REPO_ROOT="${REPO_ROOT:-/root/alto}"
+
+# Transaction submission script
+RUN_REMOTE_SCRIPT="${REPO_ROOT}/run-remote.sh"
+
+# Transaction submission settings (can be disabled by setting ENABLE_TX_SUBMISSION=0)
+ENABLE_TX_SUBMISSION="${ENABLE_TX_SUBMISSION:-1}"
+TX_COUNT="${TX_COUNT:-25}"  # Number of transactions per submission wave
+TX_WAVES="${TX_WAVES:-4}"   # Number of submission waves
+TX_INTERVAL="${TX_INTERVAL:-20}"  # Seconds between submission waves
+TX_START_DELAY="${TX_START_DELAY:-100}"  # Seconds to wait before first submission
 
 # ============================================================================
 # VALIDATE BASE DIR EXISTS
@@ -215,12 +234,24 @@ echo "  Max Instances: ${MAX_INSTANCES}"
 echo "  Runs per Instance: ${RUNS_PER_INSTANCES}"
 echo "  Sleep between runs: ${SLEEP_SECONDS}s"
 echo "  Log directory: ${LOG_DIR}"
+if [[ "${ENABLE_TX_SUBMISSION}" == "1" ]]; then
+    echo "  Transaction submission: ENABLED"
+    echo "    Waves: ${TX_WAVES}"
+    echo "    Transactions per wave: ${TX_COUNT}"
+    echo "    Start delay: ${TX_START_DELAY}s"
+    echo "    Interval: ${TX_INTERVAL}s"
+else
+    echo "  Transaction submission: DISABLED"
+fi
 echo ""
 
 for instances in $(seq 1 ${MAX_INSTANCES}); do
     for runIndex in $(seq 1 ${RUNS_PER_INSTANCES}); do
         echo "[orchestrator-remote] ========================================="
         echo "[orchestrator-remote] Starting run: instances=${instances}, run=${runIndex}"
+        
+        # Initialize array for transaction submission PIDs
+        TX_SUBMIT_PIDS=()
         
         # Pre-run cleanup
         echo "[orchestrator-remote] Pre-clean: stopping any leftover validators..."
@@ -249,6 +280,34 @@ for instances in $(seq 1 ${MAX_INSTANCES}); do
         VALIDATOR_PID=$!
         echo "[orchestrator-remote] Validator started with PID: ${VALIDATOR_PID}"
         
+        # Schedule transaction submissions if enabled
+        if [[ "${ENABLE_TX_SUBMISSION}" == "1" ]] && [[ -f "${RUN_REMOTE_SCRIPT}" ]] && [[ -x "${RUN_REMOTE_SCRIPT}" ]]; then
+            echo "[orchestrator-remote] Scheduling ${TX_WAVES} transaction submission wave(s)..."
+            
+            # Submit transaction submission jobs in background
+            for wave in $(seq 1 ${TX_WAVES}); do
+                DELAY=$((TX_START_DELAY + (wave - 1) * TX_INTERVAL))
+                (
+                    sleep ${DELAY}
+                    echo "[orchestrator-remote] [Wave ${wave}/${TX_WAVES}] Submitting ${TX_COUNT} transactions after ${DELAY}s..."
+                    cd "${REPO_ROOT}"
+                    BASE_DIR="${BASE_DIR}" "${RUN_REMOTE_SCRIPT}" "${TX_COUNT}" 2>&1 | tee -a "${LOG_DIR}/tx_submit_i${instances}_r${runIndex}_wave${wave}.log" || {
+                        echo "[orchestrator-remote] [Wave ${wave}] Transaction submission failed (this is non-fatal)" >&2
+                    }
+                ) &
+                TX_SUBMIT_PIDS+=($!)
+            done
+            
+            echo "[orchestrator-remote] Transaction submissions scheduled:"
+            for wave in $(seq 1 ${TX_WAVES}); do
+                DELAY=$((TX_START_DELAY + (wave - 1) * TX_INTERVAL))
+                echo "  Wave ${wave}: ${TX_COUNT} tx after ${DELAY}s"
+            done
+        elif [[ "${ENABLE_TX_SUBMISSION}" == "1" ]]; then
+            echo "[orchestrator-remote] Warning: Transaction submission enabled but run-remote.sh not found or not executable" >&2
+            echo "[orchestrator-remote] Expected at: ${RUN_REMOTE_SCRIPT}" >&2
+        fi
+        
         # Wait for the specified duration
         echo "[orchestrator-remote] Sleeping ${SLEEP_SECONDS}s..."
         sleep "${SLEEP_SECONDS}"
@@ -256,6 +315,29 @@ for instances in $(seq 1 ${MAX_INSTANCES}); do
         # Stop validator
         echo "[orchestrator-remote] Stopping validator..."
         kill_validator "${instances}"
+        
+        # Wait for any pending transaction submissions to complete (with timeout)
+        if [[ -n "${TX_SUBMIT_PIDS:-}" ]] && [[ ${#TX_SUBMIT_PIDS[@]} -gt 0 ]]; then
+            echo "[orchestrator-remote] Waiting for transaction submissions to complete (max 60s)..."
+            for pid in "${TX_SUBMIT_PIDS[@]}"; do
+                if kill -0 "${pid}" 2>/dev/null; then
+                    # Wait up to 60 seconds for each submission process
+                    timeout=60
+                    while [[ $timeout -gt 0 ]] && kill -0 "${pid}" 2>/dev/null; do
+                        sleep 1
+                        timeout=$((timeout - 1))
+                    done
+                    # Kill if still running after timeout
+                    if kill -0 "${pid}" 2>/dev/null; then
+                        echo "[orchestrator-remote] Killing transaction submission process ${pid} (timeout)"
+                        kill -TERM "${pid}" 2>/dev/null || true
+                        sleep 2
+                        kill -KILL "${pid}" 2>/dev/null || true
+                    fi
+                fi
+            done
+            TX_SUBMIT_PIDS=()
+        fi
         
         # Wait a bit more for graceful shutdown
         if kill -0 "${VALIDATOR_PID}" 2>/dev/null; then
