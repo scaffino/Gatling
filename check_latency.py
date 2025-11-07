@@ -20,6 +20,12 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Dict, Iterable, List, Optional, Tuple
 
+try:
+    from scipy.stats import ks_2samp
+    SCIPY_AVAILABLE = True
+except ImportError:
+    SCIPY_AVAILABLE = False
+
 
 FILENAME_RE = re.compile(r"^gatling_v(\d+)_i(\d+)_r(\d+)\.log$")
 LOG_TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z)")
@@ -35,19 +41,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dir",
         dest="dir",
-        default=os.path.join("logs", "gatling"),
+        default=os.path.join("logs", "gatling-remote"),
         help="Directory containing gatling_v*_i*_r*.log files",
     )
     parser.add_argument(
         "--csv",
         dest="csv",
-        default=os.path.join("logs", "gatling", "latency_vs_instances.csv"),
+        default=os.path.join(
+            "logs", "gatling-remote", "latency_vs_instances.csv"
+        ),
         help="Output CSV path",
     )
     parser.add_argument(
         "--png",
         dest="png",
-        default=os.path.join("logs", "gatling", "latency_vs_instances.png"),
+        default=os.path.join(
+            "logs", "gatling-remote", "latency_vs_instances.png"
+        ),
         help="Output PNG path",
     )
     return parser.parse_args()
@@ -390,6 +400,7 @@ def plot_boxplot_with_mean(
 
     plt.xlabel("Number of instances")
     plt.ylabel("Latency (ms)")
+    plt.yscale('log')
     plt.title(
         "Transaction latency distribution vs consensus instances (with mean)"
     )
@@ -502,7 +513,7 @@ def plot_boxplot_with_scatter(
             x_scatter,
             data_for_boxplot[i],
             alpha=0.3,
-            s=10,
+            s=3,
             color='darkblue',
             zorder=10
         )
@@ -514,6 +525,7 @@ def plot_boxplot_with_scatter(
 
     plt.xlabel("Number of instances")
     plt.ylabel("Latency (ms)")
+    plt.yscale('log')
     plt.title(
         "Transaction latency distribution vs consensus instances "
         "(with scatter)"
@@ -626,7 +638,7 @@ def plot_boxplot_with_mean_and_scatter(
             x_scatter,
             data_for_boxplot[i],
             alpha=0.3,
-            s=10,
+            s=3,
             color='darkblue',
             zorder=10
         )
@@ -651,6 +663,7 @@ def plot_boxplot_with_mean_and_scatter(
 
     plt.xlabel("Number of instances")
     plt.ylabel("Latency (ms)")
+    plt.yscale('log')
     plt.title(
         "Transaction latency distribution vs consensus instances "
         "(with mean and scatter)"
@@ -661,6 +674,183 @@ def plot_boxplot_with_mean_and_scatter(
     plt.tight_layout()
     plt.savefig(png_path, dpi=160)
     plt.close()
+
+
+def prepare_data_for_statistical_test(
+    by_instances: Dict[int, Dict[str, List[int]]]
+) -> Dict[int, List[int]]:
+    """
+    Prepare latency data for statistical testing.
+    Returns: instances -> list of all latency values
+    """
+    instance_data: Dict[int, List[int]] = {}
+    for instances, tx_map in by_instances.items():
+        all_latencies = []
+        for tx_hash, validator_latencies in tx_map.items():
+            all_latencies.extend(validator_latencies)
+        instance_data[instances] = all_latencies
+    return instance_data
+
+
+def perform_ks_tests(
+    by_instances: Dict[int, Dict[str, List[int]]]
+) -> None:
+    """
+    Perform Kolmogorov-Smirnov tests for pairwise comparisons between
+    all instance groups with Bonferroni correction for multiple comparisons.
+    """
+    if not SCIPY_AVAILABLE:
+        print(
+            "\nWarning: scipy not available. "
+            "Skipping Kolmogorov-Smirnov tests."
+            "\nInstall with: pip install scipy"
+        )
+        return
+
+    instance_data = prepare_data_for_statistical_test(by_instances)
+    sorted_instances = sorted(instance_data.keys())
+
+    if len(sorted_instances) < 2:
+        print("\nInsufficient groups for statistical testing.")
+        return
+
+    print("\n" + "=" * 80)
+    print("KOLMOGOROV-SMIRNOV TESTS (Non-Significant Comparisons Only)")
+    print("=" * 80)
+
+    # Calculate number of comparisons for Bonferroni correction
+    n_instances = len(sorted_instances)
+    n_comparisons = n_instances * (n_instances - 1) // 2
+    alpha = 0.05
+    corrected_alpha = alpha / n_comparisons
+
+    print(f"\nTotal number of pairwise comparisons: {n_comparisons}")
+    print(f"Uncorrected alpha level: {alpha}")
+    print(f"Bonferroni corrected alpha level: {corrected_alpha:.6f}")
+    print(
+        "\nShowing only NON-SIGNIFICANT comparisons "
+        "(p-value >= corrected alpha)"
+    )
+    print(
+        "\n" + "-" * 80
+    )
+    print(
+        f"{'Instance 1':<12} {'Instance 2':<12} {'KS Statistic':<15} "
+        f"{'p-value':<15} {'n1':<8} {'n2':<8}"
+    )
+    print("-" * 80)
+
+    non_significant_pairs = []
+    all_comparisons = []
+
+    for i, inst1 in enumerate(sorted_instances):
+        for inst2 in sorted_instances[i + 1:]:
+            data1 = instance_data[inst1]
+            data2 = instance_data[inst2]
+            n1 = len(data1)
+            n2 = len(data2)
+
+            try:
+                # Perform Kolmogorov-Smirnov test
+                ks_statistic, p_value = ks_2samp(data1, data2)
+
+                # Check significance after Bonferroni correction
+                is_significant = p_value < corrected_alpha
+
+                all_comparisons.append(
+                    (
+                        inst1, inst2, ks_statistic, p_value,
+                        is_significant, n1, n2
+                    )
+                )
+
+                # Only collect and print non-significant pairs
+                if not is_significant:
+                    non_significant_pairs.append(
+                        (inst1, inst2, ks_statistic, p_value, n1, n2)
+                    )
+
+                    # Format output with better precision for p-values
+                    # Use scientific notation for very small p-values
+                    if p_value < 1e-10:
+                        p_value_str = f"{p_value:.3e}"
+                    elif p_value < 0.0001:
+                        p_value_str = f"{p_value:.6e}"
+                    else:
+                        p_value_str = f"{p_value:.10f}"
+
+                    print(
+                        f"instances={inst1:<4}  instances={inst2:<4}  "
+                        f"{ks_statistic:>14.6f}  {p_value_str:>15}  "
+                        f"{n1:>7}  {n2:>7}"
+                    )
+            except Exception as e:
+                print(
+                    f"Error comparing instances={inst1} vs "
+                    f"instances={inst2}: {e}"
+                )
+
+    print("-" * 80)
+
+    # Summary of non-significant comparisons
+    if non_significant_pairs:
+        print("\n" + "=" * 80)
+        print("SUMMARY OF NON-SIGNIFICANT COMPARISONS")
+        print("=" * 80)
+        print(
+            f"{'Instance 1':<12} {'Instance 2':<12} {'KS Statistic':<15} "
+            f"{'p-value':<15} {'n1':<8} {'n2':<8}"
+        )
+        print("-" * 80)
+        for inst1, inst2, ks_stat, p_val, n1, n2 in non_significant_pairs:
+            # Format p-value with better precision
+            if p_val < 1e-10:
+                p_val_str = f"{p_val:.3e}"
+            elif p_val < 0.0001:
+                p_val_str = f"{p_val:.6e}"
+            else:
+                p_val_str = f"{p_val:.10f}"
+            print(
+                f"instances={inst1:<4}  instances={inst2:<4}  "
+                f"{ks_stat:>14.6f}  {p_val_str:>15}  {n1:>7}  {n2:>7}"
+            )
+        print(
+            f"\nTotal non-significant pairs: "
+            f"{len(non_significant_pairs)}/{n_comparisons}"
+        )
+        print(
+            f"Total significant pairs: "
+            f"{n_comparisons - len(non_significant_pairs)}/{n_comparisons}"
+        )
+    else:
+        print(
+            f"\nAll comparisons are significant after Bonferroni correction "
+            f"({n_comparisons}/{n_comparisons} significant)"
+        )
+
+    # Additional statistics per group
+    print("\n" + "=" * 80)
+    print("GROUP SUMMARY STATISTICS")
+    print("=" * 80)
+    print(
+        f"{'Instances':<12} {'n':<8} {'Mean (ms)':<12} {'Median (ms)':<12} "
+        f"{'Std (ms)':<12} {'Min (ms)':<10} {'Max (ms)':<10}"
+    )
+    print("-" * 80)
+    for inst in sorted_instances:
+        data = instance_data[inst]
+        mean_val = statistics.mean(data)
+        median_val = statistics.median(data)
+        std_val = statistics.stdev(data) if len(data) >= 2 else 0.0
+        min_val = min(data)
+        max_val = max(data)
+        print(
+            f"instances={inst:<4}  {len(data):>7}  {mean_val:>11.2f}  "
+            f"{median_val:>11.2f}  {std_val:>11.2f}  {min_val:>9.2f}  "
+            f"{max_val:>9.2f}"
+        )
+
+    print("\n" + "=" * 80 + "\n")
 
 
 def main() -> None:
@@ -681,6 +871,9 @@ def main() -> None:
                 instances, average_ms, median_ms, std_ms, min_ms, max_ms, n
             )
         )
+
+    # Perform Kolmogorov-Smirnov tests with multiple comparison correction
+    perform_ks_tests(by_instances)
 
     write_csv(stats, args.csv)
     # Generate three plots: one with mean overlay, one with scatter overlay,

@@ -290,7 +290,6 @@ def main() -> int:
         instance_count = extract_instance_count_from_filename(p)
         groups.setdefault(instance_count, []).append(p)
 
-
     # 3) Verify each group separately
     all_ok = True
     for instance_count, group_paths in sorted(groups.items()):

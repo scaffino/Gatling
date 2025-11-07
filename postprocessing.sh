@@ -8,36 +8,123 @@ fi
 set -euo pipefail
 
 # Extract gatling lines from per-validator logs into logs/gatling/gatling_vV_iI_rR.log
-# Input: vV_iI_rR.log (V = validator index, I = instance index, R = run index)
+# Supports multiple input directories and different filename formats:
+# - Local format: vV_iI_rR.log (V = validator index, I = instance index, R = run index)
+# - Remote format: val_{public_key}_iI_rR.log (public_key = validator public key hash)
 # Output: gatling_vV_iI_rR.log (matching validator, instance, and run indices)
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="${SCRIPT_DIR}"
-IN_DIR="${REPO_ROOT}/logs/validators"
-OUT_DIR="${REPO_ROOT}/logs/gatling"
 
-if [[ ! -d "${IN_DIR}" ]]; then
-  echo "Logs directory not found: ${IN_DIR}" >&2
-  exit 1
-fi
+# ============================================================================
+# CONFIGURATION: Input directories to process
+# ============================================================================
+# Add or remove directories as needed. Script will process files from all directories.
+# Format: relative paths from REPO_ROOT, or absolute paths
+IN_DIRS=(
+    #"${REPO_ROOT}/logs/validators"
+    "${REPO_ROOT}/logs/val-nyc"
+    "${REPO_ROOT}/logs/val-london"
+)
+
+OUT_DIR="${REPO_ROOT}/logs/gatling-remote"
+
+# ============================================================================
+# HELPER FUNCTIONS
+# ============================================================================
+
+# Map public key to a consistent validator index (1-based)
+# Uses first 8 characters of public key hash as base, then mod to keep it reasonable
+# This ensures the same public key always maps to the same validator index
+map_public_key_to_validator_idx() {
+    local public_key="$1"
+    # Use first 8 chars of public key, convert hex to decimal, mod by 100, add 1
+    # This gives us a consistent mapping in range 1-100
+    local hex_prefix="${public_key:0:8}"
+    # Convert hex to decimal (handles lowercase)
+    local decimal=$((16#${hex_prefix}))
+    local validator_idx=$(( (decimal % 100) + 1 ))
+    echo "${validator_idx}"
+}
+
+# Process a single log file and extract gatling lines
+process_log_file() {
+    local file="$1"
+    local validator_idx="$2"
+    local instance_idx="$3"
+    local run_idx="$4"
+    
+    local out_file="${OUT_DIR}/gatling_v${validator_idx}_i${instance_idx}_r${run_idx}.log"
+    
+    # Extract lines containing '[gatling]', preserving UTC timestamp at the beginning
+    # Format: <timestamp> [gatling]...
+    if ! grep -Ei "\\[gatling\\]" "$file" | sed -E 's/^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]+Z).*(\[gatling\].*)$/\1 \2/' >"$out_file" 2>/dev/null; then
+      : >"$out_file"
+    fi
+    echo "Wrote ${out_file} (from $(basename "$file"))"
+}
+
+# ============================================================================
+# MAIN PROCESSING
+# ============================================================================
 
 mkdir -p "${OUT_DIR}"
 
-shopt -s nullglob
-for f in "${IN_DIR}"/v*_i*_r*.log; do
-  base="$(basename "$f")"
-  if [[ "$base" =~ ^v([0-9]+)_i([0-9]+)_r([0-9]+)\.log$ ]]; then
-    validator_idx="${BASH_REMATCH[1]}"
-    instance_idx="${BASH_REMATCH[2]}"
-    run_idx="${BASH_REMATCH[3]}"
-    out_file="${OUT_DIR}/gatling_v${validator_idx}_i${instance_idx}_r${run_idx}.log"
-    # Extract lines containing '[gatling]', preserving UTC timestamp at the beginning
-    # Format: <timestamp> [gatling]...
-    if ! grep -Ei "\\[gatling\\]" "$f" | sed -E 's/^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]+Z).*(\[gatling\].*)$/\1 \2/' >"$out_file" 2>/dev/null; then
-      : >"$out_file"
+# Check if any input directory exists
+found_dirs=0
+for dir in "${IN_DIRS[@]}"; do
+    if [[ -d "$dir" ]]; then
+        found_dirs=1
+        break
     fi
-    echo "Wrote ${out_file}"
-  fi
+done
+
+if [[ $found_dirs -eq 0 ]]; then
+    echo "Error: None of the input directories found:" >&2
+    for dir in "${IN_DIRS[@]}"; do
+        echo "  - ${dir}" >&2
+    done
+    exit 1
+fi
+
+shopt -s nullglob
+
+# Process files from all input directories
+for IN_DIR in "${IN_DIRS[@]}"; do
+    if [[ ! -d "${IN_DIR}" ]]; then
+        echo "Skipping non-existent directory: ${IN_DIR}"
+        continue
+    fi
+    
+    echo "Processing directory: ${IN_DIR}"
+    
+    # Process local format: v{validator_idx}_i{instance_idx}_r{run_idx}.log
+    for f in "${IN_DIR}"/v[0-9]*_i*_r*.log; do
+        [[ ! -f "$f" ]] && continue
+        base="$(basename "$f")"
+        if [[ "$base" =~ ^v([0-9]+)_i([0-9]+)_r([0-9]+)\.log$ ]]; then
+            validator_idx="${BASH_REMATCH[1]}"
+            instance_idx="${BASH_REMATCH[2]}"
+            run_idx="${BASH_REMATCH[3]}"
+            process_log_file "$f" "$validator_idx" "$instance_idx" "$run_idx"
+        fi
+    done
+    
+    # Process remote format: val_{public_key}_i{instance_idx}_r{run_idx}.log
+    for f in "${IN_DIR}"/val_*_i*_r*.log; do
+        [[ ! -f "$f" ]] && continue
+        base="$(basename "$f")"
+        # Match: val_{public_key}_i{instance_idx}_r{run_idx}.log
+        # Public key is a hex string (64 chars typically)
+        if [[ "$base" =~ ^val_([0-9a-f]+)_i([0-9]+)_r([0-9]+)\.log$ ]]; then
+            public_key="${BASH_REMATCH[1]}"
+            instance_idx="${BASH_REMATCH[2]}"
+            run_idx="${BASH_REMATCH[3]}"
+            # Map public key to validator index
+            validator_idx=$(map_public_key_to_validator_idx "$public_key")
+            process_log_file "$f" "$validator_idx" "$instance_idx" "$run_idx"
+        fi
+    done
 done
 
 echo "Verifying gatling logs grouped by instance (iX) and round (rX)..."
