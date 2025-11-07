@@ -284,19 +284,12 @@ def main() -> int:
         parsed[p] = entries
         total_matched += len(entries)
 
-    #parsed_msg = (
-    #    f"Parsed gatling logs - OK (files={len(paths)}, "
-    #    f"matched_lines={total_matched})"
-    #)
-    #print(parsed_msg)
-
     # 2) Group files by instance count
     groups: Dict[Optional[int], List[str]] = {}
     for p in paths:
         instance_count = extract_instance_count_from_filename(p)
         groups.setdefault(instance_count, []).append(p)
 
-    #print(f"Grouped files by instance count - OK (groups={len(groups)})")
 
     # 3) Verify each group separately
     all_ok = True

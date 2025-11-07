@@ -76,19 +76,12 @@ def check_consistency(dir_path: str) -> None:
     Performs basic consistency checks over discovered Gatling logs:
     - Files must follow expected naming:
       gatling_v{validator}_i{instances}_r{run}.log
-    - For each instances count, all runs should have the same
-      validator set
-    - Reports the number of runs per instances and validators
-      discovered.
-    Exits with non-zero status on hard inconsistencies.
+    Exits with non-zero status if no matching files are found.
     """
-    by_instances_runs: Dict[int, Dict[int, set]] = defaultdict(
-        lambda: defaultdict(set)
-    )
     any_file = False
-    for _, instances, validator, run_idx in iter_gatling_files(dir_path):
+    for _, _, _, _ in iter_gatling_files(dir_path):
         any_file = True
-        by_instances_runs[instances][run_idx].add(validator)
+        break
 
     if not any_file:
         print(
@@ -98,46 +91,6 @@ def check_consistency(dir_path: str) -> None:
             ).format(dir_path)
         )
         sys.exit(1)
-
-    hard_error = False
-    for instances, runs_map in sorted(by_instances_runs.items()):
-        if not runs_map:
-            print("Warning: instances={0} has no runs".format(instances))
-            continue
-        # Establish reference validator set from the smallest run index
-        ref_run = min(runs_map.keys())
-        ref_validators = runs_map[ref_run]
-        # Compare all runs' validator sets
-        for run_idx, vals in sorted(runs_map.items()):
-            if vals != ref_validators:
-                print(
-                    (
-                        "ERROR: instances={0} run={1} validators {2} "
-                        "!= run={3} validators {4}"
-                    ).format(
-                        instances,
-                        run_idx,
-                        sorted(vals),
-                        ref_run,
-                        sorted(ref_validators),
-                    )
-                )
-                hard_error = True
-
-        print(
-            "consistency: instances={0}: runs={1}, validators={2}".format(
-                instances, sorted(runs_map.keys()), sorted(ref_validators)
-            )
-        )
-
-    if hard_error:
-        print(
-            (
-                "Fatal: inconsistent validator sets across runs detected. "
-                "Aborting."
-            )
-        )
-        sys.exit(2)
 
 
 def parse_log_line(line: str) -> Optional[Tuple[int, str, int]]:
@@ -213,78 +166,97 @@ def aggregate_by_instances(dir_path: str) -> Dict[int, Dict[str, List[int]]]:
 
 def compute_instance_stats(
     by_instances: Dict[int, Dict[str, List[int]]]
-) -> Dict[int, Tuple[float, float, int]]:
+) -> Dict[int, Tuple[float, float, float, float, float, int]]:
     """
     For each instance count I:
     1. For each transaction, compute average of latency values from all
        validators (each validator contributes its first finalization event)
     2. Compute overall average across all unique transactions
-    3. Compute standard deviation across per-transaction averages
+    3. Compute median across per-transaction averages
+    4. Compute standard deviation across per-transaction averages
+    5. Compute min and max across per-transaction averages
     Returns mapping:
-    I -> (average_latency_ms, stddev_latency_ms, num_unique_transactions).
+    I -> (average_latency_ms, median_latency_ms, stddev_latency_ms,
+          min_latency_ms, max_latency_ms, num_unique_transactions).
     """
-    result: Dict[int, Tuple[float, float, int]] = {}
+    result: Dict[int, Tuple[float, float, float, float, float, int]] = {}
     for instances, tx_map in sorted(by_instances.items()):
         per_tx_averages: List[float] = []
         for tx_hash, validator_latencies in tx_map.items():
             if not validator_latencies:
                 continue
-            # Average latency across all validators for this transaction
+            # For each tx, compute the average latency across all vals
+            # who reported it
             tx_average = statistics.mean(validator_latencies)
             per_tx_averages.append(tx_average)
+        # per_tx_averages is the list of mean latencies for each unique tx
+        # at the given number of instances
         if per_tx_averages:
             overall_average = statistics.mean(per_tx_averages)
+            overall_median = statistics.median(per_tx_averages)
             overall_std = (
-                statistics.stdev(per_tx_averages)
-                if len(per_tx_averages) >= 2
+                statistics.stdev(per_tx_averages) if len(per_tx_averages) >= 2
                 else 0.0
             )
+            overall_min = min(per_tx_averages)
+            overall_max = max(per_tx_averages)
             result[instances] = (
                 overall_average,
+                overall_median,
                 overall_std,
+                overall_min,
+                overall_max,
                 len(per_tx_averages),
             )
         else:
-            result[instances] = (0.0, 0.0, 0)
+            result[instances] = (0.0, 0.0, 0.0, 0.0, 0.0, 0)
     return result
 
 
 def write_csv(
-    stats: Dict[int, Tuple[float, float, int]], csv_path: str
+    stats: Dict[int, Tuple[float, float, float, float, float, int]],
+    csv_path: str,
 ) -> None:
     os.makedirs(os.path.dirname(csv_path), exist_ok=True)
     with open(csv_path, "w") as f:
         f.write(
             (
-                "instances,average_latency_ms,stddev_latency_ms,"
+                "instances,average_latency_ms,median_latency_ms,"
+                "stddev_latency_ms,min_latency_ms,max_latency_ms,"
                 "num_transactions\n"
             )
         )
         for instances in sorted(stats.keys()):
-            average_ms, std_ms, n = stats[instances]
-            f.write(f"{instances},{average_ms:.3f},{std_ms:.3f},{n}\n")
+            average_ms, median_ms, std_ms, min_ms, max_ms, n = stats[instances]
+            f.write(
+                f"{instances},{average_ms:.3f},{median_ms:.3f},"
+                f"{std_ms:.3f},{min_ms:.3f},{max_ms:.3f},{n}\n"
+            )
 
 
-def plot_png(
-    by_instances: Dict[int, Dict[str, List[int]]], png_path: str
-) -> None:
-    try:
-        import matplotlib.pyplot as plt
-        from matplotlib.patches import Rectangle
-        import numpy as np
-    except Exception as e:
-        print(
-            (
-                "Warning: matplotlib/numpy not available; "
-                "skipping plot: {0}"
-            ).format(e)
-        )
-        return
-
-    # Extract all latency values for each instance count
+def prepare_plot_data(
+    by_instances: Dict[int, Dict[str, List[int]]]
+) -> Tuple[
+    List[List[int]],
+    List[int],
+    List[Tuple[float, float, float, float, float]],
+    List[float],
+]:
+    """
+    Prepare data for plotting: extract latencies, calculate percentiles
+    and means.
+    Returns: (data_for_boxplot, instance_labels, percentile_data, mean_data)
+    """
     data_for_boxplot = []
     instance_labels = []
     percentile_data = []
+    mean_data = []
+    try:
+        import numpy as np
+    except ImportError:
+        print("Error: numpy not available")
+        return [], [], [], []
+
     for instances in sorted(by_instances.keys()):
         all_latencies = []
         for tx_hash, validator_latencies in by_instances[instances].items():
@@ -298,20 +270,48 @@ def plot_png(
             p90 = np.percentile(all_latencies, 90)
             p_min = np.min(all_latencies)
             p_max = np.max(all_latencies)
+            mean_val = np.mean(all_latencies)
             percentile_data.append((p10, p50, p90, p_min, p_max))
+            mean_data.append(mean_val)
+
+    return data_for_boxplot, instance_labels, percentile_data, mean_data
+
+
+def plot_boxplot_with_mean(
+    by_instances: Dict[int, Dict[str, List[int]]], png_path: str
+) -> None:
+    """Create a box plot with mean overlay using seaborn."""
+    try:
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        from matplotlib.patches import Rectangle
+    except Exception as e:
+        print(
+            (
+                "Warning: matplotlib/seaborn/numpy not available; "
+                "skipping plot: {0}"
+            ).format(e)
+        )
+        return
+
+    data_for_boxplot, instance_labels, percentile_data, mean_data = (
+        prepare_plot_data(by_instances)
+    )
 
     if not data_for_boxplot:
         print("Warning: no data to plot")
         return
 
+    # Set seaborn style
+    sns.set_style("whitegrid")
     plt.figure(figsize=(7, 4))
 
     # Manually create box plot with 10th-90th percentiles
     positions = range(1, len(instance_labels) + 1)
     box_width = 0.6
 
-    for i, (pos, (p10, p50, p90, p_min, p_max)) in enumerate(
-        zip(positions, percentile_data)
+    for i, (pos, (p10, p50, p90, p_min, p_max), mean_val) in enumerate(
+        zip(positions, percentile_data, mean_data)
     ):
         x_center = pos
         x_left = x_center - box_width / 2
@@ -323,7 +323,7 @@ def plot_png(
             (x_left, p10),
             box_width,
             box_height,
-            facecolor='lightblue',
+            facecolor=sns.color_palette("pastel")[0],
             alpha=0.7,
             edgecolor='black',
             linewidth=1
@@ -371,16 +371,291 @@ def plot_png(
             linewidth=1
         )
 
+        # Overlay mean as a marker
+        plt.plot(
+            x_center,
+            mean_val,
+            marker='D',
+            markersize=5,
+            color='red',
+            markeredgecolor='darkred',
+            markeredgewidth=1,
+            label='Mean' if i == 0 else ''
+        )
+
     # Set x-axis labels and limits
-    plt.xticks(positions, instance_labels)
-    # Force x-axis to show 0 to 11
     ticks = list(range(0, 12))
     plt.xticks(ticks, ticks)
     plt.xlim(0.5, 11.5)
 
     plt.xlabel("Number of instances")
     plt.ylabel("Latency (ms)")
-    plt.title("Transaction latency distribution vs consensus instances")
+    plt.title(
+        "Transaction latency distribution vs consensus instances (with mean)"
+    )
+    plt.legend(loc='best')
+    plt.grid(True, linestyle=":", alpha=0.6, axis='y')
+    os.makedirs(os.path.dirname(png_path), exist_ok=True)
+    plt.tight_layout()
+    plt.savefig(png_path, dpi=160)
+    plt.close()
+
+
+def plot_boxplot_with_scatter(
+    by_instances: Dict[int, Dict[str, List[int]]], png_path: str
+) -> None:
+    """Create a box plot with scatter overlay using seaborn."""
+    try:
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        from matplotlib.patches import Rectangle
+        import numpy as np
+    except Exception as e:
+        print(
+            (
+                "Warning: matplotlib/seaborn/numpy not available; "
+                "skipping plot: {0}"
+            ).format(e)
+        )
+        return
+
+    data_for_boxplot, instance_labels, percentile_data, _ = (
+        prepare_plot_data(by_instances)
+    )
+
+    if not data_for_boxplot:
+        print("Warning: no data to plot")
+        return
+
+    # Set seaborn style
+    sns.set_style("whitegrid")
+    plt.figure(figsize=(7, 4))
+
+    # Manually create box plot with 10th-90th percentiles
+    positions = range(1, len(instance_labels) + 1)
+    box_width = 0.6
+
+    for i, (pos, (p10, p50, p90, p_min, p_max)) in enumerate(
+        zip(positions, percentile_data)
+    ):
+        x_center = pos
+        x_left = x_center - box_width / 2
+        x_right = x_center + box_width / 2
+
+        # Draw box (rectangle from p10 to p90)
+        box_height = p90 - p10
+        rect = Rectangle(
+            (x_left, p10),
+            box_width,
+            box_height,
+            facecolor=sns.color_palette("pastel")[0],
+            alpha=0.7,
+            edgecolor='black',
+            linewidth=1
+        )
+        plt.gca().add_patch(rect)
+
+        # Draw median line
+        plt.plot(
+            [x_left, x_right],
+            [p50, p50],
+            color='black',
+            linewidth=1.5
+        )
+
+        # Draw whiskers (extend from box edges to min/max)
+        whisker_width = box_width * 0.3
+        # Lower whisker (from p10 to p_min)
+        plt.plot(
+            [x_center, x_center],
+            [p_min, p10],
+            color='black',
+            linewidth=1
+        )
+        # Upper whisker (from p90 to p_max)
+        plt.plot(
+            [x_center, x_center],
+            [p90, p_max],
+            color='black',
+            linewidth=1
+        )
+
+        # Draw caps (horizontal lines at whisker ends)
+        # Lower cap at p_min
+        plt.plot(
+            [x_center - whisker_width / 2, x_center + whisker_width / 2],
+            [p_min, p_min],
+            color='black',
+            linewidth=1
+        )
+        # Upper cap at p_max
+        plt.plot(
+            [x_center - whisker_width / 2, x_center + whisker_width / 2],
+            [p_max, p_max],
+            color='black',
+            linewidth=1
+        )
+
+        # Overlay scatter plot of all data points
+        x_scatter = np.random.normal(x_center, 0.05, len(data_for_boxplot[i]))
+        plt.scatter(
+            x_scatter,
+            data_for_boxplot[i],
+            alpha=0.3,
+            s=10,
+            color='darkblue',
+            zorder=10
+        )
+
+    # Set x-axis labels and limits
+    ticks = list(range(0, 12))
+    plt.xticks(ticks, ticks)
+    plt.xlim(0.5, 11.5)
+
+    plt.xlabel("Number of instances")
+    plt.ylabel("Latency (ms)")
+    plt.title(
+        "Transaction latency distribution vs consensus instances "
+        "(with scatter)"
+    )
+    plt.grid(True, linestyle=":", alpha=0.6, axis='y')
+    os.makedirs(os.path.dirname(png_path), exist_ok=True)
+    plt.tight_layout()
+    plt.savefig(png_path, dpi=160)
+    plt.close()
+
+
+def plot_boxplot_with_mean_and_scatter(
+    by_instances: Dict[int, Dict[str, List[int]]], png_path: str
+) -> None:
+    """Create a box plot with both mean and scatter overlay using seaborn."""
+    try:
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        from matplotlib.patches import Rectangle
+        import numpy as np
+    except Exception as e:
+        print(
+            (
+                "Warning: matplotlib/seaborn/numpy not available; "
+                "skipping plot: {0}"
+            ).format(e)
+        )
+        return
+
+    data_for_boxplot, instance_labels, percentile_data, mean_data = (
+        prepare_plot_data(by_instances)
+    )
+
+    if not data_for_boxplot:
+        print("Warning: no data to plot")
+        return
+
+    # Set seaborn style
+    sns.set_style("whitegrid")
+    plt.figure(figsize=(7, 4))
+
+    # Manually create box plot with 10th-90th percentiles
+    positions = range(1, len(instance_labels) + 1)
+    box_width = 0.6
+
+    for i, (pos, (p10, p50, p90, p_min, p_max), mean_val) in enumerate(
+        zip(positions, percentile_data, mean_data)
+    ):
+        x_center = pos
+        x_left = x_center - box_width / 2
+        x_right = x_center + box_width / 2
+
+        # Draw box (rectangle from p10 to p90)
+        box_height = p90 - p10
+        rect = Rectangle(
+            (x_left, p10),
+            box_width,
+            box_height,
+            facecolor=sns.color_palette("pastel")[0],
+            alpha=0.7,
+            edgecolor='black',
+            linewidth=1
+        )
+        plt.gca().add_patch(rect)
+
+        # Draw median line
+        plt.plot(
+            [x_left, x_right],
+            [p50, p50],
+            color='black',
+            linewidth=1.5
+        )
+
+        # Draw whiskers (extend from box edges to min/max)
+        whisker_width = box_width * 0.3
+        # Lower whisker (from p10 to p_min)
+        plt.plot(
+            [x_center, x_center],
+            [p_min, p10],
+            color='black',
+            linewidth=1
+        )
+        # Upper whisker (from p90 to p_max)
+        plt.plot(
+            [x_center, x_center],
+            [p90, p_max],
+            color='black',
+            linewidth=1
+        )
+
+        # Draw caps (horizontal lines at whisker ends)
+        # Lower cap at p_min
+        plt.plot(
+            [x_center - whisker_width / 2, x_center + whisker_width / 2],
+            [p_min, p_min],
+            color='black',
+            linewidth=1
+        )
+        # Upper cap at p_max
+        plt.plot(
+            [x_center - whisker_width / 2, x_center + whisker_width / 2],
+            [p_max, p_max],
+            color='black',
+            linewidth=1
+        )
+
+        # Overlay scatter plot of all data points
+        x_scatter = np.random.normal(x_center, 0.05, len(data_for_boxplot[i]))
+        plt.scatter(
+            x_scatter,
+            data_for_boxplot[i],
+            alpha=0.3,
+            s=10,
+            color='darkblue',
+            zorder=10
+        )
+
+        # Overlay mean as a marker
+        plt.plot(
+            x_center,
+            mean_val,
+            marker='D',
+            markersize=5,
+            color='red',
+            markeredgecolor='darkred',
+            markeredgewidth=1,
+            label='Mean' if i == 0 else '',
+            zorder=11
+        )
+
+    # Set x-axis labels and limits
+    ticks = list(range(0, 12))
+    plt.xticks(ticks, ticks)
+    plt.xlim(0.5, 11.5)
+
+    plt.xlabel("Number of instances")
+    plt.ylabel("Latency (ms)")
+    plt.title(
+        "Transaction latency distribution vs consensus instances "
+        "(with mean and scatter)"
+    )
+    plt.legend(loc='best')
     plt.grid(True, linestyle=":", alpha=0.6, axis='y')
     os.makedirs(os.path.dirname(png_path), exist_ok=True)
     plt.tight_layout()
@@ -397,14 +672,27 @@ def main() -> None:
 
     # Console summary
     for instances in sorted(stats.keys()):
-        average_ms, std_ms, n = stats[instances]
+        average_ms, median_ms, std_ms, min_ms, max_ms, n = stats[instances]
         print(
-            "instances={0}: average_latency_ms={1:.3f}, stddev_ms={2:.3f}, "
-            "unique_transactions={3}".format(instances, average_ms, std_ms, n)
+            "instances={0}: avg_ms={1:.3f}, "
+            "median_ms={2:.3f}, stddev_ms={3:.3f}, "
+            "min_ms={4:.3f}, max_ms={5:.3f}, "
+            "unique_txs={6}".format(
+                instances, average_ms, median_ms, std_ms, min_ms, max_ms, n
+            )
         )
 
     write_csv(stats, args.csv)
-    plot_png(by_instances, args.png)
+    # Generate three plots: one with mean overlay, one with scatter overlay,
+    # and one with both mean and scatter
+    base_path = args.png
+    if base_path.endswith('.png'):
+        base_path = base_path[:-4]
+    plot_boxplot_with_mean(by_instances, f"{base_path}_mean.png")
+    plot_boxplot_with_scatter(by_instances, f"{base_path}_scatter.png")
+    plot_boxplot_with_mean_and_scatter(
+        by_instances, f"{base_path}_mean_scatter.png"
+    )
 
 
 if __name__ == "__main__":

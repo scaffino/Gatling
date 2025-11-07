@@ -508,7 +508,6 @@ mod tests {
                 fetch_concurrent: 10,
                 fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(10).unwrap()),
                 indexer: None,
-                included_transactions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
                 proposal_offset_ms: 0,
                 gatling_tx: None,
                 gatling_instance_id: 1,
