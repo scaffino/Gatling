@@ -221,6 +221,61 @@ kill_validator() {
     pkill -f "consensus-instances ${instances}" 2>/dev/null || true
 }
 
+# Global variables to track current run state for cleanup
+CURRENT_INSTANCES=""
+CURRENT_VALIDATOR_PID=""
+declare -a CURRENT_TX_SUBMIT_PIDS=()
+
+# Cleanup function called on script exit/interrupt
+cleanup_on_exit() {
+    echo ""
+    echo "[orchestrator-remote] ========================================="
+    echo "[orchestrator-remote] Interrupted! Cleaning up processes..."
+    
+    # Kill transaction submission processes
+    if [[ -n "${CURRENT_TX_SUBMIT_PIDS:-}" ]] && [[ ${#CURRENT_TX_SUBMIT_PIDS[@]} -gt 0 ]]; then
+        echo "[orchestrator-remote] Killing transaction submission processes..."
+        for pid in "${CURRENT_TX_SUBMIT_PIDS[@]}"; do
+            if kill -0 "${pid}" 2>/dev/null; then
+                kill -TERM "${pid}" 2>/dev/null || true
+            fi
+        done
+        sleep 1
+        for pid in "${CURRENT_TX_SUBMIT_PIDS[@]}"; do
+            if kill -0 "${pid}" 2>/dev/null; then
+                kill -KILL "${pid}" 2>/dev/null || true
+            fi
+        done
+    fi
+    
+    # Kill validator process
+    if [[ -n "${CURRENT_VALIDATOR_PID:-}" ]] && kill -0 "${CURRENT_VALIDATOR_PID}" 2>/dev/null; then
+        echo "[orchestrator-remote] Killing validator process ${CURRENT_VALIDATOR_PID}..."
+        kill -INT "${CURRENT_VALIDATOR_PID}" 2>/dev/null || true
+        sleep 2
+        if kill -0 "${CURRENT_VALIDATOR_PID}" 2>/dev/null; then
+            kill -KILL "${CURRENT_VALIDATOR_PID}" 2>/dev/null || true
+        fi
+    fi
+    
+    # Kill all validator processes by pattern (fallback)
+    if [[ -n "${CURRENT_INSTANCES:-}" ]]; then
+        kill_validator "${CURRENT_INSTANCES}" || true
+    else
+        # If we don't know the instances, kill all validators
+        echo "[orchestrator-remote] Killing all validator processes..."
+        pkill -INT -f "validator --" 2>/dev/null || true
+        sleep 2
+        pkill -KILL -f "validator --" 2>/dev/null || true
+    fi
+    
+    echo "[orchestrator-remote] Cleanup complete."
+    exit 130  # Exit code 130 is standard for SIGINT
+}
+
+# Set up signal handlers
+trap cleanup_on_exit SIGINT SIGTERM
+
 # ============================================================================
 # MAIN ORCHESTRATION LOOP
 # ============================================================================
@@ -250,6 +305,11 @@ for instances in $(seq 1 ${MAX_INSTANCES}); do
         echo "[orchestrator-remote] ========================================="
         echo "[orchestrator-remote] Starting run: instances=${instances}, run=${runIndex}"
         
+        # Update current state for cleanup handler
+        CURRENT_INSTANCES="${instances}"
+        CURRENT_VALIDATOR_PID=""
+        CURRENT_TX_SUBMIT_PIDS=()
+        
         # Initialize array for transaction submission PIDs
         TX_SUBMIT_PIDS=()
         
@@ -257,6 +317,13 @@ for instances in $(seq 1 ${MAX_INSTANCES}); do
         echo "[orchestrator-remote] Pre-clean: stopping any leftover validators..."
         kill_validator "${instances}" || true
         sleep 3
+        
+        # Clear storage directory for clean state
+        if [[ -n "${STORAGE_DIR:-}" ]] && [[ -d "${STORAGE_DIR}" ]]; then
+            echo "[orchestrator-remote] Clearing storage directory: ${STORAGE_DIR}"
+            find "${STORAGE_DIR}" -mindepth 1 -delete 2>/dev/null || true
+            echo "[orchestrator-remote] Storage directory cleared"
+        fi
         
         # Set up log file
         LOG_FILE="${LOG_DIR}/val_${PUBLIC_KEY}_i${instances}_r${runIndex}.log"
@@ -278,6 +345,7 @@ for instances in $(seq 1 ${MAX_INSTANCES}); do
         # Run validator in background and capture PID
         bash -c "${VAL_CMD}" &
         VALIDATOR_PID=$!
+        CURRENT_VALIDATOR_PID="${VALIDATOR_PID}"
         echo "[orchestrator-remote] Validator started with PID: ${VALIDATOR_PID}"
         
         # Schedule transaction submissions if enabled
@@ -296,6 +364,7 @@ for instances in $(seq 1 ${MAX_INSTANCES}); do
                     }
                 ) &
                 TX_SUBMIT_PIDS+=($!)
+                CURRENT_TX_SUBMIT_PIDS+=($!)
             done
             
             echo "[orchestrator-remote] Transaction submissions scheduled:"
@@ -354,8 +423,15 @@ for instances in $(seq 1 ${MAX_INSTANCES}); do
         
         echo "[orchestrator-remote] Completed: instances=${instances}, run=${runIndex}"
         echo ""
+        
+        # Clear current state after successful completion
+        CURRENT_VALIDATOR_PID=""
+        CURRENT_TX_SUBMIT_PIDS=()
     done
 done
+
+# Clear trap on normal completion
+trap - SIGINT SIGTERM
 
 echo "[orchestrator-remote] ========================================="
 echo "[orchestrator-remote] Completed all runs."
