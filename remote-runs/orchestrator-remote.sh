@@ -96,7 +96,7 @@ mkdir -p "${LOG_DIR}"
 REPO_ROOT="${REPO_ROOT:-/root/alto}"
 
 # Transaction submission script
-RUN_REMOTE_SCRIPT="${REPO_ROOT}/submitTx-remote.sh"
+RUN_REMOTE_SCRIPT="${REPO_ROOT}/remote-runs/submitTx-remote.sh"
 
 # Transaction submission settings (can be disabled by setting ENABLE_TX_SUBMISSION=0)
 ENABLE_TX_SUBMISSION="${ENABLE_TX_SUBMISSION:-1}"

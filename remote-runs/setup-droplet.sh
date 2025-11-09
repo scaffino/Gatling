@@ -29,11 +29,11 @@ REMOTE_BASE_DIR="/root/alto/deploy/manual"
 
 # Resolve absolute paths
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-# If script is under chain/, REPO_ROOT is parent; else REPO_ROOT is SCRIPT_DIR
-if [[ "$(basename "${SCRIPT_DIR}")" == "chain" ]]; then
-  REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-else
-  REPO_ROOT="${SCRIPT_DIR}"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+if [[ ! -d "${REPO_ROOT}/chain" ]]; then
+  echo "Error: Expected to find 'chain/' directory at ${REPO_ROOT}/chain" >&2
+  exit 1
 fi
 
 OUTPUT_DIR_ABS="${REPO_ROOT}/chain/${OUTPUT_DIR}"
