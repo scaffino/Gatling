@@ -124,7 +124,7 @@ ENABLE_TX_SUBMISSION="${ENABLE_TX_SUBMISSION:-1}"
 TX_COUNT="${TX_COUNT:-25}"  # Number of transactions per submission wave
 TX_WAVES="${TX_WAVES:-4}"   # Number of submission waves
 TX_INTERVAL="${TX_INTERVAL:-20}"  # Seconds between submission waves
-TX_START_DELAY="${TX_START_DELAY:-250}"  # Seconds to wait before first submission
+TX_START_DELAY="${TX_START_DELAY:-360}"  # Seconds to wait before first submission
 
 # ============================================================================
 # VALIDATE BASE DIR EXISTS
