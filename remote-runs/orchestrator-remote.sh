@@ -28,6 +28,41 @@ set -euo pipefail
 #   TX_WAVES: Number of submission waves (default: 4)
 #   TX_INTERVAL: Seconds between submission waves (default: 20)
 #   TX_START_DELAY: Seconds to wait before first submission (default: 100)
+#   INSTANCE_SEQUENCE: Comma-separated list of consensus instance counts to run (overrides 1..MAX_INSTANCES)
+#   RUN_SEQUENCE: Comma-separated list of run indexes to execute per instance (overrides 1..RUNS_PER_INSTANCES)
+# Sequence overrides for instances and runs
+INSTANCE_SEQUENCE_RAW="${INSTANCE_SEQUENCE:-}"
+RUN_SEQUENCE_RAW="${RUN_SEQUENCE:-}"
+
+declare -a INSTANCE_LIST=()
+declare -a RUN_LIST=()
+
+if [[ -n "${INSTANCE_SEQUENCE_RAW}" ]]; then
+    IFS=',' read -r -a INSTANCE_LIST <<< "${INSTANCE_SEQUENCE_RAW}"
+else
+    for inst in $(seq 1 "${MAX_INSTANCES}"); do
+        INSTANCE_LIST+=("${inst}")
+    done
+fi
+
+if [[ -n "${RUN_SEQUENCE_RAW}" ]]; then
+    IFS=',' read -r -a RUN_LIST <<< "${RUN_SEQUENCE_RAW}"
+else
+    for run in $(seq 1 "${RUNS_PER_INSTANCES}"); do
+        RUN_LIST+=("${run}")
+    done
+fi
+
+# Validate that instance and run lists are not empty
+if [[ ${#INSTANCE_LIST[@]} -eq 0 ]]; then
+    echo "Error: INSTANCE_LIST is empty after applying overrides" >&2
+    exit 1
+fi
+
+if [[ ${#RUN_LIST[@]} -eq 0 ]]; then
+    echo "Error: RUN_LIST is empty after applying overrides" >&2
+    exit 1
+fi
 #
 # If PUBLIC_KEY is not provided, the script will try to auto-detect it from available config files
 #
@@ -289,6 +324,12 @@ echo "  Max Instances: ${MAX_INSTANCES}"
 echo "  Runs per Instance: ${RUNS_PER_INSTANCES}"
 echo "  Sleep between runs: ${SLEEP_SECONDS}s"
 echo "  Log directory: ${LOG_DIR}"
+if [[ -n "${INSTANCE_SEQUENCE_RAW}" ]]; then
+    echo "  Instance sequence override: ${INSTANCE_SEQUENCE_RAW}"
+fi
+if [[ -n "${RUN_SEQUENCE_RAW}" ]]; then
+    echo "  Run sequence override: ${RUN_SEQUENCE_RAW}"
+fi
 if [[ "${ENABLE_TX_SUBMISSION}" == "1" ]]; then
     echo "  Transaction submission: ENABLED"
     echo "    Waves: ${TX_WAVES}"
@@ -300,8 +341,8 @@ else
 fi
 echo ""
 
-for instances in $(seq 1 ${MAX_INSTANCES}); do
-    for runIndex in $(seq 1 ${RUNS_PER_INSTANCES}); do
+for instances in "${INSTANCE_LIST[@]}"; do
+    for runIndex in "${RUN_LIST[@]}"; do
         echo "[orchestrator-remote] ========================================="
         echo "[orchestrator-remote] Starting run: instances=${instances}, run=${runIndex}"
         

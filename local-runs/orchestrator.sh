@@ -5,8 +5,7 @@ set -euo pipefail
 # Orchestrates sequential runs of run.sh with:
 # - validators: configurable via env var NUM_VALIDATORS (default: 2)
 # - instances = 1..MAX_INSTANCES, each repeated RUNS_PER_INSTANCES times
-
-
+chagne 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="${SCRIPT_DIR}"
 RUNS_PER_INSTANCES=2

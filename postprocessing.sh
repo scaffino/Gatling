@@ -22,7 +22,7 @@ REPO_ROOT="${SCRIPT_DIR}"
 # Add or remove directories as needed. Script will process files from all directories.
 # Format: relative paths from REPO_ROOT, or absolute paths
 IN_DIRS=(
-    #"${REPO_ROOT}/logs/validators"
+    "${REPO_ROOT}/logs/val-india"
     "${REPO_ROOT}/logs/val-nyc"
     "${REPO_ROOT}/logs/val-london"
 )
@@ -33,17 +33,14 @@ OUT_DIR="${REPO_ROOT}/logs/gatling-remote"
 # HELPER FUNCTIONS
 # ============================================================================
 
-# Map public key to a consistent validator index (1-based)
-# Uses first 8 characters of public key hash as base, then mod to keep it reasonable
-# This ensures the same public key always maps to the same validator index
+# Map public key to a consistent validator index derived from its first two hex digits
+# We keep only the first two characters, interpret them as hex, and use the decimal value
+# This keeps identifiers small while remaining deterministic per public key
 map_public_key_to_validator_idx() {
     local public_key="$1"
-    # Use first 8 chars of public key, convert hex to decimal, mod by 100, add 1
-    # This gives us a consistent mapping in range 1-100
-    local hex_prefix="${public_key:0:8}"
-    # Convert hex to decimal (handles lowercase)
-    local decimal=$((16#${hex_prefix}))
-    local validator_idx=$(( (decimal % 100) + 1 ))
+    local hex_prefix="${public_key:0:2}"
+    # Convert first two hex chars to decimal (handles lowercase)
+    local validator_idx=$((16#${hex_prefix}))
     echo "${validator_idx}"
 }
 
