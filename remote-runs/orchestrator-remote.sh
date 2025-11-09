@@ -98,12 +98,33 @@ REPO_ROOT="${REPO_ROOT:-/root/alto}"
 # Transaction submission script
 RUN_REMOTE_SCRIPT="${REPO_ROOT}/remote-runs/submitTx-remote.sh"
 
+# ----------------------------------------------------------------------------
+# Logging helpers
+# ----------------------------------------------------------------------------
+CURRENT_RUN_TAG=""
+
+log() {
+    printf '[orchestrator] %s\n' "$*"
+}
+
+log_section() {
+    printf '\n[orchestrator] === %s ===\n' "$*"
+}
+
+log_run() {
+    if [[ -n "${CURRENT_RUN_TAG:-}" ]]; then
+        printf '[orchestrator] (%s) %s\n' "${CURRENT_RUN_TAG}" "$*"
+    else
+        log "$*"
+    fi
+}
+
 # Transaction submission settings (can be disabled by setting ENABLE_TX_SUBMISSION=0)
 ENABLE_TX_SUBMISSION="${ENABLE_TX_SUBMISSION:-1}"
 TX_COUNT="${TX_COUNT:-25}"  # Number of transactions per submission wave
 TX_WAVES="${TX_WAVES:-4}"   # Number of submission waves
 TX_INTERVAL="${TX_INTERVAL:-20}"  # Seconds between submission waves
-TX_START_DELAY="${TX_START_DELAY:-100}"  # Seconds to wait before first submission
+TX_START_DELAY="${TX_START_DELAY:-250}"  # Seconds to wait before first submission
 
 # ============================================================================
 # VALIDATE BASE DIR EXISTS
@@ -120,7 +141,7 @@ fi
 # ============================================================================
 
 if [[ -z "${PUBLIC_KEY}" ]]; then
-    echo "[orchestrator-remote] Auto-detecting public key from config files..."
+    log "auto-detecting public key from config files"
     
     # Find all .yaml files in BASE_DIR (excluding peers.yaml)
     CONFIG_FILES=()
@@ -148,7 +169,7 @@ if [[ -z "${PUBLIC_KEY}" ]]; then
     
     CONFIG_FILE="${CONFIG_FILES[0]}"
     PUBLIC_KEY="$(basename "${CONFIG_FILE}" .yaml)"
-    echo "[orchestrator-remote] Detected public key: ${PUBLIC_KEY}"
+    log "detected public key: ${PUBLIC_KEY}"
 else
     CONFIG_FILE="${BASE_DIR}/${PUBLIC_KEY}.yaml"
 fi
@@ -183,7 +204,7 @@ if [[ -z "${VALIDATOR_BINARY}" ]] || [[ ! -f "${VALIDATOR_BINARY}" ]]; then
     for candidate in "${CANDIDATES[@]}"; do
         if [[ -f "${candidate}" ]]; then
             VALIDATOR_BINARY="${candidate}"
-            echo "[orchestrator-remote] Found validator binary at: ${VALIDATOR_BINARY}"
+            log "validator binary detected at ${VALIDATOR_BINARY}"
             break
         fi
     done
@@ -211,10 +232,9 @@ if [[ -z "${STORAGE_DIR}" ]]; then
     echo "Warning: Could not find 'directory:' in config file. Continuing anyway..." >&2
 else
     if [[ ! -d "${STORAGE_DIR}" ]]; then
-        echo "Storage directory does not exist: ${STORAGE_DIR}"
-        echo "Creating it..."
+        log "storage dir missing: ${STORAGE_DIR} (creating)"
         mkdir -p "${STORAGE_DIR}"
-        echo "Created: ${STORAGE_DIR}"
+        log "storage dir created: ${STORAGE_DIR}"
     fi
 fi
 
@@ -225,8 +245,8 @@ fi
 
 kill_validator() {
     local instances="$1"
-    echo "[orchestrator-remote] Stopping validator processes for instances=${instances}..."
-    
+    log_run "stopping validator processes (instances=${instances})"
+
     # Patterns to match validator processes
     local patterns=(
         "validator --"
@@ -263,13 +283,12 @@ declare -a CURRENT_TX_SUBMIT_PIDS=()
 
 # Cleanup function called on script exit/interrupt
 cleanup_on_exit() {
-    echo ""
-    echo "[orchestrator-remote] ========================================="
-    echo "[orchestrator-remote] Interrupted! Cleaning up processes..."
-    
+    log_section "interrupt"
+    log_run "cleanup initiated"
+
     # Kill transaction submission processes
     if [[ -n "${CURRENT_TX_SUBMIT_PIDS:-}" ]] && [[ ${#CURRENT_TX_SUBMIT_PIDS[@]} -gt 0 ]]; then
-        echo "[orchestrator-remote] Killing transaction submission processes..."
+        log_run "terminating pending transaction submissions"
         for pid in "${CURRENT_TX_SUBMIT_PIDS[@]}"; do
             if kill -0 "${pid}" 2>/dev/null; then
                 kill -TERM "${pid}" 2>/dev/null || true
@@ -285,7 +304,7 @@ cleanup_on_exit() {
     
     # Kill validator process
     if [[ -n "${CURRENT_VALIDATOR_PID:-}" ]] && kill -0 "${CURRENT_VALIDATOR_PID}" 2>/dev/null; then
-        echo "[orchestrator-remote] Killing validator process ${CURRENT_VALIDATOR_PID}..."
+        log_run "killing validator process ${CURRENT_VALIDATOR_PID}"
         kill -INT "${CURRENT_VALIDATOR_PID}" 2>/dev/null || true
         sleep 2
         if kill -0 "${CURRENT_VALIDATOR_PID}" 2>/dev/null; then
@@ -298,13 +317,13 @@ cleanup_on_exit() {
         kill_validator "${CURRENT_INSTANCES}" || true
     else
         # If we don't know the instances, kill all validators
-        echo "[orchestrator-remote] Killing all validator processes..."
+        log_run "killing all validator processes"
         pkill -INT -f "validator --" 2>/dev/null || true
         sleep 2
         pkill -KILL -f "validator --" 2>/dev/null || true
     fi
     
-    echo "[orchestrator-remote] Cleanup complete."
+    log_run "cleanup complete"
     exit 130  # Exit code 130 is standard for SIGINT
 }
 
@@ -315,37 +334,32 @@ trap cleanup_on_exit SIGINT SIGTERM
 # MAIN ORCHESTRATION LOOP
 # ============================================================================
 
-echo "[orchestrator-remote] Starting orchestration"
-echo "  Public Key: ${PUBLIC_KEY}"
-echo "  Config: ${CONFIG_FILE}"
-echo "  Peers: ${PEERS_FILE}"
-echo "  Binary: ${VALIDATOR_BINARY}"
-echo "  Max Instances: ${MAX_INSTANCES}"
-echo "  Runs per Instance: ${RUNS_PER_INSTANCES}"
-echo "  Sleep between runs: ${SLEEP_SECONDS}s"
-echo "  Log directory: ${LOG_DIR}"
+log_section "startup"
+log "public-key=${PUBLIC_KEY}"
+log "config=${CONFIG_FILE}"
+log "peers=${PEERS_FILE}"
+log "binary=${VALIDATOR_BINARY}"
+log "log-dir=${LOG_DIR}"
+log "instances=${INSTANCE_LIST[*]:-} (max=${MAX_INSTANCES}) | runs=${RUN_LIST[*]:-} (per=${RUNS_PER_INSTANCES}) | sleep=${SLEEP_SECONDS}s"
 if [[ -n "${INSTANCE_SEQUENCE_RAW}" ]]; then
-    echo "  Instance sequence override: ${INSTANCE_SEQUENCE_RAW}"
+    log "instance override=${INSTANCE_SEQUENCE_RAW}"
 fi
 if [[ -n "${RUN_SEQUENCE_RAW}" ]]; then
-    echo "  Run sequence override: ${RUN_SEQUENCE_RAW}"
+    log "run override=${RUN_SEQUENCE_RAW}"
 fi
 if [[ "${ENABLE_TX_SUBMISSION}" == "1" ]]; then
-    echo "  Transaction submission: ENABLED"
-    echo "    Waves: ${TX_WAVES}"
-    echo "    Transactions per wave: ${TX_COUNT}"
-    echo "    Start delay: ${TX_START_DELAY}s"
-    echo "    Interval: ${TX_INTERVAL}s"
+    log "tx-submission=on (waves=${TX_WAVES}×${TX_COUNT}, start=${TX_START_DELAY}s, interval=${TX_INTERVAL}s)"
 else
-    echo "  Transaction submission: DISABLED"
+    log "tx-submission=off"
 fi
-echo ""
+
+log_section "runs"
 
 for instances in "${INSTANCE_LIST[@]}"; do
     for runIndex in "${RUN_LIST[@]}"; do
-        echo "[orchestrator-remote] ========================================="
-        echo "[orchestrator-remote] Starting run: instances=${instances}, run=${runIndex}"
-        
+        CURRENT_RUN_TAG="inst=${instances},run=${runIndex}"
+        log_section "${CURRENT_RUN_TAG}"
+
         # Update current state for cleanup handler
         CURRENT_INSTANCES="${instances}"
         CURRENT_VALIDATOR_PID=""
@@ -355,23 +369,22 @@ for instances in "${INSTANCE_LIST[@]}"; do
         TX_SUBMIT_PIDS=()
         
         # Pre-run cleanup
-        echo "[orchestrator-remote] Pre-clean: stopping any leftover validators..."
+        log_run "prep: stopping leftover validators"
         kill_validator "${instances}" || true
         sleep 3
         
         # Clear storage directory for clean state
         if [[ -n "${STORAGE_DIR:-}" ]] && [[ -d "${STORAGE_DIR}" ]]; then
-            echo "[orchestrator-remote] Clearing storage directory: ${STORAGE_DIR}"
             find "${STORAGE_DIR}" -mindepth 1 -delete 2>/dev/null || true
-            echo "[orchestrator-remote] Storage directory cleared"
+            log_run "storage reset: ${STORAGE_DIR}"
         fi
         
         # Set up log file
         LOG_FILE="${LOG_DIR}/val_${PUBLIC_KEY}_i${instances}_r${runIndex}.log"
-        echo "[orchestrator-remote] Log file: ${LOG_FILE}"
+        log_run "log file: ${LOG_FILE}"
         
         # Start validator
-        echo "[orchestrator-remote] Starting validator..."
+        log_run "starting validator"
         ulimit -n 65536 || true
         
         # Build command (run from repo root to ensure any relative paths work)
@@ -387,48 +400,41 @@ for instances in "${INSTANCE_LIST[@]}"; do
         bash -c "${VAL_CMD}" &
         VALIDATOR_PID=$!
         CURRENT_VALIDATOR_PID="${VALIDATOR_PID}"
-        echo "[orchestrator-remote] Validator started with PID: ${VALIDATOR_PID}"
+        log_run "validator pid=${VALIDATOR_PID}"
         
         # Schedule transaction submissions if enabled
         if [[ "${ENABLE_TX_SUBMISSION}" == "1" ]] && [[ -f "${RUN_REMOTE_SCRIPT}" ]] && [[ -x "${RUN_REMOTE_SCRIPT}" ]]; then
-            echo "[orchestrator-remote] Scheduling ${TX_WAVES} transaction submission wave(s)..."
+            log_run "tx waves scheduled (${TX_WAVES}×${TX_COUNT}, start=${TX_START_DELAY}s, interval=${TX_INTERVAL}s)"
             
             # Submit transaction submission jobs in background
             for wave in $(seq 1 ${TX_WAVES}); do
                 DELAY=$((TX_START_DELAY + (wave - 1) * TX_INTERVAL))
                 (
                     sleep ${DELAY}
-                    echo "[orchestrator-remote] [Wave ${wave}/${TX_WAVES}] Submitting ${TX_COUNT} transactions after ${DELAY}s..."
+                    log_run "tx wave ${wave}/${TX_WAVES} started (${TX_COUNT} tx after ${DELAY}s)"
                     cd "${REPO_ROOT}"
                     BASE_DIR="${BASE_DIR}" "${RUN_REMOTE_SCRIPT}" "${TX_COUNT}" >/dev/null 2>&1 || {
-                        echo "[orchestrator-remote] [Wave ${wave}] Transaction submission failed (this is non-fatal)" >&2
+                        log_run "tx wave ${wave} failed (non-fatal)"
                     }
                 ) &
                 TX_SUBMIT_PIDS+=($!)
                 CURRENT_TX_SUBMIT_PIDS+=($!)
             done
-            
-            echo "[orchestrator-remote] Transaction submissions scheduled:"
-            for wave in $(seq 1 ${TX_WAVES}); do
-                DELAY=$((TX_START_DELAY + (wave - 1) * TX_INTERVAL))
-                echo "  Wave ${wave}: ${TX_COUNT} tx after ${DELAY}s"
-            done
         elif [[ "${ENABLE_TX_SUBMISSION}" == "1" ]]; then
-            echo "[orchestrator-remote] Warning: Transaction submission enabled but submitTx-remote.sh not found or not executable" >&2
-            echo "[orchestrator-remote] Expected at: ${RUN_REMOTE_SCRIPT}" >&2
+            echo "[orchestrator] (${CURRENT_RUN_TAG}) WARNING: submitTx-remote.sh not found or not executable (expected ${RUN_REMOTE_SCRIPT})" >&2
         fi
         
         # Wait for the specified duration
-        echo "[orchestrator-remote] Sleeping ${SLEEP_SECONDS}s..."
+        log_run "running for ${SLEEP_SECONDS}s"
         sleep "${SLEEP_SECONDS}"
         
         # Stop validator
-        echo "[orchestrator-remote] Stopping validator..."
+        log_run "stopping validator"
         kill_validator "${instances}"
         
         # Wait for any pending transaction submissions to complete (with timeout)
         if [[ -n "${TX_SUBMIT_PIDS:-}" ]] && [[ ${#TX_SUBMIT_PIDS[@]} -gt 0 ]]; then
-            echo "[orchestrator-remote] Waiting for transaction submissions to complete (max 60s)..."
+            log_run "waiting for tx submitters (max 60s each)"
             for pid in "${TX_SUBMIT_PIDS[@]}"; do
                 if kill -0 "${pid}" 2>/dev/null; then
                     # Wait up to 60 seconds for each submission process
@@ -439,7 +445,7 @@ for instances in "${INSTANCE_LIST[@]}"; do
                     done
                     # Kill if still running after timeout
                     if kill -0 "${pid}" 2>/dev/null; then
-                        echo "[orchestrator-remote] Killing transaction submission process ${pid} (timeout)"
+                        log_run "killing tx submitter pid=${pid} (timeout)"
                         kill -TERM "${pid}" 2>/dev/null || true
                         sleep 2
                         kill -KILL "${pid}" 2>/dev/null || true
@@ -451,7 +457,7 @@ for instances in "${INSTANCE_LIST[@]}"; do
         
         # Wait a bit more for graceful shutdown
         if kill -0 "${VALIDATOR_PID}" 2>/dev/null; then
-            echo "[orchestrator-remote] Waiting for validator to stop gracefully..."
+            log_run "waiting for validator shutdown"
             sleep 5
             # Force kill if still running
             if kill -0 "${VALIDATOR_PID}" 2>/dev/null; then
@@ -459,11 +465,10 @@ for instances in "${INSTANCE_LIST[@]}"; do
             fi
         fi
         
-        echo "[orchestrator-remote] Settle ${SETTLE_SECONDS}s"
+        log_run "settle pause ${SETTLE_SECONDS}s"
         sleep "${SETTLE_SECONDS}"
         
-        echo "[orchestrator-remote] Completed: instances=${instances}, run=${runIndex}"
-        echo ""
+        log_run "run complete"
         
         # Clear current state after successful completion
         CURRENT_VALIDATOR_PID=""
@@ -474,7 +479,7 @@ done
 # Clear trap on normal completion
 trap - SIGINT SIGTERM
 
-echo "[orchestrator-remote] ========================================="
-echo "[orchestrator-remote] Completed all runs."
-echo "[orchestrator-remote] Logs are available in: ${LOG_DIR}"
+log_section "done"
+log "all runs completed"
+log "logs stored in ${LOG_DIR}"
 
