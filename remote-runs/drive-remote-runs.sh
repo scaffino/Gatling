@@ -75,6 +75,7 @@ SKIP_SETUP="${SKIP_SETUP:-0}"
 CONFIG_FILES=()
 PUBLIC_KEYS=()
 REMOTE_IPS=()
+ACTIVE_SSH_PIDS=()
 
 # =============================================================================
 # Helper functions
@@ -278,6 +279,18 @@ validate_prerequisites() {
     mkdir -p "${CONFIG_OUTPUT_DIR}"
 }
 
+cleanup_on_interrupt() {
+    log "Interrupt received. Stopping remote orchestrators..."
+    for pid in "${ACTIVE_SSH_PIDS[@]}"; do
+        if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
+            kill "${pid}" 2>/dev/null || true
+        fi
+    done
+    wait
+    log "Cleanup complete."
+    exit 130
+}
+
 # =============================================================================
 # Main orchestration
 # =============================================================================
@@ -286,6 +299,7 @@ main() {
     validate_prerequisites
     collect_remote_ips
     build_sequences
+    trap cleanup_on_interrupt INT TERM
 
     local peers_template="${CONFIG_OUTPUT_DIR}/peers.yaml"
     local instances run_idx
@@ -333,6 +347,7 @@ main() {
 
             log "Starting remote orchestrators..."
             local pids=()
+            ACTIVE_SSH_PIDS=()
 
             for idx in "${!REMOTE_HOSTS[@]}"; do
                 host="${REMOTE_HOSTS[idx]}"
@@ -344,7 +359,9 @@ main() {
                 fi
 
                 invoke_remote_orchestrator "${host}" "${public_key}" "${instances}" "${run_idx}" "${remote_dir}" "${remote_log_dir}" &
-                pids+=("$!")
+                pid="$!"
+                pids+=("${pid}")
+                ACTIVE_SSH_PIDS+=("${pid}")
             done
 
             if [[ "${DRY_RUN}" != "1" ]]; then
@@ -360,6 +377,8 @@ main() {
                 fi
             fi
 
+            ACTIVE_SSH_PIDS=()
+
             rm -rf "${temp_dir}"
             trap - EXIT
 
@@ -369,6 +388,7 @@ main() {
     done
 
     log "All requested runs completed."
+    trap - INT TERM
 }
 
 main "$@"
