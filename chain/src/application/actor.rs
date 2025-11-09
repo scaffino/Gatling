@@ -71,8 +71,8 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
     /// Compute absolute proposal time in milliseconds for given view and instance.
     /// tproposal = genesis_timestamp + v + (k-1)/K
     pub fn tproposal(genesis_ts_secs: u64, k_total: u64, k: u64, v: u64) -> u128 {
-        let base_ms = (genesis_ts_secs + v) as u128 * 1000;
-        let frac_ms = ((k.saturating_sub(1)) as u128 * 1000) / (k_total as u128);
+        let base_ms = (genesis_ts_secs + v) as u128 * 2000;
+        let frac_ms = ((k.saturating_sub(1)) as u128 * 2000) / (k_total as u128);
         base_ms + frac_ms
     }
     /// Create a new application actor.
