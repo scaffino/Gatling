@@ -20,8 +20,8 @@ fi
 
 # Resolve absolute paths
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-# If script is under chain/, REPO_ROOT is parent; else REPO_ROOT is SCRIPT_DIR
-if [[ "$(basename "${SCRIPT_DIR}")" == "chain" ]]; then
+# If script is under chain/ or local-runs/, REPO_ROOT is parent; else REPO_ROOT is SCRIPT_DIR
+if [[ "$(basename "${SCRIPT_DIR}")" == "chain" ]] || [[ "$(basename "${SCRIPT_DIR}")" == "local-runs" ]]; then
   REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 else
   REPO_ROOT="${SCRIPT_DIR}"
@@ -222,40 +222,40 @@ SUBMIT_LOG_FILE="${LOG_ROOT}/submitTx.log"
   sleep 100
   echo "[submitTx] Starting 20 tx after 100 seconds..." | tee -a "${SUBMIT_LOG_FILE}"
   cd "${REPO_ROOT}"
-  if [[ -x "./submitTx.sh" ]]; then
-    ./submitTx.sh 25 2>&1 | tee -a "${SUBMIT_LOG_FILE}"
+  if [[ -x "${SCRIPT_DIR}/submitTx.sh" ]]; then
+    "${SCRIPT_DIR}/submitTx.sh" 25 2>&1 | tee -a "${SUBMIT_LOG_FILE}"
   else
-    echo "[submitTx] ERROR: submitTx.sh not found or not executable in ${REPO_ROOT}" | tee -a "${SUBMIT_LOG_FILE}"
+    echo "[submitTx] ERROR: submitTx.sh not found or not executable at ${SCRIPT_DIR}/submitTx.sh" | tee -a "${SUBMIT_LOG_FILE}"
   fi
 ) &
 (
   sleep 120
   echo "[submitTx] Starting 100 tx after 150 seconds..." | tee -a "${SUBMIT_LOG_FILE}"
   cd "${REPO_ROOT}"
-  if [[ -x "./submitTx.sh" ]]; then
-    ./submitTx.sh 25 2>&1 | tee -a "${SUBMIT_LOG_FILE}"
+  if [[ -x "${SCRIPT_DIR}/submitTx.sh" ]]; then
+    "${SCRIPT_DIR}/submitTx.sh" 25 2>&1 | tee -a "${SUBMIT_LOG_FILE}"
   else
-    echo "[submitTx] ERROR: submitTx.sh not found or not executable in ${REPO_ROOT}" | tee -a "${SUBMIT_LOG_FILE}"
+    echo "[submitTx] ERROR: submitTx.sh not found or not executable at ${SCRIPT_DIR}/submitTx.sh" | tee -a "${SUBMIT_LOG_FILE}"
   fi
 ) &
 (
   sleep 140
   echo "[submitTx] Starting 100 tx after 150 seconds..." | tee -a "${SUBMIT_LOG_FILE}"
   cd "${REPO_ROOT}"
-  if [[ -x "./submitTx.sh" ]]; then
-    ./submitTx.sh 25 2>&1 | tee -a "${SUBMIT_LOG_FILE}"
+  if [[ -x "${SCRIPT_DIR}/submitTx.sh" ]]; then
+    "${SCRIPT_DIR}/submitTx.sh" 25 2>&1 | tee -a "${SUBMIT_LOG_FILE}"
   else
-    echo "[submitTx] ERROR: submitTx.sh not found or not executable in ${REPO_ROOT}" | tee -a "${SUBMIT_LOG_FILE}"
+    echo "[submitTx] ERROR: submitTx.sh not found or not executable at ${SCRIPT_DIR}/submitTx.sh" | tee -a "${SUBMIT_LOG_FILE}"
   fi
 ) &
 (
   sleep 160
   echo "[submitTx] Starting 100 tx after 150 seconds..." | tee -a "${SUBMIT_LOG_FILE}"
   cd "${REPO_ROOT}"
-  if [[ -x "./submitTx.sh" ]]; then
-    ./submitTx.sh 25 2>&1 | tee -a "${SUBMIT_LOG_FILE}"
+  if [[ -x "${SCRIPT_DIR}/submitTx.sh" ]]; then
+    "${SCRIPT_DIR}/submitTx.sh" 25 2>&1 | tee -a "${SUBMIT_LOG_FILE}"
   else
-    echo "[submitTx] ERROR: submitTx.sh not found or not executable in ${REPO_ROOT}" | tee -a "${SUBMIT_LOG_FILE}"
+    echo "[submitTx] ERROR: submitTx.sh not found or not executable at ${SCRIPT_DIR}/submitTx.sh" | tee -a "${SUBMIT_LOG_FILE}"
   fi
 ) &
 echo "Scheduled submitTx.sh waves at 100s (20), 150s (100). Logs: ${SUBMIT_LOG_FILE}."
