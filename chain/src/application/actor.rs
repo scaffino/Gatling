@@ -69,11 +69,16 @@ pub struct Actor<R: Rng + CryptoRng + Spawner + Metrics + Clock> {
 
 impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
     /// Compute absolute proposal time in milliseconds for given view and instance.
-    /// tproposal = genesis_timestamp + v + (k-1)/K
+    /// tproposal = genesis_timestamp + (v + (k-1)/K) * delta_ibt_ms
     pub fn tproposal(genesis_ts_secs: u64, k_total: u64, k: u64, v: u64) -> u128 {
-        let base_ms = (genesis_ts_secs + v) as u128 * 3000;
-        let frac_ms = ((k.saturating_sub(1)) as u128 * 3000) / (k_total as u128);
-        base_ms + frac_ms
+        let genesis_ms = genesis_ts_secs as u128;
+        let view_ms = (v as u128) * 3000;
+        let slot_ms = if k_total == 0 {
+            0
+        } else {
+            ((k.saturating_sub(1)) as u128 * 3000) / (k_total as u128)
+        };
+        genesis_ms + view_ms + slot_ms
     }
     /// Create a new application actor.
     pub fn new(context: R, config: Config) -> (Self, Supervisor, Mailbox) {
