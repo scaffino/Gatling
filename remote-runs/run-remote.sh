@@ -12,13 +12,14 @@ set -euo pipefail
 # =============================================================================
 
 # Number of validators to generate
-V=3
+V=4
 
 # Remote validator machine IPs (order must match validator assignment)
 REMOTE_HOSTS=(
-    "root@167.71.84.48"    # gatling-nyc
-    "root@188.166.175.132" # gatling-london
-    "root@167.71.226.93"   # gatling-india
+    "root@164.90.133.225"   # gatling-nyc
+    "root@134.122.73.49"   # gatling-frakfurt
+    "root@159.65.105.83"    # gatling-sf
+    "root@170.64.129.99"    # gatling-sydney
 )
 
 # SSH/SCP options
@@ -40,7 +41,7 @@ REMOTE_LOG_DIR="${REMOTE_LOG_DIR:-/root/alto/logs/validator}"
 
 # Setup parameters (passed to cargo run --bin setup)
 SETUP_PEERS="${V}"
-SETUP_BOOTSTRAPPERS=1
+SETUP_BOOTSTRAPPERS="${V}"
 SETUP_WORKER_THREADS=3
 SETUP_LOG_LEVEL="info"
 SETUP_MESSAGE_BACKLOG=16384

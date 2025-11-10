@@ -10,7 +10,7 @@ use commonware_cryptography::{
 };
 use commonware_deployer::ec2::Hosts;
 use commonware_p2p::authenticated::discovery as authenticated;
-use commonware_runtime::{tokio, Metrics, Runner, Spawner};
+use commonware_runtime::{tokio, Clock, Metrics, Runner, Spawner};
 use commonware_utils::{from_hex_formatted, quorum, union_unique};
 use futures::future::try_join_all;
 use futures::StreamExt;
@@ -21,10 +21,10 @@ use std::{
     num::NonZeroU32,
     path::PathBuf,
     str::FromStr,
-    sync::{Arc, atomic::AtomicU64},
+    sync::{Arc, atomic::{AtomicU64, Ordering}},
     time::Duration,
 };
-use tracing::{error, info, Level};
+use tracing::{error, info, warn, Level};
 
 const PENDING_CHANNEL: u32 = 0;
 const RECOVERED_CHANNEL: u32 = 1;
@@ -375,11 +375,11 @@ fn main() {
         info!(genesis = %genesis_time_utc, "genesis time");
 
         // Load peers
-        let (ip, peers, bootstrappers) = if let Some(hosts_file) = hosts_file {
+        let (ip, peers, bootstrappers, peer_addresses) = if let Some(hosts_file) = hosts_file {
             let hosts_file = std::fs::read_to_string(hosts_file).unwrap();
             let hosts: Hosts =
                 serde_yaml::from_str(&hosts_file).expect("Could not parse peers file");
-            let peers: HashMap<PublicKey, IpAddr> = hosts
+            let peers_map: HashMap<PublicKey, IpAddr> = hosts
                 .hosts
                 .into_iter()
                 .map(|peer| {
@@ -389,26 +389,31 @@ fn main() {
                 })
                 .collect();
 
-            let mut peer_keys: Vec<_> = peers.keys().cloned().collect();
+            let mut peer_keys: Vec<_> = peers_map.keys().cloned().collect();
             peer_keys.sort();  // CRITICAL: Sort to ensure consistent ordering across all validators
             let mut bootstrappers = Vec::new();
             for bootstrapper in &config.bootstrappers {
                 let key =
                     from_hex_formatted(bootstrapper).expect("Could not parse bootstrapper key");
                 let key = PublicKey::decode(key.as_ref()).expect("Bootstrapper key is invalid");
-                let ip = peers.get(&key).expect("Could not find bootstrapper in IPs");
+                let ip = peers_map.get(&key).expect("Could not find bootstrapper in IPs");
                 let bootstrapper_socket = format!("{}:{}", ip, config.port);
                 let bootstrapper_socket = SocketAddr::from_str(&bootstrapper_socket)
                     .expect("Could not parse bootstrapper socket");
                 bootstrappers.push((key, bootstrapper_socket));
             }
-            let ip = peers.get(&public_key).expect("Could not find self in IPs");
-            (*ip, peer_keys, bootstrappers)
+            let ip = peers_map.get(&public_key).expect("Could not find self in IPs");
+            // Create address mapping for logging
+            let peer_addresses: HashMap<PublicKey, String> = peers_map
+                .iter()
+                .map(|(key, ip)| (key.clone(), format!("{}:{}", ip, config.port)))
+                .collect();
+            (*ip, peer_keys, bootstrappers, peer_addresses)
         } else {
             let peers_file = std::fs::read_to_string(peers_file.unwrap()).unwrap();
             let peers: Peers =
                 serde_yaml::from_str(&peers_file).expect("Could not parse peers file");
-            let peers: HashMap<PublicKey, SocketAddr> = peers
+            let peers_map: HashMap<PublicKey, SocketAddr> = peers
                 .addresses
                 .into_iter()
                 .map(|peer| {
@@ -418,21 +423,26 @@ fn main() {
                 })
                 .collect();
 
-            let mut peer_keys: Vec<_> = peers.keys().cloned().collect();
+            let mut peer_keys: Vec<_> = peers_map.keys().cloned().collect();
             peer_keys.sort();  // CRITICAL: Sort to ensure consistent ordering across all validators
             let mut bootstrappers = Vec::new();
             for bootstrapper in &config.bootstrappers {
                 let key =
                     from_hex_formatted(bootstrapper).expect("Could not parse bootstrapper key");
                 let key = PublicKey::decode(key.as_ref()).expect("Bootstrapper key is invalid");
-                let socket = peers.get(&key).expect("Could not find bootstrapper in IPs");
+                let socket = peers_map.get(&key).expect("Could not find bootstrapper in IPs");
                 bootstrappers.push((key, *socket));
             }
-            let ip = peers
+            let ip = peers_map
                 .get(&public_key)
                 .expect("Could not find self in IPs")
                 .ip();
-            (ip, peer_keys, bootstrappers)
+            // Create address mapping for logging
+            let peer_addresses: HashMap<PublicKey, String> = peers_map
+                .iter()
+                .map(|(key, socket)| (key.clone(), socket.to_string()))
+                .collect();
+            (ip, peer_keys, bootstrappers, peer_addresses)
         };
         info!(peers = peers.len(), "loaded peers");
         let peers_u32 = peers.len() as u32;
@@ -456,26 +466,117 @@ fn main() {
             "loaded config"
         );
 
+        // ============================================================================
+        // STARTUP DIAGNOSTIC LOGGING
+        // ============================================================================
+        
+        // Log timeout configuration
+        info!(
+            "[setup] Timeout configuration: leader_timeout={}ms, notarization_timeout={}ms, nullify_retry={}s, fetch_timeout={}ms, activity_timeout={}, skip_timeout={}",
+            LEADER_TIMEOUT.as_millis(),
+            NOTARIZATION_TIMEOUT.as_millis(),
+            NULLIFY_RETRY.as_secs(),
+            FETCH_TIMEOUT.as_millis(),
+            ACTIVITY_TIMEOUT,
+            SKIP_TIMEOUT
+        );
+        
+        // Log network configuration
+        info!(
+            "[setup] Network configuration: peers={}, mailbox_size={}, message_backlog={}, max_message_size={}MB, worker_threads={}",
+            peers.len(),
+            config.mailbox_size,
+            config.message_backlog,
+            MAX_MESSAGE_SIZE / (1024 * 1024),
+            config.worker_threads
+        );
+        
+        // Log fetch configuration
+        info!(
+            "[setup] Fetch configuration: fetch_concurrent={}, max_fetch_count={}, max_fetch_size={}KB",
+            FETCH_CONCURRENT,
+            MAX_FETCH_COUNT,
+            MAX_FETCH_SIZE / 1024
+        );
+        
+        // Log peer configuration
+        info!("[setup] Peer configuration ({} peers):", peers.len());
+        for (idx, peer_key) in peers.iter().enumerate() {
+            if let Some(peer_addr) = peer_addresses.get(peer_key) {
+                info!("[setup]   validator_{}: {} (public_key: {:?})", 
+                      idx, peer_addr, peer_key);
+            } else {
+                warn!("[setup]   validator_{}: address not found (public_key: {:?})", 
+                      idx, peer_key);
+            }
+        }
+        
+        // Log bootstrapper configuration
+        info!("[setup] Bootstrapper configuration ({} bootstrappers):", bootstrappers.len());
+        for (idx, (bootstrapper_key, bootstrapper_socket)) in bootstrappers.iter().enumerate() {
+            info!("[setup]   bootstrapper_{}: {} (public_key: {:?})", 
+                  idx, bootstrapper_socket, bootstrapper_key);
+        }
+        
+        // Log consensus instances configuration
+        info!(
+            "[setup] Consensus instances: count={}, genesis_timestamp={} ({})",
+            consensus_instances,
+            config.genesis_timestamp,
+            genesis_time_utc
+        );
+        
+        // Log self configuration
+        info!(
+            "[setup] Self configuration: public_key={:?}, identity={:?}, ip={}, port={}, transaction_port={}",
+            public_key, identity, ip, config.port, config.transaction_port
+        );
+        
+        // Validate setup
+        if peers.len() < 2 {
+            warn!("[setup] WARNING: Only {} peer(s) configured. Consensus requires at least 2 validators.", peers.len());
+        }
+        if threshold as usize > peers.len() {
+            warn!("[setup] WARNING: Threshold ({}) exceeds number of peers ({}). This may cause consensus issues.", threshold, peers.len());
+        }
+        if bootstrappers.len() == 0 {
+            warn!("[setup] WARNING: No bootstrappers configured. Network discovery may be affected.");
+        }
+        if LEADER_TIMEOUT.as_millis() < 1000 {
+            warn!("[setup] WARNING: Leader timeout ({}) is very short. May cause frequent timeouts.", LEADER_TIMEOUT.as_millis());
+        }
+        if NOTARIZATION_TIMEOUT.as_millis() < 1000 {
+            warn!("[setup] WARNING: Notarization timeout ({}) is very short. May cause frequent view changes.", NOTARIZATION_TIMEOUT.as_millis());
+        }
+
         // Configure network
+        info!("[network] Initializing P2P network: bind_addr=0.0.0.0:{}, public_addr={}:{}, max_message_size={}MB, mailbox_size={}",
+              config.port, ip, config.port, MAX_MESSAGE_SIZE / (1024 * 1024), config.mailbox_size);
+        
         let p2p_namespace = union_unique(NAMESPACE, b"_P2P");
         let mut p2p_cfg = authenticated::Config::aggressive(
             signer.clone(),
             &p2p_namespace,
             SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), config.port),
             SocketAddr::new(ip, config.port),
-            bootstrappers,
+            bootstrappers.clone(),
             MAX_MESSAGE_SIZE,
         );
         p2p_cfg.mailbox_size = config.mailbox_size;
 
         // Start p2p
+        info!("[network] Creating P2P network instance...");
         let (mut network, mut oracle) =
             authenticated::Network::new(context.with_label("network"), p2p_cfg);
 
         // Provide authorized peers
+        info!("[network] Registering {} authorized peers with network oracle", peers.len());
         oracle.register(0, peers.clone()).await;
+        info!("[network] Peer registration complete");
 
         // Register channels for each independent consensus instance
+        info!("[network] Registering network channels for {} consensus instances", consensus_instances);
+        
         let pending_limit = Quota::per_second(NonZeroU32::new(128).unwrap());
         let recovered_limit = Quota::per_second(NonZeroU32::new(128).unwrap());
         let resolver_limit = Quota::per_second(NonZeroU32::new(128).unwrap());
@@ -483,6 +584,9 @@ fn main() {
         let backfill_quota = Quota::per_second(NonZeroU32::new(8).unwrap());
         let ancestor_quota = Quota::per_second(NonZeroU32::new(16).unwrap());
         let transaction_limit = Quota::per_second(NonZeroU32::new(256).unwrap());
+
+        info!("[network] Channel quotas: pending=128/s, recovered=128/s, resolver=128/s, broadcaster=8/s, backfill=8/s, ancestor=16/s, transaction=256/s");
+        info!("[network] Message backlog size: {}", config.message_backlog);
 
         let mut consensus_channels = Vec::new();
         for i in 0..consensus_instances {
@@ -495,6 +599,9 @@ fn main() {
             let backfill_channel = base_channel + BACKFILL_BY_DIGEST_CHANNEL;
             let ancestor_channel = base_channel + ANCESTOR_CHANNEL;
 
+            info!("[network] Registering channels for consensus instance {}: pending={}, recovered={}, resolver={}, broadcaster={}, backfill={}, ancestor={}",
+                  i + 1, pending_channel, recovered_channel, resolver_channel, broadcaster_channel, backfill_channel, ancestor_channel);
+
             let pending = network.register(pending_channel, pending_limit, config.message_backlog);
             let recovered = network.register(recovered_channel, recovered_limit, config.message_backlog);
             let resolver = network.register(resolver_channel, resolver_limit, config.message_backlog);
@@ -503,13 +610,22 @@ fn main() {
             let ancestor = network.register(ancestor_channel, ancestor_quota, config.message_backlog);
 
             consensus_channels.push((pending, recovered, resolver, broadcaster, backfill, ancestor));
+            info!("[network] Registered 6 channels for consensus instance {}", i + 1);
         }
 
         // Register a shared transaction channel for gossip (shared across all consensus instances)
+        info!("[network] Registering shared transaction channel: channel={}, quota=256/s", TRANSACTION_CHANNEL);
         let (mut tx_sender, mut tx_receiver) = network.register(TRANSACTION_CHANNEL, transaction_limit, config.message_backlog);
+        info!("[network] Transaction channel registered");
 
         // Create network
+        info!("[network] Starting P2P network...");
+        info!("[network] Bootstrap peers: {} bootstrapper(s) configured", bootstrappers.len());
+        for (idx, (_, bootstrapper_socket)) in bootstrappers.iter().enumerate() {
+            info!("[network]   bootstrap_{}: {}", idx, bootstrapper_socket);
+        }
         let p2p = network.start();
+        info!("[network] P2P network started successfully");
 
         // Create indexer
         let mut indexer = None;
@@ -639,8 +755,8 @@ fn main() {
                     let tx_id = tx.digest();
                     let tx_bytes = Bytes::from(tx.encode().to_vec());
                     match tx_sender.send(Recipients::All, tx_bytes, true).await {
-                        Ok(_) => info!(tx_id = ?tx_id, "Transaction broadcast to peers"),
-                        Err(e) => warn!(tx_id = ?tx_id, error = ?e, "Failed to broadcast transaction to peers"),
+                        Ok(_) => info!(tx_id = ?tx_id, "[network] Transaction broadcast to peers"),
+                        Err(e) => warn!(tx_id = ?tx_id, error = ?e, "[network] ERROR: Failed to broadcast transaction to peers. May indicate network connectivity issues."),
                     }
                 }
             });
@@ -667,23 +783,23 @@ fn main() {
                                     for (idx, mailbox) in gossip_mailboxes.iter_mut().enumerate() {
                                         match mailbox.submit_transaction(tx.clone()).await {
                                             Ok(_) => info!(
-                                                "[consensus_{}] Transaction {:?} received from peer and added to mempool",
+                                                "[consensus_{}] [network] Transaction {:?} received from peer and added to mempool",
                                                 idx + 1, tx_id
                                             ),
                                             Err(e) => warn!(
                                                 tx_id = ?tx_id, 
                                                 consensus_id = idx + 1,
                                                 error = %e, 
-                                                "Failed to add peer transaction to mempool"
+                                                "[network] ERROR: Failed to add peer transaction to mempool. May indicate mempool full or invalid transaction."
                                             ),
                                         }
                                     }
                                 }
-                                Err(e) => warn!(error = ?e, "Failed to decode transaction from peer"),
+                                Err(e) => warn!(error = ?e, "[network] ERROR: Failed to decode transaction from peer. May indicate message corruption or protocol mismatch."),
                             }
                         }
                         Err(e) => {
-                            warn!(error = ?e, "Transaction receiver error");
+                            warn!(error = ?e, "[network] ERROR: Transaction receiver error. May indicate network connectivity issues.");
                             break;
                         }
                     }
@@ -716,9 +832,61 @@ fn main() {
         } else {
             None
         };
+        
+        // Spawn periodic health monitoring task (every 30 seconds)
+        let instance_views_health = instance_views.clone();
+        let genesis_timestamp_health = config.genesis_timestamp;
+        let consensus_instances_health = consensus_instances;
+        let peers_count = peers.len();
+        let health_monitor_task = context.with_label("health_monitor").spawn(move |ctx| async move {
+            loop {
+                // Sleep for 30 seconds using context's sleep method
+                ctx.sleep(Duration::from_secs(30)).await;
+                
+                let now_secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+                let time_since_genesis = now_secs.saturating_sub(genesis_timestamp_health);
+                
+                // Collect current views for all instances
+                let mut view_status = Vec::new();
+                for i in 0..consensus_instances_health {
+                    let view = instance_views_health[i].load(Ordering::Relaxed);
+                    view_status.push(format!("instance_{}={}", i + 1, view));
+                }
+                
+                info!(
+                    "[health] System status: time_since_genesis={}s, consensus_instances={}, views=[{}], peers_configured={}",
+                    time_since_genesis,
+                    consensus_instances_health,
+                    view_status.join(", "),
+                    peers_count
+                );
+                
+                // Check for potential issues
+                if time_since_genesis > 60 {
+                    // After 60 seconds, check if views are progressing
+                    let mut stalled_instances = Vec::new();
+                    for i in 0..consensus_instances_health {
+                        let view = instance_views_health[i].load(Ordering::Relaxed);
+                        if view == 0 && time_since_genesis > 120 {
+                            // Instance hasn't progressed past view 0 after 2 minutes
+                            stalled_instances.push(i + 1);
+                        }
+                    }
+                    if !stalled_instances.is_empty() {
+                        warn!(
+                            "[health] WARNING: Potential stalled instances detected: {:?}. Views may not be progressing.",
+                            stalled_instances
+                        );
+                    }
+                }
+            }
+        });
 
         // Wait for any task to error
-        let mut all_tasks = vec![p2p, http_server];
+        let mut all_tasks = vec![p2p, http_server, health_monitor_task];
         all_tasks.extend(gossip_tasks);
         all_tasks.extend(started_consensus);
         if let Some(task) = gatling_task {
