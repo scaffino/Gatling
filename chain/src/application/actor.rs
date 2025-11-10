@@ -65,12 +65,6 @@ pub struct Actor<R: Rng + CryptoRng + Spawner + Metrics + Clock> {
     total_instances: usize,
     // Genesis timestamp in seconds
     genesis_timestamp_secs: u64,
-    // View tracking state for diagnostics
-    current_view: Arc<AtomicU64>,
-    last_proposal_view: Arc<AtomicU64>,
-    last_proposal_time: Arc<Mutex<Option<u64>>>, // milliseconds since epoch
-    last_finalization_view: Arc<AtomicU64>,
-    last_finalization_time: Arc<Mutex<Option<u64>>>, // milliseconds since epoch
 }
 
 impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
@@ -129,11 +123,6 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                 lag_threshold: config.lag_threshold,
                 total_instances: config.total_instances,
                 genesis_timestamp_secs: config.genesis_timestamp_secs,
-                current_view: Arc::new(AtomicU64::new(0)),
-                last_proposal_view: Arc::new(AtomicU64::new(0)),
-                last_proposal_time: Arc::new(Mutex::new(None)),
-                last_finalization_view: Arc::new(AtomicU64::new(0)),
-                last_finalization_time: Arc::new(Mutex::new(None)),
             },
             Supervisor::new(config.polynomial, config.participants, config.share),
             Mailbox::new(sender),
@@ -220,15 +209,12 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                                             Ok(block) => {
                                                 // We have the block in local storage - send it to all peers (they'll filter by digest)
                                                 let block_bytes = Bytes::from(block.encode().to_vec());
-                                                match ancestor_sender_handler.send(Recipients::All, block_bytes, true).await {
-                                                    Ok(_) => {
-                                                        debug!("[{}] [network] Sent ancestor block {} to peers", 
-                                                               engine_id_handler, requested_digest);
-                                                    }
-                                                    Err(e) => {
-                                                        warn!("[{}] [network] ERROR: Failed to send ancestor block {} to peers: {:?}. May indicate network connectivity issues.", 
-                                                              engine_id_handler, requested_digest, e);
-                                                    }
+                                                if let Err(e) = ancestor_sender_handler.send(Recipients::All, block_bytes, true).await {
+                                                    warn!("[{}] Failed to send ancestor block to peer: {:?}", 
+                                                          engine_id_handler, e);
+                                                } else {
+                                                    debug!("[{}] Sent ancestor block {} to peers", 
+                                                           engine_id_handler, requested_digest);
                                                 }
                                             }
                                             Err(_) => {
@@ -238,10 +224,10 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                                             }
                                         }
                                     }
-                                            Err(e) => {
-                                                warn!("[{}] [network] ERROR: Failed to decode ancestor message (neither block nor digest): {:?}. May indicate message corruption or protocol mismatch.", 
-                                                      engine_id_handler, e);
-                                            }
+                                    Err(e) => {
+                                        warn!("[{}] Failed to decode ancestor message (neither block nor digest): {:?}", 
+                                              engine_id_handler, e);
+                                    }
                                 }
                             }
                         }
@@ -251,74 +237,6 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                         break;
                     }
                 }
-            }
-        });
-        
-        // Spawn periodic view status logging task (every 10 seconds)
-        let engine_id_status = self.engine_id.clone();
-        let current_view_status = self.current_view.clone();
-        let last_proposal_view_status = self.last_proposal_view.clone();
-        let last_proposal_time_status = self.last_proposal_time.clone();
-        let last_finalization_view_status = self.last_finalization_view.clone();
-        let last_finalization_time_status = self.last_finalization_time.clone();
-        let context_status = self.context.clone();
-        self.context.with_label("view_status_monitor").spawn(move |_| async move {
-            let mut last_logged_proposal_view = 0u64;
-            let mut last_logged_finalization_view = 0u64;
-            let mut last_status_time = context_status.current().epoch_millis();
-            
-            loop {
-                context_status.sleep(Duration::from_secs(10)).await;
-                
-                let now_ms = context_status.current().epoch_millis();
-                let current_view = current_view_status.load(Ordering::Relaxed);
-                let last_proposal_view = last_proposal_view_status.load(Ordering::Relaxed);
-                let last_finalization_view = last_finalization_view_status.load(Ordering::Relaxed);
-                
-                let last_proposal_time = {
-                    let time = last_proposal_time_status.lock().unwrap();
-                    *time
-                };
-                let last_finalization_time = {
-                    let time = last_finalization_time_status.lock().unwrap();
-                    *time
-                };
-                
-                // Calculate time since last activity
-                let time_since_proposal = last_proposal_time.map(|t| now_ms.saturating_sub(t));
-                let time_since_finalization = last_finalization_time.map(|t| now_ms.saturating_sub(t));
-                
-                // Calculate view progression rate (views per second)
-                let time_since_last_status = now_ms.saturating_sub(last_status_time);
-                let proposal_view_delta = last_proposal_view.saturating_sub(last_logged_proposal_view);
-                let finalization_view_delta = last_finalization_view.saturating_sub(last_logged_finalization_view);
-                let proposal_rate = if time_since_last_status > 0 && proposal_view_delta > 0 {
-                    (proposal_view_delta as f64 * 1000.0) / (time_since_last_status as f64)
-                } else {
-                    0.0
-                };
-                let finalization_rate = if time_since_last_status > 0 && finalization_view_delta > 0 {
-                    (finalization_view_delta as f64 * 1000.0) / (time_since_last_status as f64)
-                } else {
-                    0.0
-                };
-                
-                info!(
-                    "[{}] [health] View status: current_view={}, last_proposal_view={}, last_finalization_view={}, time_since_proposal={:?}ms, time_since_finalization={:?}ms, proposal_rate={:.2} views/s, finalization_rate={:.2} views/s",
-                    engine_id_status,
-                    current_view,
-                    last_proposal_view,
-                    last_finalization_view,
-                    time_since_proposal.map(|t| t.to_string()).unwrap_or_else(|| "N/A".to_string()),
-                    time_since_finalization.map(|t| t.to_string()).unwrap_or_else(|| "N/A".to_string()),
-                    proposal_rate,
-                    finalization_rate
-                );
-                
-                // Update for next iteration
-                last_logged_proposal_view = last_proposal_view;
-                last_logged_finalization_view = last_finalization_view;
-                last_status_time = now_ms;
             }
         });
         
@@ -337,14 +255,6 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                     parent,
                     mut response,
                 } => {
-                    // Log proposal request
-                    let proposal_request_time = self.context.current().epoch_millis();
-                    info!("[{}] [consensus_{}] Proposal requested for view {} at {}ms", 
-                          self.engine_id, self.gatling_instance_id, view, proposal_request_time);
-                    
-                    // Update current view tracking
-                    self.current_view.store(view, Ordering::Relaxed);
-                    
                     // Collect transactions from mempool
                     let mut transactions = Vec::new();
                     while transactions.len() < MAX_BLOCK_TRANSACTIONS {
@@ -363,22 +273,14 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                         Either::Right(marshal.subscribe(Some(parent.0), parent.1).await)
                     };
 
-                    // Capture validator_index for use in closure
-                    let validator_index = self.validator_index;
-                    
                     // Wait for the parent block to be available or the request to be cancelled in a separate task (to
                     // continue processing other messages)
-                    let last_proposal_view_tracker = self.last_proposal_view.clone();
-                    let last_proposal_time_tracker = self.last_proposal_time.clone();
                     self.context.with_label("propose").spawn({
                         let built = built.clone();
                         let engine_id = self.engine_id.clone();
                         let total_instances = self.total_instances as u64;
                         let instance_number = self.gatling_instance_id as u64;
                         let genesis_ts_secs = self.genesis_timestamp_secs;
-                        let last_proposal_view_tracker = last_proposal_view_tracker.clone();
-                        let last_proposal_time_tracker = last_proposal_time_tracker.clone();
-                        let validator_index = validator_index;
                         move |context| async move {
                             let response_closed = OneshotClosedFut::new(&mut response);
                             select! {
@@ -396,10 +298,11 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                                     let digest = block.digest();
                                     
                                     // Log each transaction included in the block
+                                    let validator_idx = self.validator_index;
                                     for tx in &transactions {
                                         let tx_id = tx.digest();
                                         info!("[{}] Validator {} included transaction {:?} (timestamp: {}) in block {} (view {})", 
-                                              engine_id, validator_index, tx_id, tx.timestamp, block_height, view);
+                                              engine_id, validator_idx, tx_id, tx.timestamp, block_height, view);
                                     }
                                     
                                     {
@@ -413,56 +316,22 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                                     let is_catchup = now_ms >= target_ms;
                                     if !is_catchup {
                                         let wait = (target_ms - now_ms) as u64;
-                                        info!("[{}] [consensus_{}] Waiting {}ms for proposal timing window (view {}, target: {}ms, now: {}ms)", 
-                                              engine_id, instance_number, wait, view, target_ms, now_ms);
                                         context.sleep(Duration::from_millis(wait)).await;
-                                        let after_wait_ms = context.current().epoch_millis() as u128;
-                                        info!("[{}] [consensus_{}] Finished waiting, ready to propose (view {}, elapsed: {}ms)", 
-                                              engine_id, instance_number, view, after_wait_ms - now_ms);
-                                    } else {
-                                        let catchup_delay = now_ms - target_ms;
-                                        info!("[{}] [consensus_{}] Catch-up proposal: {}ms behind target timing (view {}, target: {}ms, now: {}ms)", 
-                                              engine_id, instance_number, catchup_delay, view, target_ms, now_ms);
                                     }
 
                                     // Send the digest to the consensus (no further delay)
                                     let _result = response.send(digest);
                                     let proposal_timestamp_ms = context.current().epoch_millis();
-                                    
-                                    // Update proposal tracking
-                                    let previous_proposal_view = last_proposal_view_tracker.swap(view, Ordering::Relaxed);
-                                    {
-                                        let mut last_time = last_proposal_time_tracker.lock().unwrap();
-                                        if let Some(prev_time) = *last_time {
-                                            let time_since_last_proposal = proposal_timestamp_ms.saturating_sub(prev_time);
-                                            // Check for view progression gap (views skipped)
-                                            if view > previous_proposal_view + 1 && previous_proposal_view > 0 {
-                                                let view_gap = view - previous_proposal_view - 1;
-                                                warn!(
-                                                    "[{}] [timeout] View progression gap detected: skipped {} view(s) (previous: {}, current: {}), time_since_last_proposal: {}ms",
-                                                    engine_id, view_gap, previous_proposal_view, view, time_since_last_proposal
-                                                );
-                                            }
-                                            // Warn if proposal took a very long time (exceeds typical notarization timeout)
-                                            if time_since_last_proposal > 15000 {
-                                                warn!(
-                                                    "[{}] [timeout] WARNING: Long gap between proposals: {}ms (view {} to {}). May indicate timeout or network issues.",
-                                                    engine_id, time_since_last_proposal, previous_proposal_view, view
-                                                );
-                                            }
-                                        }
-                                        *last_time = Some(proposal_timestamp_ms);
-                                    }
-                                    
                                     let cast_time_utc = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(proposal_timestamp_ms as i64)
                                         .map(|dt| dt.format("%H:%M:%S.%3f UTC").to_string())
                                         .unwrap_or_else(|| "invalid-ts".to_string());
+                                    let validator_idx = self.validator_index;
                                     let computed_time_utc = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(target_ms as i64)
                                         .map(|dt| dt.format("%H:%M:%S.%3f UTC").to_string())
                                         .unwrap_or_else(|| "invalid-ts".to_string());
                                     let catchup_msg = if is_catchup { " (catch up proposal)" } else { "" };
                                     info!("[{}] Validator {} proposed block {} (view {}) with {} transactions at {} (computed {}){}", 
-                                          engine_id, validator_index, block_height, view, tx_count, cast_time_utc, computed_time_utc, catchup_msg);
+                                          engine_id, validator_idx, block_height, view, tx_count, cast_time_utc, computed_time_utc, catchup_msg);
                                 },
                                 _ = response_closed => {
                                     // The response was cancelled
@@ -677,64 +546,61 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                                             
                                             // Send request to all peers
                                             let request_bytes = Bytes::from(cursor_digest.encode().to_vec());
-                                            match ancestor_sender_clone.send(Recipients::All, request_bytes, true).await {
-                                                Ok(_) => {
-                                                    debug!("[{}] [network] Sent ancestor request for {} to peers", 
-                                                           engine_id_clone, cursor_digest);
-                                                    // Wait for response (no timeout)
-                                                    let response_result = response_rx.await.ok();
-                                                    
-                                                    // Remove from pending (drop lock before processing result)
-                                                    {
-                                                        let mut pending = pending_ancestor_requests_clone.lock().unwrap();
-                                                        pending.remove(&cursor_digest);
-                                                    }
-                                                    
-                                                    match response_result {
-                                                        Some(block) => {
-                                                            // Verify digest matches
-                                                            if block.digest() == cursor_digest {
-                                                                debug!("[{}] [network] Received ancestor {} (view {}) from peer", 
-                                                                      engine_id_clone, block.height, block.view);
-                                                                // Store in marshal
-                                                                marshal.verified(block.view, block.clone()).await;
-                                                                ancestor_opt = Some(block);
-                                                                break;
-                                                            } else {
-                                                                warn!("[{}] [network] ERROR: Received ancestor block with mismatched digest (expected: {:?}, got: {:?}). May indicate network corruption or malicious peer.", 
-                                                                      engine_id_clone, cursor_digest, block.digest());
-                                                            }
-                                                        }
-                                                        None => {
-                                                            // No response from peers (channel closed or cancelled)
-                                                            warn!("[{}] [network] WARNING: No response received for ancestor {} from peers after request. May indicate network connectivity issues or peers don't have the block.", 
-                                                                   engine_id_clone, cursor_digest);
-                                                        }
-                                                    }
-                                                }
-                                                Err(e) => {
-                                                    warn!("[{}] [network] ERROR: Failed to send ancestor request for {} to peers: {:?}. May indicate network connectivity issues.", 
-                                                          engine_id_clone, cursor_digest, e);
-                                                    // Remove from pending
+                                            let send_result = ancestor_sender_clone.send(Recipients::All, request_bytes, true).await;
+                                            
+                                            if send_result.is_err() {
+                                                warn!("[{}] Failed to send ancestor request to peers: {:?}", 
+                                                      engine_id_clone, send_result.err());
+                                                // Remove from pending
+                                                let mut pending = pending_ancestor_requests_clone.lock().unwrap();
+                                                pending.remove(&cursor_digest);
+                                            } else {
+                                                // Wait for response (no timeout)
+                                                let response_result = response_rx.await.ok();
+                                                
+                                                // Remove from pending (drop lock before processing result)
+                                                {
                                                     let mut pending = pending_ancestor_requests_clone.lock().unwrap();
                                                     pending.remove(&cursor_digest);
+                                                }
+                                                
+                                                match response_result {
+                                                    Some(block) => {
+                                                        // Verify digest matches
+                                                        if block.digest() == cursor_digest {
+                                                            debug!("[{}] Received ancestor {} (view {}) from peer, verifying digest", 
+                                                                  engine_id_clone, block.height, block.view);
+                                                            // Store in marshal
+                                                            marshal.verified(block.view, block.clone()).await;
+                                                            ancestor_opt = Some(block);
+                                                            break;
+                                                        } else {
+                                                            warn!("[{}] Received ancestor block with mismatched digest", 
+                                                                  engine_id_clone);
+                                                        }
+                                                    }
+                                                    None => {
+                                                        // No response from peers (channel closed or cancelled)
+                                                        debug!("[{}] No response received for ancestor {} from peers", 
+                                                               engine_id_clone, cursor_digest);
+                                                    }
                                                 }
                                             }
                                             
                                             // Failed to fetch from peers - retry with exponential backoff
                                             if ancestor_opt.is_none() {
-                                                if retry_count < MAX_RETRIES {
-                                                    let delay_ms = (INITIAL_RETRY_DELAY_MS * (1 << retry_count))
-                                                        .min(MAX_RETRY_DELAY_MS);
-                                                    warn!("[{}] [network] Retry {} for ancestor {} (waiting {}ms). Previous attempt failed - may indicate network issues.", 
-                                                          engine_id_clone, retry_count + 1, cursor_digest, delay_ms);
-                                                    context.sleep(Duration::from_millis(delay_ms)).await;
-                                                    retry_count += 1;
-                                                } else {
-                                                    // Max retries reached - give up on this ancestor
-                                                    warn!("[{}] [network] ERROR: Could not fetch ancestor {} after {} retries - stopping ancestor chain. This may indicate persistent network connectivity issues or missing blocks in the network.", 
-                                                          engine_id_clone, cursor_digest, MAX_RETRIES);
-                                                    break;
+                                            if retry_count < MAX_RETRIES {
+                                                let delay_ms = (INITIAL_RETRY_DELAY_MS * (1 << retry_count))
+                                                    .min(MAX_RETRY_DELAY_MS);
+                                                debug!("[{}] Retry {} for ancestor {} (waiting {}ms)", 
+                                                      engine_id_clone, retry_count + 1, cursor_digest, delay_ms);
+                                                context.sleep(Duration::from_millis(delay_ms)).await;
+                                                retry_count += 1;
+                                            } else {
+                                                // Max retries reached - give up on this ancestor
+                                                debug!("[{}] Could not fetch ancestor {} after {} retries - stopping ancestor chain", 
+                                                      engine_id_clone, cursor_digest, MAX_RETRIES);
+                                                break;
                                                 }
                                             }
                                         }
@@ -819,51 +685,6 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                             self.instance_views[instance_idx].store(view, Ordering::Relaxed);
                             debug!("[{}] Instance {} advanced to view {}", engine_id, self.gatling_instance_id, view);
                         }
-                    }
-                    
-                    // Update finalization tracking
-                    self.current_view.store(view, Ordering::Relaxed);
-                    let previous_finalization_view = self.last_finalization_view.swap(view, Ordering::Relaxed);
-                    let finalization_time_ms = self.context.current().epoch_millis();
-                    {
-                        let mut last_time = self.last_finalization_time.lock().unwrap();
-                        if let Some(prev_time) = *last_time {
-                            let time_since_last_finalization = finalization_time_ms.saturating_sub(prev_time);
-                            // Check for view progression gap in finalizations
-                            if view > previous_finalization_view + 1 && previous_finalization_view > 0 {
-                                let view_gap = view - previous_finalization_view - 1;
-                                warn!(
-                                    "[{}] [timeout] Finalization view progression gap detected: skipped {} view(s) (previous: {}, current: {}), time_since_last_finalization: {}ms",
-                                    engine_id, view_gap, previous_finalization_view, view, time_since_last_finalization
-                                );
-                            }
-                            // Warn if finalization took a very long time
-                            if time_since_last_finalization > 15000 {
-                                warn!(
-                                    "[{}] [timeout] WARNING: Long gap between finalizations: {}ms (view {} to {}). May indicate timeout or network issues.",
-                                    engine_id, time_since_last_finalization, previous_finalization_view, view
-                                );
-                            }
-                        }
-                        // Check time from proposal to finalization (notarization latency)
-                        let last_proposal_time = self.last_proposal_time.lock().unwrap();
-                        if let Some(proposal_time) = *last_proposal_time {
-                            drop(last_proposal_time);
-                            let notarization_latency = finalization_time_ms.saturating_sub(proposal_time);
-                            // Warn if notarization took too long (exceeds notarization timeout)
-                            if notarization_latency > 12000 {
-                                warn!(
-                                    "[{}] [timeout] WARNING: High notarization latency: {}ms (view {}). Exceeds typical notarization timeout. May indicate network issues or slow validators.",
-                                    engine_id, notarization_latency, view
-                                );
-                            } else {
-                                info!(
-                                    "[{}] [consensus_{}] Notarization latency: {}ms (view {}, proposal to finalization)",
-                                    engine_id, self.gatling_instance_id, notarization_latency, view
-                                );
-                            }
-                        }
-                        *last_time = Some(finalization_time_ms);
                     }
                     
                     // Forward finalized block to per-instance buffer if enabled
