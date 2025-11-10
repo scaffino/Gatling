@@ -48,8 +48,8 @@ const ANCESTOR_CHANNEL: u32 = 6;
 //   - Setting to 3s: ensures consensus stability
 //
 // Result: Views may take 1-2 seconds, but consensus remains stable
-const LEADER_TIMEOUT: Duration = Duration::from_millis(2500);
-const NOTARIZATION_TIMEOUT: Duration = Duration::from_millis(3000);
+const LEADER_TIMEOUT: Duration = Duration::from_millis(5500);
+const NOTARIZATION_TIMEOUT: Duration = Duration::from_millis(6000);
 const NULLIFY_RETRY: Duration = Duration::from_secs(10);
 const ACTIVITY_TIMEOUT: u64 = 256;
 const SKIP_TIMEOUT: u64 = 32;
