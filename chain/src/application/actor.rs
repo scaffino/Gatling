@@ -72,11 +72,11 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
     /// tproposal = genesis_timestamp + (v + (k-1)/K) * delta_ibt_ms
     pub fn tproposal(genesis_ts_secs: u64, k_total: u64, k: u64, v: u64) -> u128 {
         let genesis_ms = (genesis_ts_secs as u128) * 1000;
-        let view_ms = (v as u128) * 4000;
+        let view_ms = (v as u128) * 3000;
         let slot_ms = if k_total == 0 {
             0
         } else {
-            ((k.saturating_sub(1)) as u128 * 4000) / (k_total as u128)
+            ((k.saturating_sub(1)) as u128 * 3000) / (k_total as u128)
         };
         genesis_ms + view_ms + slot_ms
     }
@@ -158,9 +158,6 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
         let genesis_digest = genesis.digest();
         let built: Option<(View, Block)> = None;
         let built = Arc::new(Mutex::new(built));
-        
-        // Track current view to detect view changes
-        let current_view: Arc<Mutex<Option<View>>> = Arc::new(Mutex::new(None));
         
         // Shared pending ancestor requests (digest -> oneshot sender for response)
         // Multiple finalize_ancestors tasks can add requests here, message handler fulfills them
@@ -258,24 +255,6 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                     parent,
                     mut response,
                 } => {
-                    // Check if this is a view change and log it
-                    {
-                        let mut current_view_guard = current_view.lock().unwrap();
-                        let is_view_change = match *current_view_guard {
-                            Some(prev_view) => view > prev_view,
-                            None => true, // First view
-                        };
-                        if is_view_change {
-                            let engine_id = self.engine_id.clone();
-                            let validator_idx = self.validator_index;
-                            info!(
-                                "[{}] =====> Validator {} MOVED TO VIEW {} (consensus engine advanced)",
-                                engine_id, validator_idx, view
-                            );
-                            *current_view_guard = Some(view);
-                        }
-                    }
-                    
                     // Collect transactions from mempool
                     let mut transactions = Vec::new();
                     while transactions.len() < MAX_BLOCK_TRANSACTIONS {
@@ -387,24 +366,6 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                     payload,
                     mut response,
                 } => {
-                    // Check if this is a view change and log it (most common way to detect view changes)
-                    {
-                        let mut current_view_guard = current_view.lock().unwrap();
-                        let is_view_change = match *current_view_guard {
-                            Some(prev_view) => view > prev_view,
-                            None => true, // First view
-                        };
-                        if is_view_change {
-                            let engine_id = self.engine_id.clone();
-                            let validator_idx = self.validator_index;
-                            info!(
-                                "[{}] =====> Validator {} MOVED TO VIEW {} (asked to verify block in new view)",
-                                engine_id, validator_idx, view
-                            );
-                            *current_view_guard = Some(view);
-                        }
-                    }
-                    
                     // Get the parent and current block
                     let parent_request = if parent.1 == genesis_digest {
                         Either::Left(future::ready(Ok(genesis.clone())))
@@ -470,24 +431,6 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                     });
                 }
                 Message::Finalized { view, block } => {
-                    // Check if this is a view change and log it (if we haven't already logged for this view)
-                    {
-                        let mut current_view_guard = current_view.lock().unwrap();
-                        let is_view_change = match *current_view_guard {
-                            Some(prev_view) => view > prev_view,
-                            None => true, // First view
-                        };
-                        if is_view_change {
-                            let engine_id = self.engine_id.clone();
-                            let validator_idx = self.validator_index;
-                            info!(
-                                "[{}] =====> Validator {} MOVED TO VIEW {} (block finalized in new view)",
-                                engine_id, validator_idx, view
-                            );
-                            *current_view_guard = Some(view);
-                        }
-                    }
-                    
                     // In an application that maintains state, you would compute the state transition function here.
                     //
                     // After an unclean shutdown, it is possible that the application may be asked to process a block it has already seen (which it can simply ignore).
