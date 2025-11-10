@@ -72,11 +72,11 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
     /// tproposal = genesis_timestamp + (v + (k-1)/K) * delta_ibt_ms
     pub fn tproposal(genesis_ts_secs: u64, k_total: u64, k: u64, v: u64) -> u128 {
         let genesis_ms = (genesis_ts_secs as u128) * 1000;
-        let view_ms = (v as u128) * 3000;
+        let view_ms = (v as u128) * 4000;
         let slot_ms = if k_total == 0 {
             0
         } else {
-            ((k.saturating_sub(1)) as u128 * 3000) / (k_total as u128)
+            ((k.saturating_sub(1)) as u128 * 4000) / (k_total as u128)
         };
         genesis_ms + view_ms + slot_ms
     }
