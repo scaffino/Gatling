@@ -71,7 +71,7 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
     /// Compute absolute proposal time in milliseconds for given view and instance.
     /// tproposal = genesis_timestamp + (v + (k-1)/K) * delta_ibt_ms
     pub fn tproposal(genesis_ts_secs: u64, k_total: u64, k: u64, v: u64) -> u128 {
-        let genesis_ms = genesis_ts_secs as u128;
+        let genesis_ms = (genesis_ts_secs as u128) * 1000;
         let view_ms = (v as u128) * 3000;
         let slot_ms = if k_total == 0 {
             0
