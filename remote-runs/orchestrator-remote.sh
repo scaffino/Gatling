@@ -429,6 +429,15 @@ kill_validator_remote() {
   local instances="${2:-}"
   log "Stopping validator processes on ${host} (instances=${instances:-any})..."
   
+  # Fast pre-check: skip if nothing is running to avoid redundant work
+  local running_count
+  running_count="$(remote_cmd "${host}" "pgrep -f 'validator' 2>/dev/null | wc -l" 2>/dev/null || echo "0")"
+  running_count="${running_count// /}"
+  if [[ -z "${running_count}" || "${running_count}" == "0" ]]; then
+    log "No validator processes found on ${host}; skipping pre-run cleanup"
+    return 0
+  fi
+  
   # Patterns to match validator processes
   local patterns=(
     "validator --"
@@ -448,6 +457,14 @@ kill_validator_remote() {
   
   # Short grace period
   sleep 2
+  
+  # If everything exited after SIGINT, return early
+  running_count="$(remote_cmd "${host}" "pgrep -f 'validator' 2>/dev/null | wc -l" 2>/dev/null || echo "0")"
+  running_count="${running_count// /}"
+  if [[ -z "${running_count}" || "${running_count}" == "0" ]]; then
+    log "Validators on ${host} exited after SIGINT"
+    return 0
+  fi
   
   # Force kill any leftovers (SIGKILL)
   for pat in "${patterns[@]}"; do
