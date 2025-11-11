@@ -475,9 +475,9 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                         
                         self.context.with_label("finalize_ancestors").spawn(move |context| async move {
                             // Constants for retry logic
-                            const MAX_RETRIES: usize = 5;
-                            const INITIAL_RETRY_DELAY_MS: u64 = 100;
-                            const MAX_RETRY_DELAY_MS: u64 = 1000;
+                            const MAX_RETRIES: usize = 3;
+                            const INITIAL_RETRY_DELAY_MS: u64 = 400;
+                            const MAX_RETRY_DELAY_MS: u64 = 3000;
                             const PEER_RESPONSE_TIMEOUT_MS: u64 = 2000; // Timeout for waiting for peer response
                             
                             debug!("[{}] Starting ancestor finalization task for block {} (view {}) with parent: {:?}", 
