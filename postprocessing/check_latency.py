@@ -3,11 +3,14 @@
 Aggregate transaction finalization latency from Gatling logs.
 
 Reads all files under logs/gatling named gatling_v{V}_i{I}_r{R}.log,
-extracts finalization events, deduplicates per transaction per validator
+where V can be numeric, hex, or location name (e.g., nyc, india).
+Extracts finalization events, deduplicates per transaction per validator
 (using only the first finalization event per validator), computes average
 latency across validators for each transaction, then computes the overall
 average latency per instance count, writes a CSV, and plots latency vs
 instances.
+
+This script is designed to be run from the postprocessing folder.
 """
 
 import argparse
@@ -27,28 +30,36 @@ except ImportError:
     SCIPY_AVAILABLE = False
 
 
-FILENAME_RE = re.compile(r"^gatling_v(\d+)_i(\d+)_r(\d+)\.log$")
+# Match validator ID as alphanumeric (numeric, hex, or location names like nyc, india)
+FILENAME_RE = re.compile(r"^gatling_v([0-9a-z]+)_i(\d+)_r(\d+)\.log$")
 LOG_TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z)")
 FINALIZE_RE = re.compile(
     r"Transaction ([a-f0-9]+) \(timestamp: (\d+) ms\) is now final in block"
 )
 
 
+def get_repo_root() -> str:
+    """Get the repository root directory (one level up from postprocessing folder)."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.dirname(script_dir)
+
+
 def parse_args() -> argparse.Namespace:
+    repo_root = get_repo_root()
     parser = argparse.ArgumentParser(
         description="Aggregate Gatling latencies and plot vs instances"
     )
     parser.add_argument(
         "--dir",
         dest="dir",
-        default=os.path.join("logs", "gatling-remote"),
+        default=os.path.join(repo_root, "logs", "gatling"),
         help="Directory containing gatling_v*_i*_r*.log files",
     )
     parser.add_argument(
         "--csv",
         dest="csv",
         default=os.path.join(
-            "logs", "gatling-remote", "latency_vs_instances.csv"
+            repo_root, "logs", "gatling", "latency_vs_instances.csv"
         ),
         help="Output CSV path",
     )
@@ -56,14 +67,26 @@ def parse_args() -> argparse.Namespace:
         "--png",
         dest="png",
         default=os.path.join(
-            "logs", "gatling-remote", "latency_vs_instances.png"
+            repo_root, "logs", "gatling", "latency_vs_instances.png"
         ),
         help="Output PNG path",
+    )
+    parser.add_argument(
+        "--stats-csv",
+        dest="stats_csv",
+        default=os.path.join(
+            repo_root, "logs", "gatling", "stats.csv"
+        ),
+        help="Output stats CSV path (contains all terminal output statistics)",
     )
     return parser.parse_args()
 
 
-def iter_gatling_files(dir_path: str) -> Iterable[Tuple[str, int, int, int]]:
+def iter_gatling_files(dir_path: str) -> Iterable[Tuple[str, int, str, int]]:
+    """
+    Yields (file_path, instances, validator_id, run_index).
+    validator_id is a string (can be numeric, hex, or location name like 'nyc').
+    """
     try:
         entries = sorted(os.listdir(dir_path))
     except FileNotFoundError:
@@ -75,7 +98,7 @@ def iter_gatling_files(dir_path: str) -> Iterable[Tuple[str, int, int, int]]:
         if not m:
             # Skip non-matching files silently
             continue
-        v = int(m.group(1))  # validator id
+        v = m.group(1)  # validator id (string: numeric, hex, or location name)
         i = int(m.group(2))  # instances count
         r = int(m.group(3))  # run index
         yield os.path.join(dir_path, name), i, v, r
@@ -86,6 +109,7 @@ def check_consistency(dir_path: str) -> None:
     Performs basic consistency checks over discovered Gatling logs:
     - Files must follow expected naming:
       gatling_v{validator}_i{instances}_r{run}.log
+      where validator can be numeric, hex, or location name (e.g., nyc, india)
     Exits with non-zero status if no matching files are found.
     """
     any_file = False
@@ -149,7 +173,8 @@ def aggregate_by_instances(dir_path: str) -> Dict[int, Dict[str, List[int]]]:
         lambda: defaultdict(list)
     )
     # Track first occurrence per transaction per validator file
-    seen_per_file: Dict[Tuple[int, int, str], bool] = {}
+    # validator is now a string (numeric, hex, or location name)
+    seen_per_file: Dict[Tuple[int, str, str], bool] = {}
     any_file = False
     for (
         file_path,
@@ -242,6 +267,55 @@ def write_csv(
                 f"{instances},{average_ms:.3f},{median_ms:.3f},"
                 f"{std_ms:.3f},{min_ms:.3f},{max_ms:.3f},{n}\n"
             )
+
+
+def write_stats_csv(
+    stats: Dict[int, Tuple[float, float, float, float, float, int]],
+    ks_results: Tuple[List[Tuple[int, int, float, float, int, int]], Dict[int, Tuple[float, float, float, float, float, int]]],
+    stats_csv_path: str,
+) -> None:
+    """
+    Write all terminal output statistics to a structured CSV file.
+    """
+    non_significant_pairs, group_stats = ks_results
+    os.makedirs(os.path.dirname(stats_csv_path), exist_ok=True)
+    
+    with open(stats_csv_path, "w") as f:
+        # Section 1: Per-instance summary statistics
+        f.write("=== PER-INSTANCE SUMMARY STATISTICS ===\n")
+        f.write("instances,avg_ms,median_ms,stddev_ms,min_ms,max_ms,unique_txs\n")
+        for instances in sorted(stats.keys()):
+            average_ms, median_ms, std_ms, min_ms, max_ms, n = stats[instances]
+            f.write(
+                f"{instances},{average_ms:.3f},{median_ms:.3f},"
+                f"{std_ms:.3f},{min_ms:.3f},{max_ms:.3f},{n}\n"
+            )
+        f.write("\n")
+        
+        # Section 2: Kolmogorov-Smirnov test results (non-significant comparisons)
+        if non_significant_pairs:
+            f.write("=== KOLMOGOROV-SMIRNOV TESTS (Non-Significant Comparisons) ===\n")
+            f.write("instance_1,instance_2,ks_statistic,p_value,n1,n2\n")
+            for inst1, inst2, ks_stat, p_val, n1, n2 in non_significant_pairs:
+                f.write(f"{inst1},{inst2},{ks_stat:.10f},{p_val:.10e},{n1},{n2}\n")
+        else:
+            f.write("=== KOLMOGOROV-SMIRNOV TESTS ===\n")
+            f.write("No non-significant comparisons found.\n")
+        f.write("\n")
+        
+        # Section 3: Group summary statistics
+        if group_stats:
+            f.write("=== GROUP SUMMARY STATISTICS ===\n")
+            f.write("instances,n,mean_ms,median_ms,std_ms,min_ms,max_ms\n")
+            for inst in sorted(group_stats.keys()):
+                mean_val, median_val, std_val, min_val, max_val, n = group_stats[inst]
+                f.write(
+                    f"{inst},{n},{mean_val:.2f},{median_val:.2f},"
+                    f"{std_val:.2f},{min_val:.2f},{max_val:.2f}\n"
+                )
+        else:
+            f.write("=== GROUP SUMMARY STATISTICS ===\n")
+            f.write("No group statistics available.\n")
 
 
 def prepare_plot_data(
@@ -694,25 +768,41 @@ def prepare_data_for_statistical_test(
 
 def perform_ks_tests(
     by_instances: Dict[int, Dict[str, List[int]]]
-) -> None:
+) -> Tuple[List[Tuple[int, int, float, float, int, int]], Dict[int, Tuple[float, float, float, float, float, int]]]:
     """
     Perform Kolmogorov-Smirnov tests for pairwise comparisons between
     all instance groups with Bonferroni correction for multiple comparisons.
+    Returns: (non_significant_pairs, group_stats)
+    where non_significant_pairs is list of (inst1, inst2, ks_stat, p_value, n1, n2)
+    and group_stats is dict of instances -> (mean, median, std, min, max, n)
     """
+    non_significant_pairs: List[Tuple[int, int, float, float, int, int]] = []
+    group_stats: Dict[int, Tuple[float, float, float, float, float, int]] = {}
+    
+    instance_data = prepare_data_for_statistical_test(by_instances)
+    sorted_instances = sorted(instance_data.keys())
+    
+    # Compute group stats regardless of scipy availability
+    for inst in sorted_instances:
+        data = instance_data[inst]
+        mean_val = statistics.mean(data)
+        median_val = statistics.median(data)
+        std_val = statistics.stdev(data) if len(data) >= 2 else 0.0
+        min_val = min(data)
+        max_val = max(data)
+        group_stats[inst] = (mean_val, median_val, std_val, min_val, max_val, len(data))
+    
     if not SCIPY_AVAILABLE:
         print(
             "\nWarning: scipy not available. "
             "Skipping Kolmogorov-Smirnov tests."
             "\nInstall with: pip install scipy"
         )
-        return
-
-    instance_data = prepare_data_for_statistical_test(by_instances)
-    sorted_instances = sorted(instance_data.keys())
+        return non_significant_pairs, group_stats
 
     if len(sorted_instances) < 2:
         print("\nInsufficient groups for statistical testing.")
-        return
+        return non_significant_pairs, group_stats
 
     print("\n" + "=" * 80)
     print("KOLMOGOROV-SMIRNOV TESTS (Non-Significant Comparisons Only)")
@@ -828,7 +918,7 @@ def perform_ks_tests(
             f"({n_comparisons}/{n_comparisons} significant)"
         )
 
-    # Additional statistics per group
+    # Additional statistics per group (already computed above, just print them)
     print("\n" + "=" * 80)
     print("GROUP SUMMARY STATISTICS")
     print("=" * 80)
@@ -838,19 +928,15 @@ def perform_ks_tests(
     )
     print("-" * 80)
     for inst in sorted_instances:
-        data = instance_data[inst]
-        mean_val = statistics.mean(data)
-        median_val = statistics.median(data)
-        std_val = statistics.stdev(data) if len(data) >= 2 else 0.0
-        min_val = min(data)
-        max_val = max(data)
+        mean_val, median_val, std_val, min_val, max_val, n = group_stats[inst]
         print(
-            f"instances={inst:<4}  {len(data):>7}  {mean_val:>11.2f}  "
+            f"instances={inst:<4}  {n:>7}  {mean_val:>11.2f}  "
             f"{median_val:>11.2f}  {std_val:>11.2f}  {min_val:>9.2f}  "
             f"{max_val:>9.2f}"
         )
 
     print("\n" + "=" * 80 + "\n")
+    return non_significant_pairs, group_stats
 
 
 def main() -> None:
@@ -873,9 +959,10 @@ def main() -> None:
         )
 
     # Perform Kolmogorov-Smirnov tests with multiple comparison correction
-    perform_ks_tests(by_instances)
+    ks_results = perform_ks_tests(by_instances)
 
     write_csv(stats, args.csv)
+    write_stats_csv(stats, ks_results, args.stats_csv)
     # Generate three plots: one with mean overlay, one with scatter overlay,
     # and one with both mean and scatter
     base_path = args.png

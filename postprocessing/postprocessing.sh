@@ -11,10 +11,15 @@ set -euo pipefail
 # Supports multiple input directories and different filename formats:
 # - Local format: vV_iI_rR.log (V = validator index, I = instance index, R = run index)
 # - Remote format: val_{public_key}_iI_rR.log (public_key = validator public key hash)
-# Output: gatling_vV_iI_rR.log (matching validator, instance, and run indices)
+# - Location format: val_{location}_iI_rR.log (location = VM location name like nyc, india, etc.)
+# Output: gatling_vV_iI_rR.log
+#   - For local format: V = validator index (numeric)
+#   - For remote format: V = first 4 hex characters of public key (e.g., 3a5f)
+#   - For location format: V = location name (e.g., nyc, india)
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_ROOT="${SCRIPT_DIR}"
+# REPO_ROOT is one level up from postprocessing directory
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 # ============================================================================
 # CONFIGURATION: Input directories to process
@@ -22,26 +27,30 @@ REPO_ROOT="${SCRIPT_DIR}"
 # Add or remove directories as needed. Script will process files from all directories.
 # Format: relative paths from REPO_ROOT, or absolute paths
 IN_DIRS=(
+    "${REPO_ROOT}/logs/validator"
     "${REPO_ROOT}/logs/val-india"
     "${REPO_ROOT}/logs/val-nyc"
     "${REPO_ROOT}/logs/val-london"
+    "${REPO_ROOT}/logs/val-sydney"
+    "${REPO_ROOT}/logs/val-singapore"
+    "${REPO_ROOT}/logs/val-frankfurt"
+    "${REPO_ROOT}/logs/val-sf"
 )
 
-OUT_DIR="${REPO_ROOT}/logs/gatling-remote"
+OUT_DIR="${REPO_ROOT}/logs/gatling"
 
 # ============================================================================
 # HELPER FUNCTIONS
 # ============================================================================
 
-# Map public key to a consistent validator index derived from its first two hex digits
-# We keep only the first two characters, interpret them as hex, and use the decimal value
-# This keeps identifiers small while remaining deterministic per public key
-map_public_key_to_validator_idx() {
+# Map public key to validator identifier using first 4 hex characters
+# Example: 3a5f... → 3a5f
+# This keeps identifiers readable while remaining deterministic per public key
+map_public_key_to_validator_id() {
     local public_key="$1"
-    local hex_prefix="${public_key:0:2}"
-    # Convert first two hex chars to decimal (handles lowercase)
-    local validator_idx=$((16#${hex_prefix}))
-    echo "${validator_idx}"
+    # Extract first 4 hex characters (handles lowercase)
+    local validator_id="${public_key:0:4}"
+    echo "${validator_id}"
 }
 
 # Process a single log file and extract gatling lines
@@ -51,7 +60,7 @@ process_log_file() {
     local instance_idx="$3"
     local run_idx="$4"
     
-    local out_file="${OUT_DIR}/gatling_v${validator_idx}_i${instance_idx}_r${run_idx}.log"
+    local out_file="${OUT_DIR}/gatling_${validator_idx}_i${instance_idx}_r${run_idx}.log"
     
     # Extract lines containing '[gatling]', preserving UTC timestamp at the beginning
     # Format: <timestamp> [gatling]...
@@ -108,17 +117,28 @@ for IN_DIR in "${IN_DIRS[@]}"; do
     done
     
     # Process remote format: val_{public_key}_i{instance_idx}_r{run_idx}.log
+    # Public key is a hex string (64 chars typically)
     for f in "${IN_DIR}"/val_*_i*_r*.log; do
         [[ ! -f "$f" ]] && continue
         base="$(basename "$f")"
+        # Match: val_{location}_i{instance_idx}_r{run_idx}.log (location format)
+        # Check location format first to avoid conflicts with hex pattern
+        # Location is an alphabetic string like nyc, india, london, etc.
+        if [[ "$base" =~ ^val_([a-z]+)_i([0-9]+)_r([0-9]+)\.log$ ]]; then
+            location="${BASH_REMATCH[1]}"
+            instance_idx="${BASH_REMATCH[2]}"
+            run_idx="${BASH_REMATCH[3]}"
+            # Use location name as validator identifier
+            validator_idx="$location"
+            process_log_file "$f" "$validator_idx" "$instance_idx" "$run_idx"
         # Match: val_{public_key}_i{instance_idx}_r{run_idx}.log
-        # Public key is a hex string (64 chars typically)
-        if [[ "$base" =~ ^val_([0-9a-f]+)_i([0-9]+)_r([0-9]+)\.log$ ]]; then
+        # Public key is a hex string (typically 64 chars, but we match any hex string)
+        elif [[ "$base" =~ ^val_([0-9a-f]+)_i([0-9]+)_r([0-9]+)\.log$ ]]; then
             public_key="${BASH_REMATCH[1]}"
             instance_idx="${BASH_REMATCH[2]}"
             run_idx="${BASH_REMATCH[3]}"
-            # Map public key to validator index
-            validator_idx=$(map_public_key_to_validator_idx "$public_key")
+            # Map public key to validator identifier (first 4 hex chars)
+            validator_idx=$(map_public_key_to_validator_id "$public_key")
             process_log_file "$f" "$validator_idx" "$instance_idx" "$run_idx"
         fi
     done
@@ -137,7 +157,8 @@ shopt -s nullglob
 groups_list=""
 for f in "${OUT_DIR}"/gatling_v*_i*_r*.log; do
   base="$(basename "$f")"
-  if [[ "$base" =~ ^gatling_v([0-9]+)_i([0-9]+)_r([0-9]+)\.log$ ]]; then
+  # Match validator identifier (numeric, hex, or alphabetic like location names), instance index, and run index
+  if [[ "$base" =~ ^gatling_v([0-9a-z]+)_i([0-9]+)_r([0-9]+)\.log$ ]]; then
     iidx="${BASH_REMATCH[2]}"
     ridx="${BASH_REMATCH[3]}"
     groups_list+=" i${iidx}_r${ridx}"
@@ -168,7 +189,8 @@ for key in ${unique_groups}; do
   done
 
   #echo "- Checking group instance=i${iidx}, round=r${ridx} (files=${#files[@]})"
-  if ! python3 "${REPO_ROOT}/verify_gatling_logs.py" --dir "${tmpdir}"; then
+  # verify_gatling_logs.py is in the same directory as this script (postprocessing folder)
+  if ! python3 "${SCRIPT_DIR}/verify_gatling_logs.py" --dir "${tmpdir}"; then
     echo "Group i${iidx} r${ridx}: verification FAILED" >&2
     overall_ok=1
   else
