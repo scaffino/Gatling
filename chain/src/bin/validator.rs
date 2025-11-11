@@ -41,6 +41,7 @@ const ACTIVITY_TIMEOUT: u64 = 256;
 const SKIP_TIMEOUT: u64 = 32;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(2);
 const FETCH_CONCURRENT: usize = 4;
+const ANCESTOR_FETCH_CONCURRENT: usize = 4;
 const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 const MAX_FETCH_COUNT: usize = 16;
 const MAX_FETCH_SIZE: usize = 512 * 1024;
@@ -567,6 +568,8 @@ fn main() {
                 lag_threshold: 1, // Default threshold: skip wait if 1+ views behind
                 total_instances: consensus_instances,
                 genesis_timestamp_secs: config.genesis_timestamp,
+                ancestor_fetch_concurrent: ANCESTOR_FETCH_CONCURRENT,
+                ancestor_fetch_rate_per_peer: resolver_limit,
             };
             let engine = engine::Engine::new(
                 context.with_label(&format!("consensus_{}", chain_id)), 

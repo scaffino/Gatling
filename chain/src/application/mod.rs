@@ -59,4 +59,9 @@ pub struct Config {
 
     /// Genesis timestamp in seconds
     pub genesis_timestamp_secs: u64,
+    
+    /// Maximum number of concurrent ancestor fetch requests
+    pub ancestor_fetch_concurrent: usize,
+    /// Rate limit per peer for ancestor fetching
+    pub ancestor_fetch_rate_per_peer: governor::Quota,
 }

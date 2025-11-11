@@ -79,6 +79,11 @@ pub struct Config<B: Blocker<PublicKey = PublicKey>, I: Indexer> {
     pub fetch_concurrent: usize,
     pub fetch_rate_per_peer: Quota,
 
+    /// Maximum number of concurrent ancestor fetch requests
+    pub ancestor_fetch_concurrent: usize,
+    /// Rate limit per peer for ancestor fetching
+    pub ancestor_fetch_rate_per_peer: Quota,
+
     pub indexer: Option<I>,
     
     /// Time offset within each second (in milliseconds, 0-999) for when this engine should send proposals.
@@ -173,6 +178,8 @@ impl<
                 lag_threshold: cfg.lag_threshold,
                 total_instances: cfg.total_instances,
                 genesis_timestamp_secs: cfg.genesis_timestamp_secs,
+                ancestor_fetch_concurrent: cfg.ancestor_fetch_concurrent,
+                ancestor_fetch_rate_per_peer: cfg.ancestor_fetch_rate_per_peer,
             },
         ); 
 

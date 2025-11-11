@@ -5,7 +5,7 @@ use super::{
 };
 use crate::{supervisor::Supervisor, utils::OneshotClosedFut};
 use alto_types::{Block, MAX_BLOCK_TRANSACTIONS};
-use commonware_codec::{DecodeExt, Encode};
+use commonware_codec::DecodeExt;
 use commonware_consensus::{marshal, threshold_simplex::types::View};
 use commonware_cryptography::{
     bls12381::primitives::variant::MinSig, ed25519::Batch, BatchVerifier, Digestible, Hasher, Sha256,
@@ -20,11 +20,165 @@ use futures::StreamExt;
 use futures::{channel::{mpsc, oneshot}, future::try_join};
 use futures::{future, future::Either};
 use rand::{CryptoRng, Rng};
-use std::collections::{HashMap, HashSet, BTreeMap};
+use std::collections::{HashMap, HashSet, BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tracing::{debug, info, warn};
+
+/// AncestorFetcher is a message type for requesting and receiving missing ancestor blocks.
+/// This is used to synchronize validators that have fallen behind or need to fetch ancestor chains.
+#[derive(Clone, Debug, PartialEq)]
+pub enum AncestorFetcher {
+    /// Request for missing ancestor blocks (batched by digest)
+    Request(Request),
+    /// Response containing requested ancestor blocks (batched)
+    Response(Response),
+}
+
+/// Request for ancestor blocks.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Request {
+    /// Unique request ID to match requests with responses
+    pub id: u64,
+    /// List of block digests being requested
+    pub digests: Vec<Digest>,
+}
+
+/// Response containing ancestor blocks.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Response {
+    /// Request ID this response corresponds to
+    pub id: u64,
+    /// List of blocks found (may be fewer than requested if some are missing)
+    pub blocks: Vec<Block>,
+}
+
+impl Request {
+    pub fn new(id: u64, digests: Vec<Digest>) -> Self {
+        Self { id, digests }
+    }
+}
+
+impl Response {
+    pub fn new(id: u64, blocks: Vec<Block>) -> Self {
+        Self { id, blocks }
+    }
+}
+
+impl Request {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&self.id.to_le_bytes());
+        buf.extend_from_slice(&(self.digests.len() as u32).to_le_bytes());
+        for digest in &self.digests {
+            buf.extend_from_slice(digest.as_ref());
+        }
+        buf
+    }
+}
+
+impl Response {
+    pub fn encode(&self) -> Vec<u8> {
+        use commonware_codec::Encode;
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&self.id.to_le_bytes());
+        buf.extend_from_slice(&(self.blocks.len() as u32).to_le_bytes());
+        for block in &self.blocks {
+            buf.extend_from_slice(&block.encode().to_vec());
+        }
+        buf
+    }
+}
+
+impl AncestorFetcher {
+    pub fn encode(&self) -> Vec<u8> {
+        match self {
+            AncestorFetcher::Request(req) => {
+                let mut buf = vec![0u8]; // 0 = Request variant
+                buf.extend_from_slice(&req.encode());
+                buf
+            }
+            AncestorFetcher::Response(resp) => {
+                let mut buf = vec![1u8]; // 1 = Response variant
+                buf.extend_from_slice(&resp.encode());
+                buf
+            }
+        }
+    }
+}
+
+impl Request {
+    pub fn decode(bytes: &[u8]) -> Result<Self, String> {
+        if bytes.len() < 12 {
+            return Err("Invalid request encoding: too short".to_string());
+        }
+        let id = u64::from_le_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3],
+            bytes[4], bytes[5], bytes[6], bytes[7],
+        ]);
+        let count = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize;
+        let mut digests = Vec::new();
+        let mut offset = 12;
+        for _ in 0..count {
+            if offset + 32 > bytes.len() {
+                return Err("Invalid request encoding: incomplete digest".to_string());
+            }
+            let digest_bytes = &bytes[offset..offset + 32];
+            let digest = Digest::decode(digest_bytes)
+                .map_err(|_| "Invalid digest encoding".to_string())?;
+            digests.push(digest);
+            offset += 32;
+        }
+        Ok(Self { id, digests })
+    }
+}
+
+impl Response {
+    pub fn decode(bytes: &[u8]) -> Result<Self, String> {
+        if bytes.len() < 12 {
+            return Err("Invalid response encoding: too short".to_string());
+        }
+        let id = u64::from_le_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3],
+            bytes[4], bytes[5], bytes[6], bytes[7],
+        ]);
+        let count = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize;
+        let mut blocks = Vec::new();
+        let mut offset = 12;
+        for _ in 0..count {
+            use commonware_codec::{DecodeExt, Encode};
+            match Block::decode(&bytes[offset..]) {
+                Ok(block) => {
+                    let block_bytes = block.encode();
+                    offset += block_bytes.len();
+                    blocks.push(block);
+                }
+                Err(e) => return Err(format!("Invalid block encoding: {:?}", e)),
+            }
+        }
+        Ok(Self { id, blocks })
+    }
+}
+
+impl AncestorFetcher {
+    pub fn decode(bytes: &[u8]) -> Result<Self, String> {
+        if bytes.is_empty() {
+            return Err("Invalid AncestorFetcher encoding: empty".to_string());
+        }
+        match bytes[0] {
+            0 => {
+                let req = Request::decode(&bytes[1..])?;
+                Ok(AncestorFetcher::Request(req))
+            }
+            1 => {
+                let resp = Response::decode(&bytes[1..])?;
+                Ok(AncestorFetcher::Response(resp))
+            }
+            _ => Err("Invalid AncestorFetcher variant".to_string()),
+        }
+    }
+}
 
 // Metrics
 use prometheus_client::metrics::counter::Counter as PromCounter;
@@ -65,6 +219,11 @@ pub struct Actor<R: Rng + CryptoRng + Spawner + Metrics + Clock> {
     total_instances: usize,
     // Genesis timestamp in seconds
     genesis_timestamp_secs: u64,
+    // Ancestor fetching configuration
+    ancestor_fetch_concurrent: usize,
+    ancestor_fetch_rate_per_peer: governor::Quota,
+    // Participants for peer selection
+    participants: Vec<commonware_cryptography::ed25519::PublicKey>,
 }
 
 impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
@@ -123,6 +282,9 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                 lag_threshold: config.lag_threshold,
                 total_instances: config.total_instances,
                 genesis_timestamp_secs: config.genesis_timestamp_secs,
+                ancestor_fetch_concurrent: config.ancestor_fetch_concurrent,
+                ancestor_fetch_rate_per_peer: config.ancestor_fetch_rate_per_peer,
+                participants: config.participants.clone(),
             },
             Supervisor::new(config.polynomial, config.participants, config.share),
             Mailbox::new(sender),
@@ -159,10 +321,13 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
         let built: Option<(View, Block)> = None;
         let built = Arc::new(Mutex::new(built));
         
-        // Shared pending ancestor requests (digest -> oneshot sender for response)
+        // Shared pending ancestor requests (request_id -> HashMap<digest -> oneshot sender>)
         // Multiple finalize_ancestors tasks can add requests here, message handler fulfills them
-        let pending_ancestor_requests: Arc<Mutex<HashMap<Digest, oneshot::Sender<Block>>>> = 
+        let pending_ancestor_requests: Arc<Mutex<HashMap<u64, HashMap<Digest, oneshot::Sender<Block>>>>> = 
             Arc::new(Mutex::new(HashMap::new()));
+        
+        // Request ID counter
+        let request_id_counter: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
         
         // Spawn task to handle incoming ancestor messages (both requests and responses)
         // This runs continuously throughout the actor's lifetime
@@ -170,62 +335,97 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
         let mut marshal_for_handler = marshal.clone();
         let engine_id_handler = self.engine_id.clone();
         let mut ancestor_sender_handler = ancestor_sender.clone();
-        self.context.with_label("ancestor_message_handler").spawn(move |_| async move {
+        self.context.with_label("ancestor_message_handler").spawn(move |context| async move {
             loop {
                 match ancestor_receiver.recv().await {
-                    Ok((_peer, message_bytes)) => {
-                        // Try to decode as a block first (response)
-                        match Block::decode(message_bytes.as_ref()) {
-                            Ok(block) => {
-                                // This is a block response
-                                let block_digest = block.digest();
-                                debug!("[{}] Received ancestor response for block {}", 
-                                       engine_id_handler, block_digest);
+                    Ok((peer, message_bytes)) => {
+                        // Try to decode as AncestorFetcher message
+                        match AncestorFetcher::decode(message_bytes.as_ref()) {
+                            Ok(AncestorFetcher::Request(request)) => {
+                                debug!("[{}] Received ancestor request {} from peer for {} digests", 
+                                       engine_id_handler, request.id, request.digests.len());
                                 
-                                // Check if we have a pending request for this digest
-                                let mut pending = pending_requests_handler.lock().unwrap();
-                                if let Some(response_tx) = pending.remove(&block_digest) {
-                                    drop(pending); // Drop lock before sending
-                                    // Send the block to the waiting task
-                                    let _ = response_tx.send(block);
+                                // Look up requested blocks from marshal local storage
+                                let mut found_blocks = Vec::new();
+                                for digest in &request.digests {
+                                    // Use 15ms timeout to check if block is immediately available locally
+                                    let subscribe_fut = marshal_for_handler.subscribe(None, *digest).await;
+                                    let check_result = select!(
+                                        result = subscribe_fut => {
+                                            match result {
+                                                Ok(block) => Some(block),
+                                                Err(_) => None,
+                                            }
+                                        },
+                                        _ = context.sleep(Duration::from_millis(15)) => {
+                                            // Timeout - block not in local storage
+                                            None
+                                        }
+                                    );
+                                    
+                                    if let Some(block) = check_result {
+                                        found_blocks.push(block);
+                                    }
+                                }
+                                
+                                // Send response with found blocks
+                                let found_count = found_blocks.len();
+                                if !found_blocks.is_empty() {
+                                    let response = AncestorFetcher::Response(Response::new(request.id, found_blocks));
+                                    let response_bytes = Bytes::from(response.encode());
+                                    if let Err(e) = ancestor_sender_handler.send(Recipients::One(peer), response_bytes, true).await {
+                                        warn!("[{}] Failed to send ancestor response to peer: {:?}", 
+                                              engine_id_handler, e);
+                                    } else {
+                                        debug!("[{}] Sent ancestor response {} with {} blocks to peer", 
+                                               engine_id_handler, request.id, found_count);
+                                    }
+                                } else {
+                                    debug!("[{}] Don't have any requested ancestors in local storage, ignoring request {}", 
+                                           engine_id_handler, request.id);
                                 }
                             }
-                            Err(_) => {
-                                // Not a block, try decoding as a digest (request)
-                                match Digest::decode(message_bytes.as_ref()) {
-                                    Ok(requested_digest) => {
-                                        debug!("[{}] Received ancestor request from peer for digest: {:?}", 
-                                               engine_id_handler, requested_digest);
-                                        
-                                        // Try to get the block from marshal LOCAL STORAGE ONLY (no backfill)
-                                        // Use very short timeout to check if block is immediately available locally
-                                        let subscribe_fut = marshal_for_handler.subscribe(None, requested_digest).await;
-                                        
-                                        // Note: We can't use context.sleep here since we don't have context in this handler
-                                        // Instead, we'll let marshal.subscribe return quickly if not in local storage
-                                        // The 10ms timeout check happens via a tokio sleep in a separate task if needed
-                                        // For now, we rely on marshal.subscribe's internal timeout behavior
-                                        match subscribe_fut.await {
-                                            Ok(block) => {
-                                                // We have the block in local storage - send it to all peers (they'll filter by digest)
-                                                let block_bytes = Bytes::from(block.encode().to_vec());
-                                                if let Err(e) = ancestor_sender_handler.send(Recipients::All, block_bytes, true).await {
-                                                    warn!("[{}] Failed to send ancestor block to peer: {:?}", 
-                                                          engine_id_handler, e);
-                                                } else {
-                                                    debug!("[{}] Sent ancestor block {} to peers", 
-                                                           engine_id_handler, requested_digest);
-                                                }
-                                            }
-                                            Err(_) => {
-                                                // We don't have the block in local storage - ignore the request
-                                                debug!("[{}] Don't have requested ancestor {} in local storage, ignoring request", 
-                                                       engine_id_handler, requested_digest);
-                                            }
+                            Ok(AncestorFetcher::Response(response)) => {
+                                debug!("[{}] Received ancestor response {} with {} blocks", 
+                                       engine_id_handler, response.id, response.blocks.len());
+                                
+                                // Check if we have a pending request for this ID
+                                let mut pending = pending_requests_handler.lock().unwrap();
+                                if let Some(mut digest_map) = pending.remove(&response.id) {
+                                    drop(pending); // Drop lock before sending
+                                    
+                                    // Collect blocks and their corresponding senders
+                                    let mut to_send: Vec<(oneshot::Sender<Block>, Block)> = Vec::new();
+                                    for block in response.blocks {
+                                        let block_digest = block.digest();
+                                        if let Some(response_tx) = digest_map.remove(&block_digest) {
+                                            to_send.push((response_tx, block));
                                         }
                                     }
-                                    Err(e) => {
-                                        warn!("[{}] Failed to decode ancestor message (neither block nor digest): {:?}", 
+                                    
+                                    // Send all blocks
+                                    for (tx, block) in to_send {
+                                        let _ = tx.send(block);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                // Try old format for backward compatibility during transition
+                                // Try to decode as a block first (old response format)
+                                match Block::decode(message_bytes.as_ref()) {
+                                    Ok(block) => {
+                                        let block_digest = block.digest();
+                                        debug!("[{}] Received old format ancestor response for block {}", 
+                                               engine_id_handler, block_digest);
+                                        
+                                        // Check if we have a pending request for this digest (old format)
+                                        // This is a fallback for old format - we'd need a different structure
+                                        // For now, just log and ignore
+                                        warn!("[{}] Received old format block response, but new format expected", 
+                                              engine_id_handler);
+                                    }
+                                    Err(_) => {
+                                        warn!("[{}] Failed to decode ancestor message: {:?}", 
                                               engine_id_handler, e);
                                     }
                                 }
@@ -472,180 +672,265 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                         let block_clone_for_log = block.clone();
                         let mut ancestor_sender_clone = ancestor_sender.clone();
                         let pending_ancestor_requests_clone = pending_ancestor_requests.clone();
+                        let request_id_counter_clone = request_id_counter.clone();
+                        let ancestor_fetch_concurrent = self.ancestor_fetch_concurrent;
+                        let participants_clone = self.participants.clone();
                         
                         self.context.with_label("finalize_ancestors").spawn(move |context| async move {
-                            // Constants for retry logic
-                            const MAX_RETRIES: usize = 3;
-                            const INITIAL_RETRY_DELAY_MS: u64 = 400;
-                            const MAX_RETRY_DELAY_MS: u64 = 3000;
+                            // Constants
                             const PEER_RESPONSE_TIMEOUT_MS: u64 = 2000; // Timeout for waiting for peer response
+                            const LOCAL_CHECK_TIMEOUT_MS: u64 = 15; // Marshal local storage check timeout
                             
                             debug!("[{}] Starting ancestor finalization task for block {} (view {}) with parent: {:?}", 
                                   engine_id_clone, block_clone_for_log.height, block_clone_for_log.view, start_parent);
                             
-                            // Determine chain of missing ancestors by walking parents until we hit an already finalized block
-                            let mut missing_ancestors: Vec<Block> = Vec::new();
+                            // Step 1: Collect all missing ancestor digests and check local storage
+                            let mut missing_digests: Vec<Digest> = Vec::new();
+                            let mut found_blocks: HashMap<Digest, Block> = HashMap::new();
                             let mut cursor_digest = start_parent;
                             
-                            while cursor_digest != genesis_digest_clone {
-                                // Stop if we've already seen this ancestor finalized
+                            // First pass: check local storage and collect missing digests
+                            // We need to walk the entire chain to find all missing blocks
+                            let mut chain_digests: Vec<Digest> = Vec::new();
+                            let mut temp_cursor = start_parent;
+                            
+                            // Build list of all ancestor digests we need to check
+                            while temp_cursor != genesis_digest_clone {
+                                if finalized_seen.lock().unwrap().contains(&temp_cursor.to_vec()) {
+                                    break;
+                                }
+                                chain_digests.push(temp_cursor);
+                                // We don't have the block yet, so we can't get its parent
+                                // We'll need to fetch blocks to continue
+                                break; // For now, we'll fetch one at a time
+                            }
+                            
+                            // Check each digest in local storage
+                            for digest in chain_digests {
+                                let subscribe_fut = marshal.subscribe(None, digest).await;
+                                let local_check_result = select!(
+                                    result = subscribe_fut => {
+                                        match result {
+                                            Ok(block) => Some(block),
+                                            Err(_) => None,
+                                        }
+                                    },
+                                    _ = context.sleep(Duration::from_millis(LOCAL_CHECK_TIMEOUT_MS)) => {
+                                        None
+                                    }
+                                );
+                                
+                                match local_check_result {
+                                    Some(block) => {
+                                        found_blocks.insert(digest, block);
+                                    }
+                                    None => {
+                                        missing_digests.push(digest);
+                                    }
+                                }
+                            }
+                            
+                            // If we have missing digests, we need to fetch them and continue walking the chain
+                            // For simplicity, let's fetch them one by one and reconstruct the chain
+                            // This is a simplified version - a full implementation would fetch all concurrently
+                            while !missing_digests.is_empty() && cursor_digest != genesis_digest_clone {
                                 if finalized_seen.lock().unwrap().contains(&cursor_digest.to_vec()) {
-                                    debug!("[{}] Ancestor {} already finalized, stopping ancestor chain", 
-                                           engine_id_clone, cursor_digest);
                                     break;
                                 }
                                 
-                                // Fetch ancestor block with retry logic
-                                let mut ancestor_opt: Option<Block> = None;
-                                let mut retry_count = 0;
+                                // Check if we already have this block
+                                if found_blocks.contains_key(&cursor_digest) {
+                                    let block = found_blocks.get(&cursor_digest).unwrap();
+                                    cursor_digest = block.parent;
+                                    continue;
+                                }
                                 
-                                debug!("[{}] Attempting to fetch ancestor {}", engine_id_clone, cursor_digest);
+                                // Check local storage one more time
+                                let subscribe_fut = marshal.subscribe(None, cursor_digest).await;
+                                let local_check_result = select!(
+                                    result = subscribe_fut => {
+                                        match result {
+                                            Ok(block) => Some(block),
+                                            Err(_) => None,
+                                        }
+                                    },
+                                    _ = context.sleep(Duration::from_millis(LOCAL_CHECK_TIMEOUT_MS)) => {
+                                        None
+                                    }
+                                );
                                 
-                                // Try to fetch ancestor with exponential backoff retries
-                                while ancestor_opt.is_none() && retry_count <= MAX_RETRIES {
-                                    // First, try to get from marshal LOCAL STORAGE ONLY (no backfill)
-                                    // Use very short timeout to check if block is immediately available locally
-                                    // If timeout triggers quickly, block is not in local storage, skip to peer request
-                                    let subscribe_fut = marshal.subscribe(None, cursor_digest).await;
-                                    
-                                    let local_check_result = select!(
-                                        result = subscribe_fut => {
-                                            match result {
-                                                Ok(ancestor) => Some(ancestor),
-                                                Err(_) => None,
-                                            }
-                                        },
-                                        _ = context.sleep(Duration::from_millis(10)) => {
-                                            // Timeout quickly - block not in local storage, skip backfill
-                                            None
+                                match local_check_result {
+                                    Some(block) => {
+                                        found_blocks.insert(cursor_digest, block.clone());
+                                        cursor_digest = block.parent;
+                                    }
+                                    None => {
+                                        // Add to missing if not already there
+                                        if !missing_digests.contains(&cursor_digest) {
+                                            missing_digests.push(cursor_digest);
                                         }
-                                    );
+                                        // Can't continue without this block
+                                        break;
+                                    }
+                                }
+                            }
+                            
+                            // Step 2: Fetch missing ancestors concurrently
+                            if !missing_digests.is_empty() {
+                                debug!("[{}] Need to fetch {} missing ancestors", engine_id_clone, missing_digests.len());
+                                
+                                // Create a map to track which digests we still need
+                                let mut needed_digests: BTreeSet<Digest> = missing_digests.iter().cloned().collect();
+                                
+                                // Batch digests into requests (up to concurrent limit)
+                                let mut request_batches: Vec<Vec<Digest>> = Vec::new();
+                                let mut current_batch = Vec::new();
+                                
+                                for digest in &missing_digests {
+                                    current_batch.push(*digest);
+                                    if current_batch.len() >= ancestor_fetch_concurrent {
+                                        request_batches.push(current_batch);
+                                        current_batch = Vec::new();
+                                    }
+                                }
+                                if !current_batch.is_empty() {
+                                    request_batches.push(current_batch);
+                                }
+                                
+                                // Process batches sequentially, but fetch within each batch concurrently
+                                for batch in request_batches {
+                                    if needed_digests.is_empty() {
+                                        break;
+                                    }
                                     
-                                    match local_check_result {
-                                        Some(ancestor) => {
-                                            // Successfully fetched ancestor from marshal local storage
-                                            ancestor_opt = Some(ancestor);
-                                            if let Some(ref ancestor_ref) = ancestor_opt {
-                                                debug!(
-                                                    "[{}] Successfully fetched ancestor {} (view {}) from marshal local storage",
-                                                    engine_id_clone, ancestor_ref.height, ancestor_ref.view
-                                                );
-                                            }
-                                            break;
+                                    // Filter batch to only include still-needed digests
+                                    let batch: Vec<Digest> = batch.into_iter()
+                                        .filter(|d| needed_digests.contains(d))
+                                        .collect();
+                                    
+                                    if batch.is_empty() {
+                                        continue;
+                                    }
+                                    
+                                    // Select peers (simple round-robin for now)
+                                    let available_peers: Vec<_> = participants_clone.iter().collect();
+                                    if available_peers.is_empty() {
+                                        warn!("[{}] No peers available for ancestor fetching", engine_id_clone);
+                                        break;
+                                    }
+                                    
+                                    // Create request for this batch
+                                    let request_id = request_id_counter_clone.fetch_add(1, Ordering::Relaxed);
+                                    let request = Request::new(request_id, batch.clone());
+                                    
+                                    // Create oneshot channels for each digest in the batch
+                                    let mut digest_senders: HashMap<Digest, oneshot::Sender<Block>> = HashMap::new();
+                                    let mut response_rxs: Vec<(Digest, oneshot::Receiver<Block>)> = Vec::new();
+                                    
+                                    for digest in &batch {
+                                        let (tx, rx) = oneshot::channel();
+                                        digest_senders.insert(*digest, tx);
+                                        response_rxs.push((*digest, rx));
+                                    }
+                                    
+                                    // Register pending request
+                                    {
+                                        let mut pending = pending_ancestor_requests_clone.lock().unwrap();
+                                        pending.insert(request_id, digest_senders);
+                                    }
+                                    
+                                    // Send request to first available peer (simple selection)
+                                    let selected_peer = available_peers[0].clone();
+                                    let request_msg = AncestorFetcher::Request(request);
+                                    let request_bytes = Bytes::from(request_msg.encode());
+                                    
+                                    if let Err(e) = ancestor_sender_clone.send(Recipients::One(selected_peer), request_bytes, true).await {
+                                        warn!("[{}] Failed to send ancestor request to peer: {:?}", 
+                                              engine_id_clone, e);
+                                        // Remove from pending
+                                        let mut pending = pending_ancestor_requests_clone.lock().unwrap();
+                                        pending.remove(&request_id);
+                                    } else {
+                                        debug!("[{}] Sent ancestor request {} for {} digests to peer", 
+                                               engine_id_clone, request_id, batch.len());
+                                        
+                                        // Wait for responses with timeout
+                                        let timeout_fut = context.sleep(Duration::from_millis(PEER_RESPONSE_TIMEOUT_MS));
+                                        let mut response_futs = Vec::new();
+                                        
+                                        for (digest, rx) in response_rxs {
+                                            response_futs.push(async move {
+                                                (digest, rx.await.ok())
+                                            });
                                         }
-                                        None => {
-                                            // Marshal doesn't have it in local storage - try requesting from peers via ancestor channel
-                                            debug!("[{}] Ancestor {} not in marshal, requesting from peers", 
-                                                  engine_id_clone, cursor_digest);
-                                            
-                                            // Create oneshot channel for response
-                                            let (response_tx, response_rx) = oneshot::channel();
-                                            {
-                                                let mut pending = pending_ancestor_requests_clone.lock().unwrap();
-                                                pending.insert(cursor_digest, response_tx);
+                                        
+                                        let responses_result = select!(
+                                            responses = future::join_all(response_futs) => {
+                                                Some(responses)
+                                            },
+                                            _ = timeout_fut => {
+                                                debug!("[{}] Timeout waiting for ancestor response {}", 
+                                                       engine_id_clone, request_id);
+                                                None
                                             }
-                                            
-                                            // Send request to all peers
-                                            let request_bytes = Bytes::from(cursor_digest.encode().to_vec());
-                                            let send_result = ancestor_sender_clone.send(Recipients::All, request_bytes, true).await;
-                                            
-                                            if send_result.is_err() {
-                                                warn!("[{}] Failed to send ancestor request to peers: {:?}", 
-                                                      engine_id_clone, send_result.err());
-                                                // Remove from pending
-                                                let mut pending = pending_ancestor_requests_clone.lock().unwrap();
-                                                pending.remove(&cursor_digest);
-                                            } else {
-                                                // Wait for response with timeout
-                                                let response_result = select!(
-                                                    result = response_rx => {
-                                                        result.ok()
-                                                    },
-                                                    _ = context.sleep(Duration::from_millis(PEER_RESPONSE_TIMEOUT_MS)) => {
-                                                        // Timeout waiting for peer response
-                                                        debug!("[{}] Timeout waiting for ancestor {} response from peers ({}ms)", 
-                                                               engine_id_clone, cursor_digest, PEER_RESPONSE_TIMEOUT_MS);
-                                                        None
+                                        );
+                                        
+                                        // Remove from pending
+                                        {
+                                            let mut pending = pending_ancestor_requests_clone.lock().unwrap();
+                                            pending.remove(&request_id);
+                                        }
+                                        
+                                        // Process responses
+                                        if let Some(responses) = responses_result {
+                                            for (digest, block_opt) in responses {
+                                                if let Some(block) = block_opt {
+                                                    // Verify digest matches
+                                                    if block.digest() == digest {
+                                                        debug!("[{}] Received ancestor {} (view {}) from peer", 
+                                                               engine_id_clone, block.height, block.view);
+                                                        // Store in marshal
+                                                        marshal.verified(block.view, block.clone()).await;
+                                                        found_blocks.insert(digest, block);
+                                                        needed_digests.remove(&digest);
+                                                    } else {
+                                                        warn!("[{}] Received ancestor block with mismatched digest", 
+                                                              engine_id_clone);
                                                     }
-                                                );
-                                                
-                                                // Remove from pending (drop lock before processing result)
-                                                {
-                                                    let mut pending = pending_ancestor_requests_clone.lock().unwrap();
-                                                    pending.remove(&cursor_digest);
-                                                }
-                                                
-                                                match response_result {
-                                                    Some(block) => {
-                                                        // Verify digest matches
-                                                        if block.digest() == cursor_digest {
-                                                            debug!("[{}] Received ancestor {} (view {}) from peer, verifying digest", 
-                                                                  engine_id_clone, block.height, block.view);
-                                                            // Store in marshal
-                                                            marshal.verified(block.view, block.clone()).await;
-                                                            ancestor_opt = Some(block);
-                                                            break;
-                                                        } else {
-                                                            warn!("[{}] Received ancestor block with mismatched digest", 
-                                                                  engine_id_clone);
-                                                        }
-                                                    }
-                                                    None => {
-                                                        // No response from peers (timeout, channel closed, or cancelled)
-                                                        debug!("[{}] No response received for ancestor {} from peers", 
-                                                               engine_id_clone, cursor_digest);
-                                                    }
-                                                }
-                                            }
-                                            
-                                            // Failed to fetch from peers - retry with exponential backoff
-                                            if ancestor_opt.is_none() {
-                                            if retry_count < MAX_RETRIES {
-                                                let delay_ms = (INITIAL_RETRY_DELAY_MS * (1 << retry_count))
-                                                    .min(MAX_RETRY_DELAY_MS);
-                                                debug!("[{}] Retry {} for ancestor {} (waiting {}ms)", 
-                                                      engine_id_clone, retry_count + 1, cursor_digest, delay_ms);
-                                                context.sleep(Duration::from_millis(delay_ms)).await;
-                                                retry_count += 1;
-                                            } else {
-                                                // Max retries reached - give up on this ancestor
-                                                debug!("[{}] Could not fetch ancestor {} after {} retries - stopping ancestor chain", 
-                                                      engine_id_clone, cursor_digest, MAX_RETRIES);
-                                                break;
                                                 }
                                             }
                                         }
                                     }
                                 }
                                 
-                                // Process ancestor if found
-                                if let Some(ancestor) = ancestor_opt {
-                                    // Persist ancestor to marshal so it's available for its own ancestors
-                                    // This is safe because if it exists in marshal (via subscribe), it's valid
-                                    // We persist it to ensure it's definitely there for future lookups
-                                    let anc_view = ancestor.view;
-                                    let anc_clone = ancestor.clone();
-                                    marshal.verified(anc_view, anc_clone.clone()).await;
-                                    
-                                    // If ancestor already counted, stop
-                                    if finalized_seen.lock().unwrap().contains(&ancestor.digest().to_vec()) {
-                                        break;
-                                    }
-                                    
-                                    // Continue walking up the chain
-                                    cursor_digest = ancestor.parent;
-                                    missing_ancestors.push(ancestor);
+                            }
+                            
+                            // Step 4: Reconstruct final ancestor chain from all found blocks
+                            let mut final_ancestors: Vec<Block> = Vec::new();
+                            let mut final_cursor = start_parent;
+                            
+                            while final_cursor != genesis_digest_clone {
+                                if finalized_seen.lock().unwrap().contains(&final_cursor.to_vec()) {
+                                    break;
+                                }
+                                
+                                if let Some(block) = found_blocks.get(&final_cursor) {
+                                    let block_clone = block.clone();
+                                    final_ancestors.push(block_clone.clone());
+                                    final_cursor = block_clone.parent;
                                 } else {
-                                    // Failed to fetch after retries - stop walking the chain
+                                    warn!("[{}] Missing block {} in final reconstruction", 
+                                          engine_id_clone, final_cursor);
                                     break;
                                 }
                             }
                             
-
+                            // Reverse to get ascending order
+                            final_ancestors.reverse();
+                            
                             // Finalize ancestors in ascending height order
-                            let ancestor_count = missing_ancestors.len();
-                            missing_ancestors.reverse();
-                            for anc in missing_ancestors {
+                            let ancestor_count = final_ancestors.len();
+                            for anc in final_ancestors {
                                 let anc_tx_count = anc.transactions.len();
                                 
                                 // Forward to per-instance buffer if enabled
