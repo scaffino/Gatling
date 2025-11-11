@@ -478,6 +478,7 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                             const MAX_RETRIES: usize = 5;
                             const INITIAL_RETRY_DELAY_MS: u64 = 100;
                             const MAX_RETRY_DELAY_MS: u64 = 1000;
+                            const PEER_RESPONSE_TIMEOUT_MS: u64 = 2000; // Timeout for waiting for peer response
                             
                             debug!("[{}] Starting ancestor finalization task for block {} (view {}) with parent: {:?}", 
                                   engine_id_clone, block_clone_for_log.height, block_clone_for_log.view, start_parent);
@@ -555,8 +556,18 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                                                 let mut pending = pending_ancestor_requests_clone.lock().unwrap();
                                                 pending.remove(&cursor_digest);
                                             } else {
-                                                // Wait for response (no timeout)
-                                                let response_result = response_rx.await.ok();
+                                                // Wait for response with timeout
+                                                let response_result = select!(
+                                                    result = response_rx => {
+                                                        result.ok()
+                                                    },
+                                                    _ = context.sleep(Duration::from_millis(PEER_RESPONSE_TIMEOUT_MS)) => {
+                                                        // Timeout waiting for peer response
+                                                        debug!("[{}] Timeout waiting for ancestor {} response from peers ({}ms)", 
+                                                               engine_id_clone, cursor_digest, PEER_RESPONSE_TIMEOUT_MS);
+                                                        None
+                                                    }
+                                                );
                                                 
                                                 // Remove from pending (drop lock before processing result)
                                                 {
@@ -580,7 +591,7 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                                                         }
                                                     }
                                                     None => {
-                                                        // No response from peers (channel closed or cancelled)
+                                                        // No response from peers (timeout, channel closed, or cancelled)
                                                         debug!("[{}] No response received for ancestor {} from peers", 
                                                                engine_id_clone, cursor_digest);
                                                     }
