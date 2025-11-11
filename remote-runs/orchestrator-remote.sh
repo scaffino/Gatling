@@ -16,8 +16,8 @@ set -euo pipefail
 # -----------------------------
 # Configuration (overridable)
 # -----------------------------
-MIN_INSTANCES="${MIN_INSTANCES:-2}"
-MAX_INSTANCES="${MAX_INSTANCES:-2}"
+MIN_INSTANCES="${MIN_INSTANCES:-1}"
+MAX_INSTANCES="${MAX_INSTANCES:-10}"
 RUNS_PER_INSTANCE="${RUNS_PER_INSTANCE:-1}"
 
 # Number of validators
@@ -345,42 +345,24 @@ generate_peers_yaml() {
 }
 
 # ---------------------------------
-# Fast, parallel validator shutdown across all hosts
+# Fast validator shutdown across all hosts (sequential, like run-remote.sh)
 # ---------------------------------
 stop_validators_parallel() {
   local instances="${1:-}"
   local idx
 
-  # Send SIGINT in parallel
+  # Stop validators on remote VMs (sequential, fast)
   for idx in "${!REMOTE_HOSTS[@]}"; do
     local host="${REMOTE_HOSTS[idx]}"
-    (
-      remote_cmd "${host}" "pkill -INT validator 2>/dev/null || true" 2>/dev/null || true
-      remote_cmd "${host}" "pkill -INT -f 'cargo.*validator' 2>/dev/null || true" 2>/dev/null || true
-      remote_cmd "${host}" "pkill -INT -f 'validator --' 2>/dev/null || true" 2>/dev/null || true
-      if [[ -n "${instances}" ]]; then
-        remote_cmd "${host}" "pkill -INT -f 'consensus-instances ${instances}' 2>/dev/null || true" 2>/dev/null || true
-      fi
-    ) &
+    # Skip localhost (handled separately)
+    if [[ ${idx} -eq ${LOCAL_VALIDATOR_INDEX} ]] && [[ ${LOCAL_VALIDATOR_INDEX} -ge 0 ]]; then
+      continue
+    fi
+    
+    remote_cmd "${host}" "pkill -INT -f 'validator --' || true" || true
+    sleep 1
+    remote_cmd "${host}" "pkill -KILL -f 'validator --' || true" || true
   done
-  wait || true
-
-  # Short grace period
-  sleep 1
-
-  # Force kill leftovers in parallel
-  for idx in "${!REMOTE_HOSTS[@]}"; do
-    local host="${REMOTE_HOSTS[idx]}"
-    (
-      remote_cmd "${host}" "pkill -KILL validator 2>/dev/null || true" 2>/dev/null || true
-      remote_cmd "${host}" "pkill -KILL -f 'cargo.*validator' 2>/dev/null || true" 2>/dev/null || true
-      remote_cmd "${host}" "pkill -KILL -f 'validator --' 2>/dev/null || true" 2>/dev/null || true
-      if [[ -n "${instances}" ]]; then
-        remote_cmd "${host}" "pkill -KILL -f 'consensus-instances ${instances}' 2>/dev/null || true" 2>/dev/null || true
-      fi
-    ) &
-  done
-  wait || true
 }
 
 # ---------------------------------
@@ -436,61 +418,10 @@ kill_validator_remote() {
   local instances="${2:-}"
   log "Stopping validator processes on ${host} (instances=${instances:-any})..."
   
-  # Fast pre-check: skip if nothing is running to avoid redundant work
-  local running_count
-  running_count="$(remote_cmd "${host}" "pgrep -f 'validator' 2>/dev/null | wc -l" 2>/dev/null || echo "0")"
-  running_count="${running_count// /}"
-  if [[ -z "${running_count}" || "${running_count}" == "0" ]]; then
-    log "No validator processes found on ${host}; skipping pre-run cleanup"
-    return 0
-  fi
-  
-  # Patterns to match validator processes
-  local patterns=(
-    "validator --"
-    "cargo run --bin validator"
-    "cargo run --release --bin validator"
-  )
-  
-  # Graceful stop first (SIGINT)
-  for pat in "${patterns[@]}"; do
-    remote_cmd "${host}" "pkill -INT -f '${pat}' 2>/dev/null || true" 2>/dev/null || true
-  done
-  
-  # Also kill by instances pattern if specified
-  if [[ -n "${instances}" ]]; then
-    remote_cmd "${host}" "pkill -INT -f 'consensus-instances ${instances}' 2>/dev/null || true" 2>/dev/null || true
-  fi
-  
-  # Short grace period
-  sleep 2
-  
-  # If everything exited after SIGINT, return early
-  running_count="$(remote_cmd "${host}" "pgrep -f 'validator' 2>/dev/null | wc -l" 2>/dev/null || echo "0")"
-  running_count="${running_count// /}"
-  if [[ -z "${running_count}" || "${running_count}" == "0" ]]; then
-    log "Validators on ${host} exited after SIGINT"
-    return 0
-  fi
-  
-  # Force kill any leftovers (SIGKILL)
-  for pat in "${patterns[@]}"; do
-    remote_cmd "${host}" "pkill -KILL -f '${pat}' 2>/dev/null || true" 2>/dev/null || true
-  done
-  
-  # Additional cleanup: kill by instances pattern
-  if [[ -n "${instances}" ]]; then
-    remote_cmd "${host}" "pkill -KILL -f 'consensus-instances ${instances}' 2>/dev/null || true" 2>/dev/null || true
-  fi
-  
-  # Final check and force kill any remaining
-  local still_running
-  still_running=$(remote_cmd "${host}" "pgrep -f 'validator' 2>/dev/null | wc -l" 2>/dev/null || echo "0")
-  still_running="${still_running// /}"
-  if [[ -n "${still_running}" ]] && [[ "${still_running}" != "0" ]]; then
-    remote_cmd "${host}" "pkill -9 -f 'validator' 2>/dev/null || true" 2>/dev/null || true
-    sleep 1
-  fi
+  # Fast sequential kill (matching run-remote.sh approach)
+  remote_cmd "${host}" "pkill -INT -f 'validator --' || true" || true
+  sleep 1
+  remote_cmd "${host}" "pkill -KILL -f 'validator --' || true" || true
 }
 
 # ---------------------------------
@@ -624,34 +555,49 @@ submit_transactions() {
 kill_everything() {
   log "Stopping validators on all hosts..."
   
-  # Kill validators FIRST (fastest path to stopping them)
-  # Fast parallel shutdown on all hosts
-  stop_validators_parallel ""
+  # Fast parallel kill: send INT to all hosts simultaneously
+  for idx in "${!REMOTE_HOSTS[@]}"; do
+    local host="${REMOTE_HOSTS[idx]}"
+    # Skip localhost (handled separately)
+    if [[ ${idx} -eq ${LOCAL_VALIDATOR_INDEX} ]] && [[ ${LOCAL_VALIDATOR_INDEX} -ge 0 ]]; then
+      continue
+    fi
+    remote_cmd "${host}" "pkill -INT -f 'validator --' || true" || true &
+  done
   
-  # Local fallback - only kill validator processes, not orchestrator
-  pkill -INT validator 2>/dev/null || true
-  pkill -INT -f "cargo.*validator" 2>/dev/null || true
-  pkill -INT -f "cargo run --release --bin validator" 2>/dev/null || true
+  # Local INT
+  pkill -INT -f "validator --" 2>/dev/null || true
+  
+  # Wait for all INT signals to be sent
+  wait 2>/dev/null || true
+  
+  # Short grace period (once for all hosts)
   sleep 1
-  pkill -KILL validator 2>/dev/null || true
-  pkill -KILL -f "cargo.*validator" 2>/dev/null || true
-  pkill -KILL -f "cargo run --release --bin validator" 2>/dev/null || true
   
-  # Now clean up SSH background processes (after validators are already stopped)
-  local pid killed_count=0
+  # Fast parallel kill: send KILL to all hosts simultaneously
+  for idx in "${!REMOTE_HOSTS[@]}"; do
+    local host="${REMOTE_HOSTS[idx]}"
+    # Skip localhost (handled separately)
+    if [[ ${idx} -eq ${LOCAL_VALIDATOR_INDEX} ]] && [[ ${LOCAL_VALIDATOR_INDEX} -ge 0 ]]; then
+      continue
+    fi
+    remote_cmd "${host}" "pkill -KILL -f 'validator --' || true" || true &
+  done
+  
+  # Local KILL
+  pkill -KILL -f "validator --" 2>/dev/null || true
+  
+  # Wait for all KILL signals to be sent
+  wait 2>/dev/null || true
+  
+  # Kill local SSH processes (non-blocking, validators already stopped)
   for pid in "${ACTIVE_VALIDATOR_SSH_PIDS[@]:-}"; do
-    if [[ -n "${pid}" ]]; then
-      # Check if process still exists and is actually an SSH process
-      if kill -0 "${pid}" 2>/dev/null; then
-        # Verify it's an SSH process before killing (safety check)
-        if ps -p "${pid}" -o comm= 2>/dev/null | grep -q "ssh"; then
-          kill "${pid}" 2>/dev/null && killed_count=$((killed_count + 1)) || true
-        fi
-      fi
+    if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
+      kill "${pid}" 2>/dev/null || true
     fi
   done
   
-  # Wait for SSH processes to terminate (non-blocking, validators already stopped)
+  # Wait for SSH processes (non-blocking)
   for pid in "${ACTIVE_VALIDATOR_SSH_PIDS[@]:-}"; do
     if [[ -n "${pid}" ]]; then
       wait "${pid}" 2>/dev/null || true
@@ -661,12 +607,6 @@ kill_everything() {
   # Clear the array for next iteration
   ACTIVE_VALIDATOR_SSH_PIDS=()
   
-  # Minimal wait for ports to be fully released
-  sleep 1
-  
-  if [[ ${killed_count} -gt 0 ]]; then
-    log "Killed ${killed_count} SSH background process(es) for validators"
-  fi
   log "Validator cleanup completed"
 }
 
@@ -689,34 +629,38 @@ cleanup_on_interrupt() {
   log "===== INTERRUPT RECEIVED ====="
   log "Cleaning up all validators and exiting..."
   
-  # Fast parallel kill on all hosts
+  # Fast parallel kill on all hosts (immediate KILL, no graceful shutdown on interrupt)
   log "Stopping all validator processes on remote hosts..."
-  stop_validators_parallel ""
+  for idx in "${!REMOTE_HOSTS[@]}"; do
+    local host="${REMOTE_HOSTS[idx]}"
+    # Skip localhost (handled separately)
+    if [[ ${idx} -eq ${LOCAL_VALIDATOR_INDEX} ]] && [[ ${LOCAL_VALIDATOR_INDEX} -ge 0 ]]; then
+      continue
+    fi
+    # Kill in parallel (background)
+    remote_cmd "${host}" "pkill -KILL -f 'validator --' || true" || true &
+  done
   
-  # Kill SSH background processes for validators
-  if [[ ${#ACTIVE_VALIDATOR_SSH_PIDS[@]} -gt 0 ]]; then
-    log "Terminating SSH background processes..."
-    local pid
-    for pid in "${ACTIVE_VALIDATOR_SSH_PIDS[@]}"; do
-      if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
-        if ps -p "${pid}" -o comm= 2>/dev/null | grep -q "ssh"; then
-          kill "${pid}" 2>/dev/null || true
-        fi
-      fi
-    done
-    # Wait for SSH processes to terminate
-    for pid in "${ACTIVE_VALIDATOR_SSH_PIDS[@]}"; do
-      if [[ -n "${pid}" ]]; then
-        wait "${pid}" 2>/dev/null || true
-      fi
-    done
-  fi
+  # Local cleanup (immediate KILL)
+  pkill -KILL -f "validator --" 2>/dev/null || true
   
-  # Local cleanup (final safety net)
-  pkill -9 -f "validator" 2>/dev/null || true
-  pkill -9 -f "cargo.*validator" 2>/dev/null || true
+  # Wait for all parallel kills to complete
+  wait 2>/dev/null || true
+  
+  # Kill SSH background processes (non-blocking, validators already stopped)
+  for pid in "${ACTIVE_VALIDATOR_SSH_PIDS[@]:-}"; do
+    if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
+      kill "${pid}" 2>/dev/null || true
+    fi
+  done
+  
+  # Wait for SSH processes (non-blocking)
+  for pid in "${ACTIVE_VALIDATOR_SSH_PIDS[@]:-}"; do
+    if [[ -n "${pid}" ]]; then
+      wait "${pid}" 2>/dev/null || true
+    fi
+  done
  
-  sleep 1
   log "Cleanup complete. Exiting."
   log "===== EXIT ====="
   exit 130  # Exit code 130 is standard for SIGINT
@@ -742,6 +686,14 @@ main() {
   
   log "Run duration per experiment: ${RUN_DURATION_SECONDS}s"
   log "Instance range: ${MIN_INSTANCES} to ${MAX_INSTANCES}"
+
+  # Clear log directory on all VMs once at the beginning (parallel)
+  log "Clearing log directory on all VMs at start..."
+  for idx in "${!REMOTE_HOSTS[@]}"; do
+    local host="${REMOTE_HOSTS[idx]}"
+    remote_cmd "${host}" "rm -rf '${REMOTE_LOG_DIR}'/* 2>/dev/null || true" || true &
+  done
+  wait 2>/dev/null || true
 
   local instances run_idx
   for instances in $(seq "${MIN_INSTANCES}" "${MAX_INSTANCES}"); do
