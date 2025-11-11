@@ -10,7 +10,7 @@ use commonware_cryptography::{
 };
 use commonware_deployer::ec2::Hosts;
 use commonware_p2p::authenticated::discovery as authenticated;
-use commonware_runtime::{tokio, Metrics, Runner, Spawner};
+use commonware_runtime::{tokio, Clock, Metrics, Runner, Spawner};
 use commonware_utils::{from_hex_formatted, quorum, union_unique};
 use futures::future::try_join_all;
 use futures::StreamExt;
@@ -329,19 +329,6 @@ fn main() {
     let signer = PrivateKey::decode(key.as_ref()).expect("Private key is invalid");
     let public_key = signer.public_key();
 
-    // Gate startup until genesis timestamp (no runtime/network/consensus before this time)
-    {
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        if now_secs < config.genesis_timestamp {
-            let wait_secs = config.genesis_timestamp - now_secs;
-            info!(genesis_timestamp = config.genesis_timestamp, wait_secs, "waiting for genesis timestamp before starting validator");
-            std::thread::sleep(std::time::Duration::from_secs(wait_secs));
-        }
-    }
-
     // Initialize runtime
     let cfg = tokio::Config::default()
         .with_tcp_nodelay(Some(true))
@@ -545,8 +532,8 @@ fn main() {
                 chain_id).into_bytes();
             
             // Calculate time offset for this instance to stagger proposals evenly across the second
-            // For N instances: instance 0 gets 0ms, instance 1 gets 1000/N ms, instance 2 gets 2000/N ms, etc.
-            let proposal_offset_ms = (i * 1000 / consensus_instances) as u64;
+            // For N instances: instance 0 gets 0ms, instance 1 gets 3000/N ms, instance 2 gets 3000/N ms, etc.
+            let proposal_offset_ms = (i * 3000 / consensus_instances) as u64; 
             tracing::info!("Consensus instance {} will send proposals at offset {} ms within each second", 
                           chain_id, proposal_offset_ms);
             
@@ -692,6 +679,19 @@ fn main() {
             gossip_tasks.push(tx_gossip_task);
         } else {
             info!(gossip_enabled, "Transaction gossiping is DISABLED");
+        }
+
+        // Gate consensus startup until genesis timestamp (network/HTTP server can start earlier)
+        {
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            if now_secs < config.genesis_timestamp {
+                let wait_secs = config.genesis_timestamp - now_secs;
+                info!(genesis_timestamp = config.genesis_timestamp, wait_secs, "waiting for genesis timestamp before starting consensus");
+                context.sleep(std::time::Duration::from_secs(wait_secs)).await;
+            }
         }
 
         // Start all independent consensus instances

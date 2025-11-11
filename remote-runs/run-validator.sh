@@ -64,9 +64,9 @@ detect_validator_binary() {
     # Try common locations
     local candidates=(
         "/root/alto/target/release/validator"
-        "/root/alto/target/debug/validator"
-        "${REPO_ROOT}/target/release/validator"
-        "${REPO_ROOT}/target/debug/validator"
+        # "/root/alto/target/debug/validator"
+        #"${REPO_ROOT}/target/release/validator"
+        # "${REPO_ROOT}/target/debug/validator"
     )
     
     for candidate in "${candidates[@]}"; do
@@ -146,6 +146,36 @@ LOG_FILE="${LOG_DIR}/val_${PUBLIC_KEY}.log"
 
 # Set ulimit for file descriptors
 ulimit -n 65536 || true
+
+# Optional: stagger non-bootstrapper startup so bootstrapper starts sooner
+# Set delay (seconds) for non-bootstrapper nodes; override with env var if desired
+STARTUP_STAGGER_NON_BOOTSTRAPPER="${STARTUP_STAGGER_NON_BOOTSTRAPPER:-5}"
+if [[ "${STARTUP_STAGGER_NON_BOOTSTRAPPER}" -gt 0 ]]; then
+    # Detect if this validator is listed as a bootstrapper in its config
+    IS_BOOTSTRAPPER=false
+    if command -v awk >/dev/null 2>&1; then
+        # Extract bootstrappers block robustly and check for PUBLIC_KEY
+        if awk '
+            BEGIN { in_boot=0 }
+            /^bootstrappers:/ { in_boot=1; next }
+            in_boot==1 && /^- / { gsub(/^- /, "", $0); print; next }
+            in_boot==1 && /^[a-z_]+:/ { in_boot=0 }
+        ' "${CONFIG_FILE}" | grep -qx "${PUBLIC_KEY}"; then
+            IS_BOOTSTRAPPER=true
+        fi
+    else
+        # Fallback: simple grep (less robust, but fine as a fallback)
+        if grep -q "^- ${PUBLIC_KEY}\$" "${CONFIG_FILE}"; then
+            IS_BOOTSTRAPPER=true
+        fi
+    fi
+    if [[ "${IS_BOOTSTRAPPER}" == "false" ]]; then
+        log "Non-bootstrapper detected. Sleeping ${STARTUP_STAGGER_NON_BOOTSTRAPPER}s to let bootstrapper start..."
+        sleep "${STARTUP_STAGGER_NON_BOOTSTRAPPER}"
+    else
+        log "Bootstrapper detected. Starting immediately."
+    fi
+fi
 
 # Build validator command
 # Run from repo root to ensure any relative paths work
