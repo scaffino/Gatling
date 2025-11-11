@@ -5,24 +5,34 @@ set -euo pipefail
 # =============================================================================
 # Main orchestrator script for running validators on remote VMs
 # This script runs locally on your laptop and orchestrates everything
+#
+# Features:
+# - Generates validator configs locally
+# - Deploys configs to remote VMs
+# - Starts validators on all VMs
+# - Optionally submits transactions to validators (see ENABLE_TX_SUBMISSION)
 # =============================================================================
 
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
+
+# Transaction submission parameters (optional)
+ENABLE_TX_SUBMISSION="${ENABLE_TX_SUBMISSION:-1}"
+TX_NUM_TXS="${TX_NUM_TXS:-50}"
+TX_SENDER_SEED="${TX_SENDER_SEED:-999}"
+TX_RECEIVER_PUBKEY="${TX_RECEIVER_PUBKEY:-3ecf551aeb957616c6c8aa603634ea55845f88712a58745e58a71fe988bb967a}"
+TX_SUBMITTER_INDEX="${TX_SUBMITTER_INDEX:-0}"  # Which validator index to submit from (0-based)
+TX_STARTUP_WAIT="${TX_STARTUP_WAIT:-120}"      # Seconds to wait for validators to be ready before submitting
+TX_SUBMIT_TO_ALL="${TX_SUBMIT_TO_ALL:-1}"     # If 1, submit from every validator; if 0, only TX_SUBMITTER_INDEX
+TX_DRIVE_FROM_LOCAL="${TX_DRIVE_FROM_LOCAL:-1}" # If 1, create/send txs from this laptop
+TX_BATCH_GAP="${TX_BATCH_GAP:-20}"            # Seconds gap between batches to consecutive validators (local driver)
+
 # Number of consensus instances to run
 CONSENSUS_INSTANCES="${CONSENSUS_INSTANCES:-3}"
-# Number of validators to generate
-V=4
 
-# Remote validator machine IPs (order must match validator assignment)
-REMOTE_HOSTS=(
-    #"root@127.0.0.1"        # localhost
-    "root@134.122.73.49"    # gatling-frakfurt
-    "root@164.90.133.225"   # gatling-nyc
-    "root@159.65.105.83"    # gatling-sf
-    "root@170.64.129.99"    # gatling-sydney
-)
+# Number of validators to generate
+V=6
 
 # SSH/SCP options
 SSH_OPTS=(
@@ -41,6 +51,63 @@ REMOTE_REPO_DIR="${REMOTE_REPO_DIR:-/root/alto}"
 REMOTE_BASE_DIR="${REMOTE_BASE_DIR:-/root/alto/deploy/manual}"
 REMOTE_LOG_DIR="${REMOTE_LOG_DIR:-/root/alto/logs/validator}"
 REMOTE_STORAGE_DIR="${REMOTE_STORAGE_DIR:-/root/alto/deploy/manual}"
+
+# =============================================================================
+# HELPER FUNCTIONS (needed early)
+# =============================================================================
+
+log() {
+    printf '[run-remote] %s\n' "$*"
+}
+
+err() {
+    printf '[run-remote] ERROR: %s\n' "$*" >&2
+}
+
+fatal() {
+    err "$@"
+    exit 1
+}
+
+# Load REMOTE_HOSTS from ips.txt file (one host per line, format: root@IP or IP)
+# Lines starting with # are treated as comments and ignored
+# Empty lines are ignored
+load_remote_hosts() {
+    local ips_file="${SCRIPT_DIR}/ips.txt"
+    REMOTE_HOSTS=()
+    
+    if [[ ! -f "${ips_file}" ]]; then
+        fatal "ips.txt not found at ${ips_file}. Please create it with one host per line (format: root@IP or IP)"
+    fi
+    
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        # Strip leading/trailing whitespace
+        line="${line%%#*}"  # Remove inline comments
+        line="${line#"${line%%[![:space:]]*}"}"  # Trim leading whitespace
+        line="${line%"${line##*[![:space:]]}"}"  # Trim trailing whitespace
+        
+        # Skip empty lines and comment lines
+        [[ -z "${line}" ]] && continue
+        [[ "${line}" =~ ^[[:space:]]*# ]] && continue
+        
+        # If line doesn't start with root@, assume it's just an IP and prepend root@
+        if [[ ! "${line}" =~ ^root@ ]]; then
+            line="root@${line}"
+        fi
+        
+        REMOTE_HOSTS+=("${line}")
+    done < "${ips_file}"
+    
+    if [[ ${#REMOTE_HOSTS[@]} -eq 0 ]]; then
+        fatal "No valid hosts found in ${ips_file}"
+    fi
+    
+    log "Loaded ${#REMOTE_HOSTS[@]} remote host(s) from ${ips_file}"
+}
+
+# Remote validator machine IPs (order must match validator assignment)
+# Load remote hosts from file
+load_remote_hosts
 
 # Setup parameters (passed to cargo run --bin setup)
 SETUP_PEERS="${V}"
@@ -62,26 +129,33 @@ REMOTE_IPS=()
 ACTIVE_SSH_PIDS=()
 LOCAL_VALIDATOR_PID=""
 LOCAL_VALIDATOR_INDEX=-1
+TX_SUBMITTER_PID=""
+TX_SUBMITTER_PIDS=()
 
 # =============================================================================
 # HELPER FUNCTIONS
 # =============================================================================
 
-log() {
-    printf '[run-remote] %s\n' "$*"
-}
-
-err() {
-    printf '[run-remote] ERROR: %s\n' "$*" >&2
-}
-
-fatal() {
-    err "$@"
-    exit 1
-}
-
 command_exists() {
     command -v "$1" >/dev/null 2>&1
+}
+
+detect_submit_tx_binary() {
+    # Try common locations relative to repo root
+    local candidates=(
+        "${REPO_ROOT}/target/release/submit_tx"
+        "${REPO_ROOT}/target/debug/submit_tx"
+    )
+    local candidate
+    for candidate in "${candidates[@]}"; do
+        if [[ -f "${candidate}" ]]; then
+            echo "${candidate}"
+            return 0
+        fi
+    done
+    # Not found
+    echo ""
+    return 1
 }
 
 remote_cmd() {
@@ -426,6 +500,10 @@ deploy_to_vms() {
             copy_file "${SCRIPT_DIR}/run-validator.sh" "${host}" "${REMOTE_REPO_DIR}/remote-runs/run-validator.sh"
             remote_cmd "${host}" "chmod +x '${REMOTE_REPO_DIR}/remote-runs/run-validator.sh'"
             
+            # Copy submitTx-remote.sh and ensure it's executable
+            copy_file "${SCRIPT_DIR}/submitTx-remote.sh" "${host}" "${REMOTE_REPO_DIR}/remote-runs/submitTx-remote.sh"
+            remote_cmd "${host}" "chmod +x '${REMOTE_REPO_DIR}/remote-runs/submitTx-remote.sh'"
+            
             log "  ✓ Deployed to ${remote_ip} (storage: ${new_storage_dir})"
         fi
     done
@@ -543,12 +621,245 @@ EOF
 }
 
 # =============================================================================
-# PHASE 6: CLEANUP ON INTERRUPT
+# PHASE 6: SUBMIT TRANSACTIONS (OPTIONAL)
+# =============================================================================
+
+submit_transactions() {
+    # Auto-enable if using local driver and TX_NUM_TXS > 0 (user-friendly default)
+    if [[ -z "${ENABLE_TX_SUBMISSION}" ]] && [[ "${TX_DRIVE_FROM_LOCAL}" == "1" ]] && [[ "${TX_NUM_TXS}" -gt 0 ]]; then
+        log "Auto-enabling transaction submission (TX_DRIVE_FROM_LOCAL=1 and TX_NUM_TXS=${TX_NUM_TXS})"
+        ENABLE_TX_SUBMISSION=1
+    fi
+    
+    # Skip if transaction submission is not enabled
+    if [[ -z "${ENABLE_TX_SUBMISSION}" ]]; then
+        return 0
+    fi
+    
+    log "Phase 6: Submitting transactions"
+    # Wait for validators to be ready
+    log "Waiting ${TX_STARTUP_WAIT} seconds for validators to be ready..."
+    sleep "${TX_STARTUP_WAIT}"
+    
+    # Local driver: create and send transactions from this laptop to remote validators
+    if [[ "${TX_DRIVE_FROM_LOCAL}" == "1" ]]; then
+        log "Using local driver: transactions will be created and sent from this laptop"
+        
+        # Detect submit_tx binary
+        local submit_tx_bin
+        submit_tx_bin=$(detect_submit_tx_binary || true)
+        if [[ -z "${submit_tx_bin}" ]]; then
+            err "submit_tx binary not found."
+            err "Build it with: cd ${REPO_ROOT} && cargo build --release --package alto-client --bin submit_tx"
+            return 1
+        fi
+        if [[ ! -x "${submit_tx_bin}" ]]; then
+            chmod +x "${submit_tx_bin}" || true
+        fi
+        log "Using submit_tx: ${submit_tx_bin}"
+        
+        # Build target index list
+        local target_indexes=()
+        if [[ "${TX_SUBMIT_TO_ALL}" == "1" ]]; then
+            for t_idx in "${!PUBLIC_KEYS[@]}"; do
+                target_indexes+=("${t_idx}")
+            done
+            log "Will submit ${TX_NUM_TXS} transactions per validator for ${#target_indexes[@]} validator(s)"
+        else
+            if [[ ${TX_SUBMITTER_INDEX} -lt 0 ]] || [[ ${TX_SUBMITTER_INDEX} -ge ${#PUBLIC_KEYS[@]} ]]; then
+                err "Invalid TX_SUBMITTER_INDEX ${TX_SUBMITTER_INDEX}. Must be between 0 and $(( ${#PUBLIC_KEYS[@]} - 1 ))"
+                return 1
+            fi
+            target_indexes+=("${TX_SUBMITTER_INDEX}")
+            log "Will submit ${TX_NUM_TXS} transactions from validator index ${TX_SUBMITTER_INDEX}"
+        fi
+        
+        # Sequentially submit to each validator with a gap between batches
+        local j
+        local LOCAL_TX_SUMMARY=()
+        for j in "${!target_indexes[@]}"; do
+            local idx="${target_indexes[j]}"
+            local public_key="${PUBLIC_KEYS[idx]}"
+            local ip="${REMOTE_IPS[idx]}"
+            local config_file="${CONFIG_FILES[idx]}"
+            
+            # Extract transaction_port from local config
+            local tx_port
+            tx_port=$(grep "^transaction_port:" "${config_file}" | awk '{print $2}' || echo "")
+            if [[ -z "${tx_port}" ]]; then
+                err "transaction_port not found in ${config_file}"
+                return 1
+            fi
+            
+            local url="http://${ip}:${tx_port}"
+            log "Submitting to validator ${public_key} at ${url} (${TX_NUM_TXS} txs)"
+            
+            local success=0
+            local failed=0
+            local i
+            for i in $(seq 1 "${TX_NUM_TXS}"); do
+                if "${submit_tx_bin}" \
+                    --validator "${url}" \
+                    --sender-seed "${TX_SENDER_SEED}" \
+                    --receiver "${TX_RECEIVER_PUBKEY}" \
+                    --amount "${i}" \
+                    >/dev/null 2>&1; then
+                    success=$((success + 1))
+                else
+                    failed=$((failed + 1))
+                fi
+                # Small delay between transactions to avoid spikes
+                sleep 0.1
+            done
+            
+            log "  Completed for ${public_key}: success=${success}, failed=${failed}"
+            log "  Summary: sent ${success}/${TX_NUM_TXS} txs to ${public_key} at ${url}"
+            LOCAL_TX_SUMMARY+=("$(printf '%s %s %s/%s' "${public_key}" "${url}" "${success}" "${TX_NUM_TXS}")")
+            
+            # Batch gap between validators, except after last one
+            if [[ $(( j + 1 )) -lt ${#target_indexes[@]} ]]; then
+                log "Sleeping ${TX_BATCH_GAP}s before next validator batch..."
+                sleep "${TX_BATCH_GAP}"
+            fi
+        done
+        
+        log "Local transaction submission finished."
+        if [[ ${#LOCAL_TX_SUMMARY[@]} -gt 0 ]]; then
+            echo ""
+            echo "[run-remote] ========================================="
+            echo "[run-remote] Transaction submission summary (local driver):"
+            local entry
+            for entry in "${LOCAL_TX_SUMMARY[@]}"; do
+                # entry format: "<pubkey> <url> <success>/<total>"
+                local pk url counts
+                pk="$(echo "${entry}" | awk '{print $1}')"
+                url="$(echo "${entry}" | awk '{print $2}')"
+                counts="$(echo "${entry}" | awk '{print $3}')"
+                echo "[run-remote]   ${pk:0:16}... <- ${counts} at ${url}"
+            done
+            echo "[run-remote] ========================================="
+        fi
+        return 0
+    fi
+    
+    # Decide target indexes (all or single) for remote/host-driven submissions
+    local target_indexes=()
+    if [[ "${TX_SUBMIT_TO_ALL}" == "1" ]]; then
+        for idx in "${!REMOTE_HOSTS[@]}"; do
+            target_indexes+=("${idx}")
+        done
+        log "Submitting ${TX_NUM_TXS} transactions from every validator (${#target_indexes[@]} total submitters)"
+    else
+        # Validate submitter index
+        if [[ ${TX_SUBMITTER_INDEX} -lt 0 ]] || [[ ${TX_SUBMITTER_INDEX} -ge ${#REMOTE_HOSTS[@]} ]]; then
+            err "Invalid TX_SUBMITTER_INDEX ${TX_SUBMITTER_INDEX}. Must be between 0 and $(( ${#REMOTE_HOSTS[@]} - 1 ))"
+            return 1
+        fi
+        target_indexes+=("${TX_SUBMITTER_INDEX}")
+        log "Submitting ${TX_NUM_TXS} transactions from validator index ${TX_SUBMITTER_INDEX}"
+    fi
+    
+    # Launch submissions for each target
+    TX_SUBMITTER_PIDS=()
+    for idx in "${target_indexes[@]}"; do
+        local submitter_host="${REMOTE_HOSTS[idx]}"
+        local submitter_public_key="${PUBLIC_KEYS[idx]}"
+        local submitter_ip="${REMOTE_IPS[idx]}"
+        local is_local=false
+        
+        if [[ ${idx} -eq ${LOCAL_VALIDATOR_INDEX} ]]; then
+            is_local=true
+            log "Submitting from localhost (validator: ${submitter_public_key})"
+        else
+            log "Submitting from ${submitter_ip} (validator: ${submitter_public_key})"
+        fi
+        
+        # Determine base directory based on whether submitter is local or remote
+        local base_dir
+        if [[ "${is_local}" == "true" ]]; then
+            base_dir="${REPO_ROOT}/chain/test-remote"
+        else
+            base_dir="${REMOTE_BASE_DIR}"
+        fi
+        
+        # Build command to run submitTx-remote.sh
+        local cmd
+        if [[ "${is_local}" == "true" ]]; then
+            cmd=$(cat <<EOF
+cd '${REPO_ROOT}' && \
+NUM_TXS='${TX_NUM_TXS}' \
+SENDER_SEED='${TX_SENDER_SEED}' \
+RECEIVER_PUBKEY='${TX_RECEIVER_PUBKEY}' \
+BASE_DIR='${base_dir}' \
+PUBLIC_KEY='${submitter_public_key}' \
+REPO_ROOT='${REPO_ROOT}' \
+'${SCRIPT_DIR}/submitTx-remote.sh' \
+    '${TX_NUM_TXS}' \
+    '${TX_SENDER_SEED}' \
+    '${TX_RECEIVER_PUBKEY}' \
+    '${base_dir}' \
+    '${submitter_public_key}'
+EOF
+)
+            # Run in background
+            bash -c "${cmd}" &
+            local pid=$!
+            TX_SUBMITTER_PIDS+=("${pid}")
+            log "  Started local transaction submission (PID: ${pid})"
+        else
+            cmd=$(cat <<EOF
+cd '${REMOTE_REPO_DIR}' && \
+NUM_TXS='${TX_NUM_TXS}' \
+SENDER_SEED='${TX_SENDER_SEED}' \
+RECEIVER_PUBKEY='${TX_RECEIVER_PUBKEY}' \
+BASE_DIR='${base_dir}' \
+PUBLIC_KEY='${submitter_public_key}' \
+REPO_ROOT='${REMOTE_REPO_DIR}' \
+./remote-runs/submitTx-remote.sh \
+    '${TX_NUM_TXS}' \
+    '${TX_SENDER_SEED}' \
+    '${TX_RECEIVER_PUBKEY}' \
+    '${base_dir}' \
+    '${submitter_public_key}'
+EOF
+)
+            # Run in background via SSH
+            ssh "${SSH_OPTS[@]}" "${submitter_host}" "${cmd}" &
+            local pid=$!
+            TX_SUBMITTER_PIDS+=("${pid}")
+            log "  Started remote transaction submission on ${submitter_ip} (SSH PID: ${pid})"
+        fi
+        
+        # Optional tiny stagger to avoid thundering herd
+        sleep 0.2
+    done
+    
+    log "Transaction submissions started for ${#target_indexes[@]} validator(s)."
+}
+
+# =============================================================================
+# PHASE 7: CLEANUP ON INTERRUPT
 # =============================================================================
 
 cleanup_on_interrupt() {
     log ""
-    log "Interrupt received. Stopping all validators..."
+    log "Interrupt received. Stopping all validators and transaction submission..."
+    
+    # Stop transaction submissions if running
+    if [[ -n "${TX_SUBMITTER_PIDS[*]:-}" ]]; then
+        for pid in "${TX_SUBMITTER_PIDS[@]}"; do
+            if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
+                log "Stopping transaction submission (PID: ${pid})..."
+                kill -INT "${pid}" 2>/dev/null || true
+            fi
+        done
+        sleep 1
+        for pid in "${TX_SUBMITTER_PIDS[@]}"; do
+            if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
+                kill -KILL "${pid}" 2>/dev/null || true
+            fi
+        done
+    fi
     
     # Stop localhost validator if running
     if [[ -n "${LOCAL_VALIDATOR_PID:-}" ]] && kill -0 "${LOCAL_VALIDATOR_PID}" 2>/dev/null; then
@@ -640,14 +951,32 @@ main() {
     collect_validator_info
     deploy_to_vms
     start_validators
+    submit_transactions
     
-    # Wait for all SSH processes
+    # Wait for all SSH processes (validators)
     local status=0
     for pid in "${ACTIVE_SSH_PIDS[@]}"; do
         if ! wait "${pid}"; then
             status=1
         fi
     done
+    
+    # Wait for transaction submissions if enabled
+    if [[ -n "${ENABLE_TX_SUBMISSION}" ]] && [[ -n "${TX_SUBMITTER_PIDS[*]:-}" ]]; then
+        log "Waiting for ${#TX_SUBMITTER_PIDS[@]} transaction submission job(s) to complete..."
+        for pid in "${TX_SUBMITTER_PIDS[@]}"; do
+            if ! wait "${pid}"; then
+                local tx_status=$?
+                if [[ ${tx_status} -ne 130 ]]; then  # 130 is SIGINT, which is expected on Ctrl+C
+                    err "A transaction submission job failed with exit code ${tx_status}"
+                    status=1
+                fi
+            fi
+        done
+        if [[ "${status}" -eq 0 ]]; then
+            log "All transaction submissions completed successfully"
+        fi
+    fi
     
     # Clear trap on normal completion
     trap - INT TERM

@@ -24,6 +24,19 @@ export REMOTE_BASE_DIR=/root/alto/deploy/manual
 export REMOTE_LOG_DIR=/root/alto/logs/validator
 export STARTUP_STAGGER_NON_BOOTSTRAPPER=5    # seconds: non-bootstrappers wait so bootstrapper starts first
 
+# Optional: Enable transaction submission
+export ENABLE_TX_SUBMISSION=1                # enable transaction submission
+export TX_NUM_TXS=50                         # number of transactions each submitter sends
+export TX_SENDER_SEED=999                    # sender seed for transactions
+export TX_RECEIVER_PUBKEY="..."              # receiver public key (hex)
+export TX_DRIVE_FROM_LOCAL=1                 # if 1, create/send txs from this laptop (default)
+export TX_SUBMIT_TO_ALL=1                    # if 1, submit to every validator (default)
+export TX_BATCH_GAP=20                       # seconds between validator batches (local driver)
+# If you want only one submitter instead:
+# export TX_SUBMIT_TO_ALL=0
+# export TX_SUBMITTER_INDEX=0               # which validator submits (0-based)
+export TX_STARTUP_WAIT=10                    # seconds to wait before submitting
+
 ./remote-runs/run-remote.sh
 ```
 
@@ -34,11 +47,17 @@ What it does:
 - Rewrites `directory:` in each remote config to `${REMOTE_BASE_DIR}/${PUBLIC_KEY}` and creates it.
 - Copies per-validator config, per-validator `peers.yaml`, and `run-validator.sh` to each VM.
 - Starts validators on all VMs (and locally if a localhost entry exists).
+- Optionally submits transactions to validators (if `ENABLE_TX_SUBMISSION` is set).
 
 Notes:
 - `run-validator.sh` delays non-bootstrapper start by `STARTUP_STAGGER_NON_BOOTSTRAPPER` seconds (default 5).
 - `CONSENSUS_INSTANCES` is passed through to `run-validator.sh` and applied at the validator binary.
 - Logs are written on each remote under `${REMOTE_LOG_DIR}/val_<PUBLIC_KEY>.log`.
+- Transaction submission: When `ENABLE_TX_SUBMISSION=1`, the script will automatically submit transactions after validators start.
+  - Default local driver: `TX_DRIVE_FROM_LOCAL=1` creates and sends transactions from your laptop.
+    - `TX_SUBMIT_TO_ALL=1`: submit `TX_NUM_TXS` to every validator, sequentially, with `TX_BATCH_GAP` seconds between validators.
+    - Single target: set `TX_SUBMIT_TO_ALL=0` and choose `TX_SUBMITTER_INDEX`.
+  - Remote driver (fallback): set `TX_DRIVE_FROM_LOCAL=0` to run submitters on each VM instead.
 
 Ports:
 - First validator: p2p 3000, metrics 3001, transaction 8081.

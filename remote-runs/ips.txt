@@ -1,0 +1,15 @@
+# Remote host IPs (one per line)
+# Format: root@IP or just IP (root@ will be prepended automatically)
+# Lines starting with # are comments and will be ignored
+# Empty lines are ignored
+
+# Example hosts (uncomment and modify as needed):
+#root@127.0.0.1
+root@134.122.73.49    # gatling-frakfurt
+root@164.90.133.225   # gatling-nyc
+root@159.65.105.83    # gatling-sf
+root@170.64.129.99    # gatling-sydney
+root@146.190.95.234   # gatling-singapore
+root@68.183.88.142    # gatling-india
+root@159.65.29.138    # gatling-london
+
