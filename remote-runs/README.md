@@ -1,52 +1,97 @@
 # Remote Run Tooling
 
-This directory contains scripts for orchestrating validator experiments across remote machines. Key entry points:
+This directory contains scripts for orchestrating validator runs across remote machines. There are two primary workflows:
 
-- `setup-droplet.sh` – generates validator configs locally and (optionally) deploys them to remote hosts.
-- `orchestrator-remote.sh` – manages validator lifecycles on each remote machine.
-- `drive-remote-runs.sh` – local controller that ties everything together for repeatable multi-run experiments.
+- Quick single-run orchestration with `run-remote.sh` (recommended)
+- Experiment grid driver with `drive-remote-runs.sh`
 
-## drive-remote-runs.sh
+## Quick Start: run-remote.sh
 
-`drive-remote-runs.sh` lives on your laptop. For every `(instances, run)` pair it:
+Run everything from your laptop; the script generates configs, deploys, and starts validators on all remotes.
 
-1. Regenerates validator configs via `setup-droplet.sh`.
-2. Produces per-validator `peers.yaml` files with the correct remote IP substitutions.
-3. Copies the fresh configs to each remote validator host.
-4. SSHes into every host to launch `orchestrator-remote.sh` with the right environment overrides so each invocation covers just that pair.
+Prerequisites:
+- SSH access to each remote host configured in `run-remote.sh` (`REMOTE_HOSTS`).
+- Repo cloned on remotes at `/root/alto` (override with `REMOTE_REPO_DIR`).
+- Firewall/security groups allow p2p and http/metrics ports between validators.
 
-### Prerequisites
-
-- Passwordless SSH access to each validator host configured inside the script.
-- The repository cloned on each remote at `/root/alto` (override with `REMOTE_REPO_DIR`).
-- Validator binaries already built on the remote machines.
-
-### Quick Start
+Usage:
 
 ```bash
-# Regenerate configs each time and run full 1..10 instance sweep with 2 runs per instance
+# Optional knobs (defaults shown)
+export CONSENSUS_INSTANCES=3                 # consensus instances per validator
+export REMOTE_REPO_DIR=/root/alto            # repo path on remotes
+export REMOTE_BASE_DIR=/root/alto/deploy/manual
+export REMOTE_LOG_DIR=/root/alto/logs/validator
+export STARTUP_STAGGER_NON_BOOTSTRAPPER=5    # seconds: non-bootstrappers wait so bootstrapper starts first
+
+./remote-runs/run-remote.sh
+```
+
+What it does:
+- Generates fresh validator configs locally under `chain/test-remote/`.
+- Picks one bootstrapper and writes it into all configs.
+- Rewrites `peers.yaml` per validator so each advertises its real remote IP.
+- Rewrites `directory:` in each remote config to `${REMOTE_BASE_DIR}/${PUBLIC_KEY}` and creates it.
+- Copies per-validator config, per-validator `peers.yaml`, and `run-validator.sh` to each VM.
+- Starts validators on all VMs (and locally if a localhost entry exists).
+
+Notes:
+- `run-validator.sh` delays non-bootstrapper start by `STARTUP_STAGGER_NON_BOOTSTRAPPER` seconds (default 5).
+- `CONSENSUS_INSTANCES` is passed through to `run-validator.sh` and applied at the validator binary.
+- Logs are written on each remote under `${REMOTE_LOG_DIR}/val_<PUBLIC_KEY>.log`.
+
+Ports:
+- First validator: p2p 3000, metrics 3001, transaction 8081.
+- Additional validators increment p2p by 2 (3002, 3004, 3006, …).
+
+Troubleshooting:
+- Connectivity: open firewalls on all p2p ports between validators.
+- Stuck at startup (remote-only): increase `STARTUP_STAGGER_NON_BOOTSTRAPPER` (e.g., 8–12).
+- Only 1 consensus instance: ensure `CONSENSUS_INSTANCES` is exported before running; confirm `run-validator.sh` was synced (the orchestrator copies it).
+
+Manual single-node start on a remote (advanced):
+
+```bash
+CONSENSUS_INSTANCES=3 \
+PUBLIC_KEY="<PUBKEY>" \
+BASE_DIR="/root/alto/deploy/manual" \
+LOG_DIR="/root/alto/logs/validator" \
+REPO_ROOT="/root/alto" \
+./remote-runs/run-validator.sh
+```
+
+## Experiment Driver: drive-remote-runs.sh
+
+`drive-remote-runs.sh` automates sweeps across instance counts and repeated runs. For each `(instances, run)` pair it:
+1. Regenerates validator configs.
+2. Produces per-validator `peers.yaml` with correct remote IPs.
+3. Copies configs to each remote host.
+4. SSHes into every host to launch the remote orchestrator with the right overrides.
+
+Prerequisites:
+- Passwordless SSH to each validator host configured in the script.
+- Repo cloned on remotes at `/root/alto` (override with `REMOTE_REPO_DIR`).
+- Validator binary available on remotes.
+
+Quick start:
+
+```bash
 cd remote-runs
 ./drive-remote-runs.sh
 
-# Dry run to preview the commands without executing them
+# Dry run to preview without executing
 DRY_RUN=1 ./drive-remote-runs.sh
 
-# Use a smaller matrix
+# Smaller matrix
 MAX_INSTANCES=3 RUNS_PER_INSTANCE=1 ./drive-remote-runs.sh
 ```
 
-The script uses `setup-droplet.sh` with `SKIP_REMOTE_DEPLOY=1` so the remote distribution happens inside the driver. Update the `REMOTE_HOSTS` array at the top of the script to match your validator machines, keeping it in the same order as the configuration in `setup-droplet.sh`.
+Environment overrides:
+- `MAX_INSTANCES`, `RUNS_PER_INSTANCE`, `SLEEP_SECONDS`
+- `ENABLE_TX_SUBMISSION`, `TX_COUNT`, `TX_WAVES`, `TX_INTERVAL`, `TX_START_DELAY`
+- `REMOTE_BASE_DIR`, `REMOTE_LOG_BASE`, `REMOTE_REPO_DIR`
+- `SKIP_SETUP=1` – reuse configs already in `chain/test-remote`
 
-Each run receives a unique label (`YYYYMMDD-HHMMSS_iX_rY`) that is used both for the remote config directory (`${REMOTE_BASE_DIR}/${label}`) and the log directory (`${REMOTE_LOG_BASE}/${label}`). You can override these locations via environment variables if your remotes use different paths.
-
-### Environment Overrides
-
-- `MAX_INSTANCES`, `RUNS_PER_INSTANCE`, `SLEEP_SECONDS` – control the experiment grid and timing.
-- `ENABLE_TX_SUBMISSION`, `TX_COUNT`, `TX_WAVES`, `TX_INTERVAL`, `TX_START_DELAY` – forwarded to `orchestrator-remote.sh`.
-- `REMOTE_BASE_DIR`, `REMOTE_LOG_BASE`, `REMOTE_REPO_DIR` – adjust remote paths.
-- `SKIP_SETUP=1` – reuse the configs already in `chain/test-remote`.
-
-### Failure Handling
-
-If any remote orchestrator exits with a non-zero status the driver aborts the remaining schedule for that `(instances, run)` pair and returns a non-zero exit code. Logs remain in the per-run directories on each host for inspection. Use `DRY_RUN=1` to debug connection issues without touching the remotes.
-
+Failure handling:
+- If any remote orchestrator exits non-zero, the driver stops that `(instances, run)` and returns non-zero.
+- Logs remain on each host under the per-run directories for inspection.

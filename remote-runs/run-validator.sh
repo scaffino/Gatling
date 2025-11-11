@@ -65,7 +65,7 @@ detect_validator_binary() {
     local candidates=(
         "/root/alto/target/release/validator"
         # "/root/alto/target/debug/validator"
-        #"${REPO_ROOT}/target/release/validator"
+        "${REPO_ROOT}/target/release/validator"
         # "${REPO_ROOT}/target/debug/validator"
     )
     
@@ -179,12 +179,13 @@ fi
 
 # Build validator command
 # Run from repo root to ensure any relative paths work
+CONSENSUS_INSTANCES="${CONSENSUS_INSTANCES:-3}"
 VALIDATOR_CMD="cd '${REPO_ROOT}' && ulimit -n 65536 && '${VALIDATOR_BINARY}' \
     --peers='${PEERS_FILE}' \
     --config='${CONFIG_FILE}' \
     --gatling \
     --no-gossip-txs \
-    --consensus-instances 1 \
+    --consensus-instances ${CONSENSUS_INSTANCES} \
     2>&1 | sed 's/\\x1b\[[0-9;]*m//g' >> '${LOG_FILE}'"
 
 # Start validator in background

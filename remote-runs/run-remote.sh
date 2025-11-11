@@ -10,7 +10,8 @@ set -euo pipefail
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
-
+# Number of consensus instances to run
+CONSENSUS_INSTANCES="${CONSENSUS_INSTANCES:-3}"
 # Number of validators to generate
 V=4
 
@@ -280,6 +281,7 @@ generate_peers_yaml() {
     local peers_template="$1"
     local current_key="$2"
     local output_file="$3"
+    local current_validator_ip="${4:-}"  # Optional: IP for current validator (if empty, keeps original)
     
     {
         while IFS= read -r line || [[ -n "$line" ]]; do
@@ -305,9 +307,15 @@ generate_peers_yaml() {
                 if [[ "$peer_addr" =~ ^([^:]+):(.+)$ ]]; then
                     local peer_port="${BASH_REMATCH[2]}"
                     
-                    # Keep current validator's entry as 127.0.0.1
+                    # Handle current validator's entry
                     if [[ "${peer_key}" == "${current_key}" ]]; then
-                        echo "${indent}${peer_key}: ${peer_addr}"
+                        # If current_validator_ip is provided, use it (for remote VMs)
+                        # Otherwise, keep original address (for localhost)
+                        if [[ -n "${current_validator_ip}" ]]; then
+                            echo "${indent}${peer_key}: ${current_validator_ip}:${peer_port}"
+                        else
+                            echo "${indent}${peer_key}: ${peer_addr}"
+                        fi
                     else
                         # Find IP for this peer
                         local peer_ip=""
@@ -366,7 +374,13 @@ deploy_to_vms() {
         
         # Generate modified peers.yaml for this validator
         local peers_output="${temp_dir}/peers_${public_key}.yaml"
-        generate_peers_yaml "${peers_template}" "${public_key}" "${peers_output}"
+        # For remote VMs, pass the public IP so the validator advertises itself correctly
+        # For localhost, don't pass IP (keeps 127.0.0.1)
+        if [[ "${is_local}" == "true" ]]; then
+            generate_peers_yaml "${peers_template}" "${public_key}" "${peers_output}" ""
+        else
+            generate_peers_yaml "${peers_template}" "${public_key}" "${peers_output}" "${remote_ip}"
+        fi
         
         if [[ "${is_local}" == "true" ]]; then
             # For localhost, use local paths directly (keep original config)
@@ -400,13 +414,17 @@ deploy_to_vms() {
             fi
             
             # Create remote directories (including per-validator storage directory)
-            remote_cmd "${host}" "mkdir -p '${REMOTE_BASE_DIR}' '${REMOTE_LOG_DIR}' '${new_storage_dir}'"
+            remote_cmd "${host}" "mkdir -p '${REMOTE_BASE_DIR}' '${REMOTE_LOG_DIR}' '${new_storage_dir}' '${REMOTE_REPO_DIR}/remote-runs'"
             
             # Copy modified config file
             copy_file "${config_file}" "${host}" "${REMOTE_BASE_DIR}/${public_key}.yaml"
             
             # Copy modified peers.yaml
             copy_file "${peers_output}" "${host}" "${REMOTE_BASE_DIR}/peers.yaml"
+            
+            # Ensure the remote run-validator.sh is up-to-date and executable
+            copy_file "${SCRIPT_DIR}/run-validator.sh" "${host}" "${REMOTE_REPO_DIR}/remote-runs/run-validator.sh"
+            remote_cmd "${host}" "chmod +x '${REMOTE_REPO_DIR}/remote-runs/run-validator.sh'"
             
             log "  ✓ Deployed to ${remote_ip} (storage: ${new_storage_dir})"
         fi
@@ -469,7 +487,7 @@ start_validators() {
                         --config="${config_file}" \
                         --gatling \
                         --no-gossip-txs \
-                        --consensus-instances 1 \
+                        --consensus-instances "${CONSENSUS_INSTANCES}" \
                         >> "${local_log_dir}/val_${public_key}.log" 2>&1
                 ) &
                 LOCAL_VALIDATOR_PID=$!
@@ -508,6 +526,7 @@ cd '${REMOTE_REPO_DIR}' && \
 PUBLIC_KEY='${public_key}' \
 BASE_DIR='${REMOTE_BASE_DIR}' \
 LOG_DIR='${REMOTE_LOG_DIR}' \
+CONSENSUS_INSTANCES='${CONSENSUS_INSTANCES}' \
 ./remote-runs/run-validator.sh
 EOF
 )
