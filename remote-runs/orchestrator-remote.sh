@@ -16,7 +16,8 @@ set -euo pipefail
 # -----------------------------
 # Configuration (overridable)
 # -----------------------------
-MAX_INSTANCES="${MAX_INSTANCES:-10}"
+MIN_INSTANCES="${MIN_INSTANCES:-2}"
+MAX_INSTANCES="${MAX_INSTANCES:-2}"
 RUNS_PER_INSTANCE="${RUNS_PER_INSTANCE:-1}"
 
 # Number of validators
@@ -31,7 +32,7 @@ TX_STARTUP_WAIT="${TX_STARTUP_WAIT:-100}"
 TX_BATCH_GAP="${TX_BATCH_GAP:-20}"
 
 # Per-run wall clock (seconds)
-RUN_DURATION_SECONDS="${RUN_DURATION_SECONDS:-320}"
+RUN_DURATION_SECONDS="${RUN_DURATION_SECONDS:-420}"
 SETTLE_SECONDS="${SETTLE_SECONDS:-2}"
 
 # SSH/SCP options
@@ -182,11 +183,12 @@ Usage: $(basename "$0") [options]
 
 Options:
   -t, --duration SECONDS    Max run time per experiment before kill (default: ${RUN_DURATION_SECONDS})
+      --min-instances N     Min consensus instances to start from (default: ${MIN_INSTANCES})
       --max-instances N     Max consensus instances to sweep (default: ${MAX_INSTANCES})
       --runs-per-instance N Number of runs per instance (default: ${RUNS_PER_INSTANCE})
 
 You can also set environment variables:
-  RUN_DURATION_SECONDS, MAX_INSTANCES, RUNS_PER_INSTANCE, TX_NUM_TXS, TX_STARTUP_WAIT, TX_BATCH_GAP, etc.
+  RUN_DURATION_SECONDS, MIN_INSTANCES, MAX_INSTANCES, RUNS_PER_INSTANCE, TX_NUM_TXS, TX_STARTUP_WAIT, TX_BATCH_GAP, etc.
 EOF
 }
 
@@ -197,6 +199,11 @@ parse_args() {
         shift
         [[ $# -gt 0 ]] || { err "Missing value for --duration"; exit 2; }
         RUN_DURATION_SECONDS="$1"
+        ;;
+      --min-instances)
+        shift
+        [[ $# -gt 0 ]] || { err "Missing value for --min-instances"; exit 2; }
+        MIN_INSTANCES="$1"
         ;;
       --max-instances)
         shift
@@ -535,16 +542,17 @@ start_validators() {
   for idx in "${!REMOTE_HOSTS[@]}"; do
     local host="${REMOTE_HOSTS[idx]}"
     local public_key="${PUBLIC_KEYS[idx]}"
-    local log_name="val_i${instances}_r${run_idx}.log"
+    local log_name="val_${public_key}_i${instances}_r${run_idx}.log"
     local cmd="
 cd '${REMOTE_REPO_DIR}' && \
+  NO_COLOR=1 TERM=dumb \
   cargo run --release --bin validator -- \
     --peers='${REMOTE_BASE_DIR}/peers.yaml' \
     --config='${REMOTE_BASE_DIR}/${public_key}.yaml' \
     --gatling \
     --no-gossip-txs \
     --consensus-instances '${instances}' \
-    > '${REMOTE_LOG_DIR}/${log_name}' 2>&1
+    2>&1 | sed 's/\x1b\[[0-9;]*m//g' > '${REMOTE_LOG_DIR}/${log_name}'
 "
     ssh "${SSH_OPTS[@]}" "${host}" "${cmd}" &
     ACTIVE_VALIDATOR_SSH_PIDS+=("$!")
@@ -616,8 +624,20 @@ submit_transactions() {
 kill_everything() {
   log "Stopping validators on all hosts..."
   
-  # Kill only the specific SSH background processes we started for validators first
-  # This ensures we don't accidentally kill the orchestrator script itself
+  # Kill validators FIRST (fastest path to stopping them)
+  # Fast parallel shutdown on all hosts
+  stop_validators_parallel ""
+  
+  # Local fallback - only kill validator processes, not orchestrator
+  pkill -INT validator 2>/dev/null || true
+  pkill -INT -f "cargo.*validator" 2>/dev/null || true
+  pkill -INT -f "cargo run --release --bin validator" 2>/dev/null || true
+  sleep 1
+  pkill -KILL validator 2>/dev/null || true
+  pkill -KILL -f "cargo.*validator" 2>/dev/null || true
+  pkill -KILL -f "cargo run --release --bin validator" 2>/dev/null || true
+  
+  # Now clean up SSH background processes (after validators are already stopped)
   local pid killed_count=0
   for pid in "${ACTIVE_VALIDATOR_SSH_PIDS[@]:-}"; do
     if [[ -n "${pid}" ]]; then
@@ -631,7 +651,7 @@ kill_everything() {
     fi
   done
   
-  # Wait for SSH processes to terminate
+  # Wait for SSH processes to terminate (non-blocking, validators already stopped)
   for pid in "${ACTIVE_VALIDATOR_SSH_PIDS[@]:-}"; do
     if [[ -n "${pid}" ]]; then
       wait "${pid}" 2>/dev/null || true
@@ -641,20 +661,8 @@ kill_everything() {
   # Clear the array for next iteration
   ACTIVE_VALIDATOR_SSH_PIDS=()
   
-  # Fast parallel shutdown on all hosts
-  stop_validators_parallel ""
-  
   # Minimal wait for ports to be fully released
   sleep 1
-  
-  # Local fallback - only kill validator processes, not orchestrator
-  pkill -INT validator 2>/dev/null || true
-  pkill -INT -f "cargo.*validator" 2>/dev/null || true
-  pkill -INT -f "cargo run --release --bin validator" 2>/dev/null || true
-  sleep 1
-  pkill -KILL validator 2>/dev/null || true
-  pkill -KILL -f "cargo.*validator" 2>/dev/null || true
-  pkill -KILL -f "cargo run --release --bin validator" 2>/dev/null || true
   
   if [[ ${killed_count} -gt 0 ]]; then
     log "Killed ${killed_count} SSH background process(es) for validators"
@@ -723,10 +731,20 @@ main() {
 
   # Parse CLI overrides
   parse_args "$@"
+  
+  # Validate instance range
+  if [[ ${MIN_INSTANCES} -lt 1 ]]; then
+    fatal "MIN_INSTANCES must be >= 1, got ${MIN_INSTANCES}"
+  fi
+  if [[ ${MAX_INSTANCES} -lt ${MIN_INSTANCES} ]]; then
+    fatal "MAX_INSTANCES (${MAX_INSTANCES}) must be >= MIN_INSTANCES (${MIN_INSTANCES})"
+  fi
+  
   log "Run duration per experiment: ${RUN_DURATION_SECONDS}s"
+  log "Instance range: ${MIN_INSTANCES} to ${MAX_INSTANCES}"
 
   local instances run_idx
-  for instances in $(seq 1 "${MAX_INSTANCES}"); do
+  for instances in $(seq "${MIN_INSTANCES}" "${MAX_INSTANCES}"); do
     for run_idx in $(seq 1 "${RUNS_PER_INSTANCE}"); do
       log "===== RUN START: instances=${instances}, run=${run_idx} ====="
       export CONSENSUS_INSTANCES="${instances}"

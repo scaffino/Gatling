@@ -186,7 +186,7 @@ VALIDATOR_CMD="cd '${REPO_ROOT}' && ulimit -n 65536 && '${VALIDATOR_BINARY}' \
     --gatling \
     --no-gossip-txs \
     --consensus-instances ${CONSENSUS_INSTANCES} \
-    2>&1 | sed 's/\\x1b\[[0-9;]*m//g' >> '${LOG_FILE}'"
+    2>&1 | sed 's/\\x1b\[[0-9;]*m//g' > '${LOG_FILE}'"
 
 # Start validator in background
 bash -c "${VALIDATOR_CMD}" &

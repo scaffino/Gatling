@@ -32,7 +32,7 @@ TX_BATCH_GAP="${TX_BATCH_GAP:-20}"            # Seconds gap between batches to c
 CONSENSUS_INSTANCES="${CONSENSUS_INSTANCES:-3}"
 
 # Number of validators to generate
-V=6
+V=7
 
 # SSH/SCP options
 SSH_OPTS=(
