@@ -1,0 +1,73 @@
+#cloud-config
+package_update: true
+package_upgrade: false      # faster, flip to true if you need it
+packages:
+  - git
+  - python3
+  - python3-pip
+  - python3-venv
+  - pkg-config
+  - libssl-dev
+  - build-essential
+  - curl
+
+write_files:
+  - path: /root/setup-script.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -euxo pipefail
+
+      # Log everything to a file
+      exec > >(tee -a /root/setup.log) 2>&1
+      echo "=== Setup script started at $(date) ==="
+
+      export DEBIAN_FRONTEND=noninteractive
+
+      # ---- Fix A: define HOME and cargo paths up front ----
+      export HOME=/root
+      export CARGO_HOME=/root/.cargo
+      export RUSTUP_HOME=/root/.rustup
+      export PATH="/root/.cargo/bin:$PATH"
+      # -----------------------------------------------------
+
+      # Ensure tools present (already installed via packages, but safe if image differs)
+      apt-get update -y
+      apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev curl git
+
+      # Verify gcc
+      command -v gcc >/dev/null
+
+      # Install rustup non-interactively
+      curl -fsSL https://sh.rustup.rs | sh -s -- -y
+
+      # Safely source cargo env even with 'set -u'
+      set +u
+      [ -f /root/.cargo/env ] && source /root/.cargo/env || true
+      set -u
+
+      # Nightly toolchain
+      rustup toolchain install nightly
+      rustup default nightly
+
+      # Clone and build alto
+      cd /root
+      rm -rf /root/alto || true
+      git clone https://github.com/scaffino/alto.git
+      cd /root/alto
+      git fetch --all
+
+      # Robust branch checkout: prefer remote if it exists
+      if git ls-remote --exit-code --heads origin remote-deployments >/dev/null 2>&1; then
+        git checkout -B remote-deployments origin/remote-deployments
+      else
+        git checkout remote-deployments || true
+      fi
+
+      # Build
+      cargo build --release --bin validator
+
+      echo "=== Setup complete at $(date) ==="
+
+runcmd:
+  - /root/setup-script.sh
