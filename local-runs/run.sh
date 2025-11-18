@@ -8,6 +8,14 @@ set -euo pipefail
 # - NUM_VALIDATORS is optional (default: 4) and sets how many peers to generate
 #   and how many validators to launch.
 # - NUM_INSTANCES is optional (default: 2) and sets --consensus-instances.
+#
+# Transaction submission parameters can be set via environment variables:
+#   SUBMIT_TX_RATE      - Transactions per second (default: 1)
+#   SUBMIT_TX_START     - Start delay in seconds after genesis (default: 90)
+#   SUBMIT_TX_DURATION  - Duration in seconds (default: 180)
+#
+# Example:
+#   SUBMIT_TX_RATE=10 SUBMIT_TX_START=60 SUBMIT_TX_DURATION=300 ./run.sh
 
 NUM_VALIDATORS="${1:-4}"
 NUM_INSTANCES="${2:-2}"
@@ -17,6 +25,11 @@ HEADLESS="${HEADLESS:-0}"
 if [[ "${4:-}" == "--headless" ]]; then
   HEADLESS=1
 fi
+
+# Transaction submission parameters (can be overridden via environment variables)
+SUBMIT_TX_RATE="${SUBMIT_TX_RATE:-0.5}"        # Transactions per second
+SUBMIT_TX_START="${SUBMIT_TX_START:-90}"    # Start delay in seconds after genesis
+SUBMIT_TX_DURATION="${SUBMIT_TX_DURATION:-180}"  # Duration in seconds
 
 # Resolve absolute paths
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -89,7 +102,7 @@ for CFG in "${VALIDATOR_CONFIGS[@]}"; do
   REL_CFG="${CFG}"
   IDX=$((COUNT+1))
   LOG_FILE="${VALIDATOR_LOGS_DIR}/v${IDX}_i${NUM_INSTANCES}_r${RUN_INDEX}.log"
-  CMD="printf '\\e]1;${SESSION_TAG}\\a'; printf '\\e]0;${SESSION_TAG}\\a'; ulimit -n 65536 && cd '${REPO_ROOT}/chain' && cargo run --bin validator -- --peers='${PEERS_FILE}' --config='${REL_CFG}' --no-gossip-txs --gatling --consensus-instances ${NUM_INSTANCES}  2>&1 | tee >(sed 's/\\x1b\[[0-9;]*m//g' > '${LOG_FILE}')"
+  CMD="printf '\\e]1;${SESSION_TAG}\\a'; printf '\\e]0;${SESSION_TAG}\\a'; ulimit -n 65536 && cd '${REPO_ROOT}/chain' && cargo run --bin validator -- --peers='${PEERS_FILE}' --config='${REL_CFG}' --no-gossip-txs --gatling --consensus-instances ${NUM_INSTANCES} --submit-tx ${SUBMIT_TX_RATE} ${SUBMIT_TX_START} ${SUBMIT_TX_DURATION}  2>&1 | tee >(sed 's/\\x1b\[[0-9;]*m//g' > '${LOG_FILE}')"
   CMDS+=("${CMD}")
   COUNT=$((COUNT+1))
   [[ ${COUNT} -ge ${MAX} ]] && break
@@ -167,7 +180,7 @@ if [[ "${HEADLESS}" == "1" ]]; then
     [[ ${IDX} -gt ${MAX} ]] && break
     LOG_FILE="${VALIDATOR_LOGS_DIR}/v${IDX}_i${NUM_INSTANCES}_r${RUN_INDEX}.log"
     # Build the plain validator command without terminal title escape sequences
-    VAL_CMD="ulimit -n 65536 && cd '${REPO_ROOT}/chain' && cargo run --bin validator -- --peers='${PEERS_FILE}' --config='${CFG}' --no-gossip-txs --gatling --consensus-instances ${NUM_INSTANCES} 2>&1 | sed 's/\\x1b\[[0-9;]*m//g' >> '${LOG_FILE}'"
+    VAL_CMD="ulimit -n 65536 && cd '${REPO_ROOT}/chain' && cargo run --bin validator -- --peers='${PEERS_FILE}' --config='${CFG}' --no-gossip-txs --gatling --consensus-instances ${NUM_INSTANCES} --submit-tx ${SUBMIT_TX_RATE} ${SUBMIT_TX_START} ${SUBMIT_TX_DURATION} 2>&1 | sed 's/\\x1b\[[0-9;]*m//g' >> '${LOG_FILE}'"
     nohup bash -lc "${VAL_CMD}" >/dev/null 2>&1 &
   done
   echo "Launched ${MAX} validator(s) headlessly. Logs: ${VALIDATOR_LOGS_DIR}"
@@ -183,79 +196,5 @@ else
   echo "SESSION_TAG=${SESSION_TAG}"
 fi
 
-# Build submit_tx binary if it doesn't exist
-if [[ ! -f "${REPO_ROOT}/target/release/submit_tx" ]]; then
-  echo "Building submit_tx binary..."
-  if (
-    cd "${REPO_ROOT}" && \
-    cargo build --package alto-client --bin submit_tx --release
-  ); then
-    if [[ -f "${REPO_ROOT}/target/release/submit_tx" ]]; then
-      echo "submit_tx binary built successfully."
-    else
-      echo "ERROR: Build completed but binary not found at ${REPO_ROOT}/target/release/submit_tx" >&2
-      exit 1
-    fi
-  else
-    echo "ERROR: Failed to build submit_tx binary." >&2
-    exit 1
-  fi
-else
-  echo "submit_tx binary already exists, skipping build."
-fi
-
-# Verify binary exists and is executable before scheduling
-if [[ ! -f "${REPO_ROOT}/target/release/submit_tx" ]]; then
-  echo "ERROR: submit_tx binary not found at ${REPO_ROOT}/target/release/submit_tx" >&2
-  exit 1
-fi
-
-if [[ ! -x "${REPO_ROOT}/target/release/submit_tx" ]]; then
-  echo "ERROR: submit_tx binary exists but is not executable" >&2
-  exit 1
-fi
-
-# Schedule submit transactions at 1.5, 2.0, and 2.5 minutes
-mkdir -p "${LOG_ROOT}"
-SUBMIT_LOG_FILE="${LOG_ROOT}/submitTx.log"
-(
-  sleep 100
-  echo "[submitTx] Starting 20 tx after 100 seconds..." | tee -a "${SUBMIT_LOG_FILE}"
-  cd "${REPO_ROOT}"
-  if [[ -x "${SCRIPT_DIR}/submitTx.sh" ]]; then
-    "${SCRIPT_DIR}/submitTx.sh" 25 2>&1 | tee -a "${SUBMIT_LOG_FILE}"
-  else
-    echo "[submitTx] ERROR: submitTx.sh not found or not executable at ${SCRIPT_DIR}/submitTx.sh" | tee -a "${SUBMIT_LOG_FILE}"
-  fi
-) &
-(
-  sleep 120
-  echo "[submitTx] Starting 100 tx after 150 seconds..." | tee -a "${SUBMIT_LOG_FILE}"
-  cd "${REPO_ROOT}"
-  if [[ -x "${SCRIPT_DIR}/submitTx.sh" ]]; then
-    "${SCRIPT_DIR}/submitTx.sh" 25 2>&1 | tee -a "${SUBMIT_LOG_FILE}"
-  else
-    echo "[submitTx] ERROR: submitTx.sh not found or not executable at ${SCRIPT_DIR}/submitTx.sh" | tee -a "${SUBMIT_LOG_FILE}"
-  fi
-) &
-(
-  sleep 140
-  echo "[submitTx] Starting 100 tx after 150 seconds..." | tee -a "${SUBMIT_LOG_FILE}"
-  cd "${REPO_ROOT}"
-  if [[ -x "${SCRIPT_DIR}/submitTx.sh" ]]; then
-    "${SCRIPT_DIR}/submitTx.sh" 25 2>&1 | tee -a "${SUBMIT_LOG_FILE}"
-  else
-    echo "[submitTx] ERROR: submitTx.sh not found or not executable at ${SCRIPT_DIR}/submitTx.sh" | tee -a "${SUBMIT_LOG_FILE}"
-  fi
-) &
-(
-  sleep 160
-  echo "[submitTx] Starting 100 tx after 150 seconds..." | tee -a "${SUBMIT_LOG_FILE}"
-  cd "${REPO_ROOT}"
-  if [[ -x "${SCRIPT_DIR}/submitTx.sh" ]]; then
-    "${SCRIPT_DIR}/submitTx.sh" 25 2>&1 | tee -a "${SUBMIT_LOG_FILE}"
-  else
-    echo "[submitTx] ERROR: submitTx.sh not found or not executable at ${SCRIPT_DIR}/submitTx.sh" | tee -a "${SUBMIT_LOG_FILE}"
-  fi
-) &
-echo "Scheduled submitTx.sh waves at 100s (20), 150s (100). Logs: ${SUBMIT_LOG_FILE}."
+# Validators will automatically generate transactions using --submit-tx
+echo "Validators configured with --submit-tx ${SUBMIT_TX_RATE} ${SUBMIT_TX_START} ${SUBMIT_TX_DURATION} (${SUBMIT_TX_RATE} tx/sec, start at ${SUBMIT_TX_START}s, duration ${SUBMIT_TX_DURATION}s)"

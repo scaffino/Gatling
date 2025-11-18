@@ -1,5 +1,20 @@
 #!/bin/bash
-REGIONS=(sgp1) # nyc3 ams3 fra1 tor1 sfo2 blr1 sfo3 syd1 nyc1 nyc2)
+REGIONS=(sgp1 nyc3 ams3 fra1) # tor1 sfo2 blr1 sfo3 syd1 nyc1 nyc2)
+
+# Get the directory where this script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Determine path to setup.yaml relative to script location
+if [ -f "$SCRIPT_DIR/setup.yaml" ]; then
+  # Script is in droplets folder, setup.yaml is in same directory
+  SETUP_YAML="$SCRIPT_DIR/setup.yaml"
+elif [ -f "$SCRIPT_DIR/droplets/setup.yaml" ]; then
+  # Script is in alto folder (or somewhere else), setup.yaml is in droplets subdirectory
+  SETUP_YAML="$SCRIPT_DIR/droplets/setup.yaml"
+else
+  echo "Error: setup.yaml not found. Expected at $SCRIPT_DIR/setup.yaml or $SCRIPT_DIR/droplets/setup.yaml"
+  exit 1
+fi
 
 # Get SSH key IDs by name
 SSH_KEY_1=$(doctl compute ssh-key list --format ID,Name --no-header | grep "giuliascaf" | awk '{print $1}')
@@ -22,7 +37,7 @@ for region in "${REGIONS[@]}"; do
     --size s-2vcpu-2gb \
     --image ubuntu-22-04-x64 \
     --ssh-keys "$SSH_KEYS" \
-    --user-data-file setup.yaml \
+    --user-data-file "$SETUP_YAML" \
     --tag-name dev \
     --project-id "$PROJECT_ID" \
     --wait

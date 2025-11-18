@@ -1,6 +1,6 @@
 use alto_chain::{engine, http_server, Config, Peers};
 use alto_client::Client;
-use alto_types::NAMESPACE;
+use alto_types::{Transaction, NAMESPACE};
 use clap::{Arg, Command};
 use commonware_codec::{Decode, DecodeExt};
 use commonware_cryptography::{
@@ -10,11 +10,12 @@ use commonware_cryptography::{
 };
 use commonware_deployer::ec2::Hosts;
 use commonware_p2p::authenticated::discovery as authenticated;
-use commonware_runtime::{tokio, Metrics, Runner, Spawner};
+use commonware_runtime::{tokio, Clock, Metrics, Runner, Spawner};
 use commonware_utils::{from_hex_formatted, quorum, union_unique};
 use futures::future::try_join_all;
 use futures::StreamExt;
 use governor::Quota;
+use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -24,7 +25,7 @@ use std::{
     sync::{Arc, atomic::AtomicU64},
     time::Duration,
 };
-use tracing::{error, info, Level};
+use tracing::{error, info, warn, Level};
 
 const PENDING_CHANNEL: u32 = 0;
 const RECOVERED_CHANNEL: u32 = 1;
@@ -280,6 +281,14 @@ fn main() {
                 .help("Enable gatling global finalization tracking and logging")
                 .action(clap::ArgAction::SetTrue)
         )
+        .arg(
+            Arg::new("submit-tx")
+                .long("submit-tx")
+                .value_name("RATE START_DELAY DURATION")
+                .help("Generate transactions at rate R (tx/sec) starting T seconds after genesis, for duration D seconds")
+                .num_args(3)
+                .value_delimiter(' ')
+        )
         .get_matches();
 
     // Load ip file
@@ -307,6 +316,25 @@ fn main() {
 
     // Parse gatling flag (default: disabled)
     let gatling_enabled = matches.get_flag("gatling");
+
+    // Parse submit-tx arguments (optional)
+    let submit_tx_config: Option<(f64, u64, u64)> = if let Some(values) = matches.get_many::<String>("submit-tx") {
+        let values: Vec<&String> = values.collect();
+        if values.len() == 3 {
+            let rate: f64 = values[0].parse().expect("Invalid rate (must be a number)");
+            let start_delay: u64 = values[1].parse().expect("Invalid start delay (must be a positive integer)");
+            let duration: u64 = values[2].parse().expect("Invalid duration (must be a positive integer)");
+            
+            assert!(rate > 0.0, "Rate must be greater than 0");
+            assert!(duration > 0, "Duration must be greater than 0");
+            
+            Some((rate, start_delay, duration))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     // Load config
     let config_file = matches.get_one::<String>("config").unwrap();
@@ -584,6 +612,141 @@ fn main() {
             .map(|e| e.application_mailbox().clone())
             .collect();
 
+        // Start submit-tx task if configured
+        let submit_tx_task = if let Some((rate, start_delay, duration)) = submit_tx_config {
+            let mut mailboxes = all_mailboxes.clone();
+            let signer_clone = signer.clone();
+            let receiver = public_key.clone();
+            let genesis = config.genesis_timestamp;
+            
+            Some(context.with_label("submit_tx").spawn(move |ctx| async move {
+                use std::time::Instant;
+                
+                // Calculate start time
+                let now_secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+                
+                let start_time_secs = genesis + start_delay;
+                
+                // Wait until start time
+                if now_secs < start_time_secs {
+                    let wait_secs = start_time_secs - now_secs;
+                    info!(
+                        rate,
+                        start_delay,
+                        duration,
+                        wait_secs,
+                        "submit-tx: waiting until start time"
+                    );
+                    ctx.sleep(Duration::from_secs(wait_secs)).await;
+                }
+                
+                let start_instant = Instant::now();
+                let end_time_secs = start_time_secs + duration;
+                let target_interval = 1.0 / rate; // seconds between transactions
+                // Use StdRng which is Send + Sync, seeded from current time
+                let seed = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos() as u64;
+                let mut rng = StdRng::seed_from_u64(seed);
+                let mut tx_count = 0u64;
+                
+                info!(
+                    rate,
+                    start_delay,
+                    duration,
+                    "submit-tx: starting transaction generation"
+                );
+                
+                // Generate transactions until duration expires
+                loop {
+                    // Check if we've exceeded the duration
+                    let current_secs = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs();
+                    
+                    if current_secs >= end_time_secs {
+                        break;
+                    }
+                    
+                    // Generate random jitter: uniform between 0.5x and 1.5x target interval
+                    let jitter_factor = 0.5 + rng.gen::<f64>();
+                    let sleep_duration_secs = target_interval * jitter_factor;
+                    
+                    // Convert to Duration (handle fractional seconds)
+                    let sleep_duration = if sleep_duration_secs < 1.0 {
+                        Duration::from_millis((sleep_duration_secs * 1000.0) as u64)
+                    } else {
+                        Duration::from_secs(sleep_duration_secs as u64) + 
+                        Duration::from_millis(((sleep_duration_secs % 1.0) * 1000.0) as u64)
+                    };
+                    
+                    // Sleep with jitter
+                    ctx.sleep(sleep_duration).await;
+                    
+                    // Check again after sleep
+                    let current_secs_after_sleep = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs();
+                    
+                    if current_secs_after_sleep >= end_time_secs {
+                        break;
+                    }
+                    
+                    // Create transaction
+                    let timestamp = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .expect("Time went backwards")
+                        .as_millis() as u64;
+                    
+                    let tx = Transaction::sign(&signer_clone, receiver.clone(), 1, timestamp);
+                    let tx_id = tx.digest();
+                    
+                    // Submit to all mailboxes
+                    let mut submitted_count = 0;
+                    for (idx, mailbox) in mailboxes.iter_mut().enumerate() {
+                        match mailbox.submit_transaction(tx.clone()).await {
+                            Ok(_) => {
+                                submitted_count += 1;
+                            }
+                            Err(e) => {
+                                warn!(
+                                    tx_id = ?tx_id,
+                                    consensus_id = idx + 1,
+                                    error = %e,
+                                    "submit-tx: failed to submit transaction to mailbox"
+                                );
+                            }
+                        }
+                    }
+                    
+                    tx_count += 1;
+                    if tx_count % 100 == 0 || submitted_count < mailboxes.len() {
+                        info!(
+                            tx_count,
+                            submitted_count,
+                            total_mailboxes = mailboxes.len(),
+                            "submit-tx: generated transactions"
+                        );
+                    }
+                }
+                
+                let elapsed = start_instant.elapsed();
+                info!(
+                    tx_count,
+                    elapsed_secs = elapsed.as_secs(),
+                    "submit-tx: finished transaction generation"
+                );
+            }))
+        } else {
+            None
+        };
+
         // Create channel for broadcasting transactions (only if gossip is enabled)
         let broadcast_channel = if gossip_enabled {
             Some(futures::channel::mpsc::unbounded())
@@ -711,6 +874,9 @@ fn main() {
         all_tasks.extend(gossip_tasks);
         all_tasks.extend(started_consensus);
         if let Some(task) = gatling_task {
+            all_tasks.push(task);
+        }
+        if let Some(task) = submit_tx_task {
             all_tasks.push(task);
         }
         if let Err(e) = try_join_all(all_tasks).await {

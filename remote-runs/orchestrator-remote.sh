@@ -8,9 +8,9 @@ set -euo pipefail
 # - For each instances count, runs RUNS_PER_INSTANCE repetitions
 # - Before each run: re-run setup (fresh configs)
 # - Deploys configs + per-validator peers.yaml to each remote
-# - Starts validators on remotes, logs to val_iX_rY.log
-# - Submits transactions from local laptop to all validators
-# - After 4 minutes, kills submitters and all validators on remotes and locally
+# - Starts validators on remotes with --submit-tx (built-in transaction generation)
+# - Validators automatically generate transactions at configured rate
+# - After RUN_DURATION_SECONDS, kills all validators on remotes and locally
 # =============================================================================
 
 # -----------------------------
@@ -18,21 +18,18 @@ set -euo pipefail
 # -----------------------------
 MIN_INSTANCES="${MIN_INSTANCES:-1}"
 MAX_INSTANCES="${MAX_INSTANCES:-10}"
-RUNS_PER_INSTANCE="${RUNS_PER_INSTANCE:-1}"
+RUNS_PER_INSTANCE="${RUNS_PER_INSTANCE:-10}"
 
 # Number of validators
 V="${V:-7}"
 
-# Submission (local laptop → all validators)
-ENABLE_TX_SUBMISSION="${ENABLE_TX_SUBMISSION:-1}"
-TX_NUM_TXS="${TX_NUM_TXS:-50}"
-TX_SENDER_SEED="${TX_SENDER_SEED:-999}"
-TX_RECEIVER_PUBKEY="${TX_RECEIVER_PUBKEY:-3ecf551aeb957616c6c8aa603634ea55845f88712a58745e58a71fe988bb967a}"
-TX_STARTUP_WAIT="${TX_STARTUP_WAIT:-100}"
-TX_BATCH_GAP="${TX_BATCH_GAP:-20}"
+# Transaction submission parameters (built into validators via --submit-tx)
+SUBMIT_TX_RATE="${SUBMIT_TX_RATE:-0.5}"        # Transactions per second
+SUBMIT_TX_START="${SUBMIT_TX_START:-90}"      # Start delay in seconds after genesis
+SUBMIT_TX_DURATION="${SUBMIT_TX_DURATION:-180}"  # Duration in seconds
 
 # Per-run wall clock (seconds)
-RUN_DURATION_SECONDS="${RUN_DURATION_SECONDS:-420}"
+RUN_DURATION_SECONDS="${RUN_DURATION_SECONDS:-450}"
 SETTLE_SECONDS="${SETTLE_SECONDS:-2}"
 
 # SSH/SCP options
@@ -116,7 +113,6 @@ PUBLIC_KEYS=()
 REMOTE_IPS=()
 LOCAL_VALIDATOR_INDEX=-1
 ACTIVE_VALIDATOR_SSH_PIDS=()
-SUBMIT_TX_BIN=""
 
 # -----------------------------
 # Helpers
@@ -158,21 +154,6 @@ copy_file() {
   fi
 }
 
-detect_submit_tx_binary() {
-  local candidates=(
-    "${REPO_ROOT}/target/release/submit_tx"
-    "${REPO_ROOT}/target/debug/submit_tx"
-  )
-  local c
-  for c in "${candidates[@]}"; do
-    if [[ -f "${c}" ]]; then
-      echo "${c}"
-      return 0
-    fi
-  done
-  echo ""
-  return 1
-}
 
 # ---------------------------------
 # CLI parsing
@@ -188,7 +169,8 @@ Options:
       --runs-per-instance N Number of runs per instance (default: ${RUNS_PER_INSTANCE})
 
 You can also set environment variables:
-  RUN_DURATION_SECONDS, MIN_INSTANCES, MAX_INSTANCES, RUNS_PER_INSTANCE, TX_NUM_TXS, TX_STARTUP_WAIT, TX_BATCH_GAP, etc.
+  RUN_DURATION_SECONDS, MIN_INSTANCES, MAX_INSTANCES, RUNS_PER_INSTANCE, 
+  SUBMIT_TX_RATE, SUBMIT_TX_START, SUBMIT_TX_DURATION, etc.
 EOF
 }
 
@@ -483,6 +465,7 @@ cd '${REMOTE_REPO_DIR}' && \
     --gatling \
     --no-gossip-txs \
     --consensus-instances '${instances}' \
+    --submit-tx ${SUBMIT_TX_RATE} ${SUBMIT_TX_START} ${SUBMIT_TX_DURATION} \
     2>&1 | sed 's/\x1b\[[0-9;]*m//g' > '${REMOTE_LOG_DIR}/${log_name}'
 "
     ssh "${SSH_OPTS[@]}" "${host}" "${cmd}" &
@@ -492,62 +475,10 @@ cd '${REMOTE_REPO_DIR}' && \
 }
 
 # ---------------------------------
-# Phase: Submit transactions (local driver)
+# Phase: Submit transactions (built into validators)
 # ---------------------------------
-submit_transactions() {
-  [[ "${ENABLE_TX_SUBMISSION}" == "1" ]] || { log "TX submission disabled"; return 0; }
-
-  if [[ -z "${SUBMIT_TX_BIN}" ]]; then
-    SUBMIT_TX_BIN="$(detect_submit_tx_binary || true)"
-  fi
-  [[ -n "${SUBMIT_TX_BIN}" ]] || { err "submit_tx not found; build alto-client submit_tx"; return 1; }
-  [[ -x "${SUBMIT_TX_BIN}" ]] || chmod +x "${SUBMIT_TX_BIN}" || true
-
-  log "Waiting ${TX_STARTUP_WAIT}s for validators to be ready..."
-  sleep "${TX_STARTUP_WAIT}"
-
-  local LOCAL_SUMMARY=()
-  for idx in "${!PUBLIC_KEYS[@]}"; do
-    local public_key="${PUBLIC_KEYS[idx]}"
-    local ip="${REMOTE_IPS[idx]}"
-    local config_file="${CONFIG_FILES[idx]}"
-    local tx_port
-    tx_port="$(grep '^transaction_port:' "${config_file}" | awk '{print $2}' || true)"
-    [[ -n "${tx_port}" ]] || fatal "transaction_port not found in ${config_file}"
-    local url="http://${ip}:${tx_port}"
-    log "Submitting ${TX_NUM_TXS} txs to ${public_key} at ${url}"
-    local success=0 failed=0
-    local i
-    for i in $(seq 1 "${TX_NUM_TXS}"); do
-      if "${SUBMIT_TX_BIN}" \
-          --validator "${url}" \
-          --sender-seed "${TX_SENDER_SEED}" \
-          --receiver "${TX_RECEIVER_PUBKEY}" \
-          --amount "${i}" \
-          >/dev/null 2>&1; then
-        success=$((success+1))
-      else
-        failed=$((failed+1))
-      fi
-    done
-    LOCAL_SUMMARY+=("$(printf '%s %s %s/%s' "${public_key}" "${url}" "${success}" "${TX_NUM_TXS}")")
-    if [[ $(( idx + 1 )) -lt ${#PUBLIC_KEYS[@]} ]]; then
-      log "Sleeping ${TX_BATCH_GAP}s before next validator..."
-      sleep "${TX_BATCH_GAP}"
-    fi
-  done
-  if [[ ${#LOCAL_SUMMARY[@]} -gt 0 ]]; then
-    echo "[orchestrator-remote] ===== Local TX Submission Summary ====="
-    local entry
-    for entry in "${LOCAL_SUMMARY[@]}"; do
-      local pk url counts
-      pk="$(echo "${entry}" | awk '{print $1}')"
-      url="$(echo "${entry}" | awk '{print $2}')"
-      counts="$(echo "${entry}" | awk '{print $3}')"
-      echo "  ${pk:0:16}... <- ${counts} at ${url}"
-    done
-  fi
-}
+# Transactions are now automatically generated by validators using --submit-tx
+# No separate submission phase needed
 
 # ---------------------------------
 # Kill validators everywhere
@@ -715,7 +646,8 @@ main() {
         # Start run timer from validator startup
         local run_start_ts
         run_start_ts="$(date +%s)"
-        submit_transactions || true
+        # Transactions are automatically generated by validators via --submit-tx
+        log "Validators configured with --submit-tx ${SUBMIT_TX_RATE} ${SUBMIT_TX_START} ${SUBMIT_TX_DURATION}"
 
         # Sleep only the remaining time from validator startup
         local now_ts elapsed remaining

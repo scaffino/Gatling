@@ -3,8 +3,9 @@
 set -euo pipefail
 
 # Orchestrates sequential runs of run.sh with:
-# - validators: configurable via env var NUM_VALIDATORS (default: 2)
+# - validators: configurable via env var NUM_VALIDATORS (default: 4)
 # - instances = 1..MAX_INSTANCES, each repeated RUNS_PER_INSTANCES times
+# - validators automatically generate transactions via --submit-tx (built-in)
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="${SCRIPT_DIR}"
@@ -13,6 +14,12 @@ SLEEP_SECONDS=300
 SETTLE_SECONDS=4
 NUM_VALIDATORS="${NUM_VALIDATORS:-4}"
 MAX_INSTANCES="${MAX_INSTANCES:-10}"
+
+# Transaction submission parameters (can be overridden via environment variables)
+# These are passed through to run.sh which uses them for --submit-tx
+SUBMIT_TX_RATE="${SUBMIT_TX_RATE:-0.5}"        # Transactions per second
+SUBMIT_TX_START="${SUBMIT_TX_START:-90}"      # Start delay in seconds after genesis
+SUBMIT_TX_DURATION="${SUBMIT_TX_DURATION:-180}"  # Duration in seconds
 
 close_terminal_tabs_by_tag() {
   local tag="$1"
@@ -109,12 +116,10 @@ kill_validators_and_submitters() {
   local tag="${2:-}"
   echo "[orchestrator] Stopping processes for instances=${instances} tag='${tag}'"
 
-  # Patterns to match validators/submitters reliably
+  # Patterns to match validators reliably
   local patterns=(
     "cargo run --bin validator"
     "validator --"
-    "submitTx.sh"
-    "submit_tx"
   )
   # Add session tag if available to narrow matches
   if [[ -n "${tag}" ]]; then
@@ -138,23 +143,23 @@ kill_validators_and_submitters() {
 
 kill_fallback_processes() {
   local instances="$1"
-  # Best-effort kill of validators and submitters if any remain
+  # Best-effort kill of validators if any remain
   pkill -f "cargo run --bin validator -- .*--consensus-instances ${instances}" || true
-  pkill -f "submitTx.sh" || true
-  pkill -f "submit_tx" || true
 }
 
 for instances in $(seq 1 ${MAX_INSTANCES}); do
   for runIndex in $(seq 1 ${RUNS_PER_INSTANCES}); do
     echo "[orchestrator] Starting run: instances=${instances}, run=${runIndex}"
     # Pre-run cleanup to avoid blocking in setup generate due to leftover processes/locks
-    echo "[orchestrator] Pre-clean: stopping any leftover validators/submitters..."
+    echo "[orchestrator] Pre-clean: stopping any leftover validators..."
     kill_validators_and_submitters "${instances}" || true
     kill_fallback_processes "${instances}" || true
     # Best-effort close of previously tagged tabs (matches our SESSION_TAG prefix)
     close_all_by_tag "alto_" || true
     sleep 3
     # Capture SESSION_TAG line from run.sh output
+    # Export transaction submission parameters so run.sh picks them up
+    export SUBMIT_TX_RATE SUBMIT_TX_START SUBMIT_TX_DURATION
     SESSION_TAG=$("${REPO_ROOT}/run.sh" "${NUM_VALIDATORS}" "${instances}" "${runIndex}" --headless \
       | tee >(cat >&2) \
       | sed -n 's/^SESSION_TAG=//p' \
@@ -168,7 +173,7 @@ for instances in $(seq 1 ${MAX_INSTANCES}); do
     echo "[orchestrator] Sleeping ${SLEEP_SECONDS}s"
     sleep "${SLEEP_SECONDS}"
 
-    echo "[orchestrator] Stopping validators/submitters..."
+    echo "[orchestrator] Stopping validators..."
     kill_validators_and_submitters "${instances}" "${SESSION_TAG:-}"
 
     echo "[orchestrator] Closing windows/tabs by tag..."
