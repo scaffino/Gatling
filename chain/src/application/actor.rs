@@ -440,8 +440,8 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
             }
         });
         
-        // Initialize mempool
-        let mut mempool = Mempool::new(self.context.with_label("mempool"));
+        // Initialize mempool (wrapped in Arc<Mutex<>> to allow access from spawned tasks)
+        let mempool = Arc::new(Mutex::new(Mempool::new(self.context.with_label("mempool"))));
         
         while let Some(message) = self.mailbox.next().await {
             match message {
@@ -455,16 +455,19 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                     parent,
                     mut response,
                 } => {
-                    // Collect transactions from mempool
+                    // First pickup: Collect transactions from mempool immediately
                     let mut transactions = Vec::new();
-                    while transactions.len() < MAX_BLOCK_TRANSACTIONS {
-                        if let Some(tx) = mempool.next() {
-                            transactions.push(tx);
-                        } else {
-                            break;
+                    {
+                        let mut mempool_guard = mempool.lock().unwrap();
+                        while transactions.len() < MAX_BLOCK_TRANSACTIONS {
+                            if let Some(tx) = mempool_guard.next() {
+                                transactions.push(tx);
+                            } else {
+                                break;
+                            }
                         }
                     }
-                    let tx_count = transactions.len();
+                    let initial_tx_count = transactions.len();
 
                     // Get the parent block
                     let parent_request = if parent.1 == genesis_digest {
@@ -475,6 +478,8 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
 
                     // Wait for the parent block to be available or the request to be cancelled in a separate task (to
                     // continue processing other messages)
+                    let mempool_clone = mempool.clone();
+                    let initial_tx_count_clone = initial_tx_count;
                     self.context.with_label("propose").spawn({
                         let built = built.clone();
                         let engine_id = self.engine_id.clone();
@@ -519,8 +524,45 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                                         context.sleep(Duration::from_millis(wait)).await;
                                     }
 
-                                    // Send the digest to the consensus (no further delay)
-                                    let _result = response.send(digest);
+                                    // Second pickup: Collect any additional transactions that arrived during the wait period
+                                    {
+                                        let mut mempool_guard = mempool_clone.lock().unwrap();
+                                        while transactions.len() < MAX_BLOCK_TRANSACTIONS {
+                                            if let Some(tx) = mempool_guard.next() {
+                                                transactions.push(tx);
+                                            } else {
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    
+                                    // Rebuild block with updated transactions if any new ones were added
+                                    let final_tx_count = transactions.len();
+                                    if final_tx_count != initial_tx_count_clone {
+                                        // Rebuild block with updated transactions
+                                        let block = Block::new(parent.digest(), block_height, current, view as u64, transactions.clone());
+                                        let new_digest = block.digest();
+                                        
+                                        // Log newly added transactions
+                                        let validator_idx = self.validator_index;
+                                        for tx in &transactions[initial_tx_count_clone..] {
+                                            let tx_id = tx.digest();
+                                            info!("[{}] Validator {} included transaction {:?} (timestamp: {}) in block {} (view {}) [second pickup]", 
+                                                  engine_id, validator_idx, tx_id, tx.timestamp, block_height, view);
+                                        }
+                                        
+                                        // Update stored block
+                                        {
+                                            let mut built = built.lock().unwrap();
+                                            *built = Some((view, block));
+                                        }
+                                        
+                                        // Send the updated digest to the consensus
+                                        let _result = response.send(new_digest);
+                                    } else {
+                                        // No new transactions, send original digest
+                                        let _result = response.send(digest);
+                                    }
                                     let proposal_timestamp_ms = context.current().epoch_millis();
                                     let cast_time_utc = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(proposal_timestamp_ms as i64)
                                         .map(|dt| dt.format("%H:%M:%S.%3f UTC").to_string())
@@ -530,8 +572,13 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                                         .map(|dt| dt.format("%H:%M:%S.%3f UTC").to_string())
                                         .unwrap_or_else(|| "invalid-ts".to_string());
                                     let catchup_msg = if is_catchup { " (catch up proposal)" } else { "" };
-                                    info!("[{}] Validator {} proposed block {} (view {}) with {} transactions at {} (computed {}){}", 
-                                          engine_id, validator_idx, block_height, view, tx_count, cast_time_utc, computed_time_utc, catchup_msg);
+                                    let second_pickup_msg = if final_tx_count > initial_tx_count_clone {
+                                        format!(" ({} from second pickup)", final_tx_count - initial_tx_count_clone)
+                                    } else {
+                                        String::new()
+                                    };
+                                    info!("[{}] Validator {} proposed block {} (view {}) with {} transactions at {} (computed {}){}{}", 
+                                          engine_id, validator_idx, block_height, view, final_tx_count, cast_time_utc, computed_time_utc, catchup_msg, second_pickup_msg);
                                 },
                                 _ = response_closed => {
                                     // The response was cancelled
@@ -1083,7 +1130,7 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                 Message::SubmitTransaction { transaction } => {
                     // Verify transaction signature before adding to mempool
                     if transaction.verify() {
-                        mempool.add(transaction);
+                        mempool.lock().unwrap().add(transaction);
                         debug!("transaction added to mempool");
                     } else {
                         warn!("rejected invalid transaction");
