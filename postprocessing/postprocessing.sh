@@ -7,60 +7,35 @@ fi
 
 set -euo pipefail
 
-# Extract gatling lines from per-validator logs into logs/gatling/gatling_vV_iI_rR.log
-# Supports multiple input directories and different filename formats:
-# - Local format: vV_iI_rR.log (V = validator index, I = instance index, R = run index)
-# - Remote format: val_{public_key}_iI_rR.log (public_key = validator public key hash)
-# - Location format: val_{location}_iI_rR.log (location = VM location name like nyc, india, etc.)
-# Output: gatling_vV_iI_rR.log
-#   - For local format: V = validator index (numeric)
-#   - For remote format: V = first 4 hex characters of public key (e.g., 3a5f)
-#   - For location format: V = location name (e.g., nyc, india)
+# Extract gatling lines from per-validator logs into logs/gatling/
+# Gatling files match the validator log file pattern with "gatling" prefix:
+# - Local format: v{validator_idx}_i{instance}_r{run}.log → gatling_{validator_idx}_i{instance}_r{run}.log
+# - Remote format: val_{public_key}_i{instance}_r{run}.log → gatling_{public_key}_i{instance}_r{run}.log
+# - Location format: val_{location}_i{instance}_r{run}.log → gatling_{location}_i{instance}_r{run}.log
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # REPO_ROOT is one level up from postprocessing directory
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 # ============================================================================
-# CONFIGURATION: Input directories to process
+# CONFIGURATION: Input directory
 # ============================================================================
-# Add or remove directories as needed. Script will process files from all directories.
-# Format: relative paths from REPO_ROOT, or absolute paths
-IN_DIRS=(
-    "${REPO_ROOT}/logs/validator"
-    "${REPO_ROOT}/logs/val-india"
-    "${REPO_ROOT}/logs/val-nyc"
-    "${REPO_ROOT}/logs/val-london"
-    "${REPO_ROOT}/logs/val-sydney"
-    "${REPO_ROOT}/logs/val-singapore"
-    "${REPO_ROOT}/logs/val-frankfurt"
-    "${REPO_ROOT}/logs/val-sf"
-)
-
+IN_DIR="${REPO_ROOT}/logs/validator"
 OUT_DIR="${REPO_ROOT}/logs/gatling"
 
 # ============================================================================
 # HELPER FUNCTIONS
 # ============================================================================
 
-# Map public key to validator identifier using first 4 hex characters
-# Example: 3a5f... → 3a5f
-# This keeps identifiers readable while remaining deterministic per public key
-map_public_key_to_validator_id() {
-    local public_key="$1"
-    # Extract first 4 hex characters (handles lowercase)
-    local validator_id="${public_key:0:4}"
-    echo "${validator_id}"
-}
-
 # Process a single log file and extract gatling lines
+# The output filename matches the input filename pattern but with "gatling" prefix
 process_log_file() {
     local file="$1"
-    local validator_idx="$2"
+    local validator_id="$2"  # Full validator identifier (public key, location, or numeric)
     local instance_idx="$3"
     local run_idx="$4"
     
-    local out_file="${OUT_DIR}/gatling_${validator_idx}_i${instance_idx}_r${run_idx}.log"
+    local out_file="${OUT_DIR}/gatling_${validator_id}_i${instance_idx}_r${run_idx}.log"
     
     # Extract lines containing '[gatling]', preserving UTC timestamp at the beginning
     # Format: <timestamp> [gatling]...
@@ -76,72 +51,53 @@ process_log_file() {
 
 mkdir -p "${OUT_DIR}"
 
-# Check if any input directory exists
-found_dirs=0
-for dir in "${IN_DIRS[@]}"; do
-    if [[ -d "$dir" ]]; then
-        found_dirs=1
-        break
-    fi
-done
-
-if [[ $found_dirs -eq 0 ]]; then
-    echo "Error: None of the input directories found:" >&2
-    for dir in "${IN_DIRS[@]}"; do
-        echo "  - ${dir}" >&2
-    done
+# Check if input directory exists
+if [[ ! -d "${IN_DIR}" ]]; then
+    echo "Error: Input directory not found: ${IN_DIR}" >&2
     exit 1
 fi
 
 shopt -s nullglob
 
-# Process files from all input directories
-for IN_DIR in "${IN_DIRS[@]}"; do
-    if [[ ! -d "${IN_DIR}" ]]; then
-        echo "Skipping non-existent directory: ${IN_DIR}"
-        continue
+echo "Processing directory: ${IN_DIR}"
+
+# Process local format: v{validator_idx}_i{instance_idx}_r{run_idx}.log
+# Output: gatling_{validator_idx}_i{instance_idx}_r{run_idx}.log
+for f in "${IN_DIR}"/v[0-9]*_i*_r*.log; do
+    [[ ! -f "$f" ]] && continue
+    base="$(basename "$f")"
+    if [[ "$base" =~ ^v([0-9]+)_i([0-9]+)_r([0-9]+)\.log$ ]]; then
+        validator_id="${BASH_REMATCH[1]}"
+        instance_idx="${BASH_REMATCH[2]}"
+        run_idx="${BASH_REMATCH[3]}"
+        process_log_file "$f" "$validator_id" "$instance_idx" "$run_idx"
     fi
-    
-    echo "Processing directory: ${IN_DIR}"
-    
-    # Process local format: v{validator_idx}_i{instance_idx}_r{run_idx}.log
-    for f in "${IN_DIR}"/v[0-9]*_i*_r*.log; do
-        [[ ! -f "$f" ]] && continue
-        base="$(basename "$f")"
-        if [[ "$base" =~ ^v([0-9]+)_i([0-9]+)_r([0-9]+)\.log$ ]]; then
-            validator_idx="${BASH_REMATCH[1]}"
-            instance_idx="${BASH_REMATCH[2]}"
-            run_idx="${BASH_REMATCH[3]}"
-            process_log_file "$f" "$validator_idx" "$instance_idx" "$run_idx"
-        fi
-    done
-    
-    # Process remote format: val_{public_key}_i{instance_idx}_r{run_idx}.log
-    # Public key is a hex string (64 chars typically)
-    for f in "${IN_DIR}"/val_*_i*_r*.log; do
-        [[ ! -f "$f" ]] && continue
-        base="$(basename "$f")"
-        # Match: val_{location}_i{instance_idx}_r{run_idx}.log (location format)
-        # Check location format first to avoid conflicts with hex pattern
-        # Location is an alphabetic string like nyc, india, london, etc.
-        if [[ "$base" =~ ^val_([a-z]+)_i([0-9]+)_r([0-9]+)\.log$ ]]; then
-            location="${BASH_REMATCH[1]}"
-            instance_idx="${BASH_REMATCH[2]}"
-            run_idx="${BASH_REMATCH[3]}"
-            # Use location name as validator identifier
-            validator_idx="$location"
-            process_log_file "$f" "$validator_idx" "$instance_idx" "$run_idx"
-        # Match: val_{public_key}_i{instance_idx}_r{run_idx}.log
-        # Public key is a hex string (typically 64 chars, but we match any hex string)
-        elif [[ "$base" =~ ^val_([0-9a-f]+)_i([0-9]+)_r([0-9]+)\.log$ ]]; then
-            public_key="${BASH_REMATCH[1]}"
-            instance_idx="${BASH_REMATCH[2]}"
-            run_idx="${BASH_REMATCH[3]}"
-            # Map public key to validator identifier (first 4 hex chars)
-            validator_idx=$(map_public_key_to_validator_id "$public_key")
-            process_log_file "$f" "$validator_idx" "$instance_idx" "$run_idx"
-        fi
-    done
+done
+
+# Process remote format: val_{public_key}_i{instance_idx}_r{run_idx}.log or val_{location}_i{instance_idx}_r{run_idx}.log
+# Output: gatling_{public_key}_i{instance_idx}_r{run_idx}.log or gatling_{location}_i{instance_idx}_r{run_idx}.log
+# Public key is a hex string (typically 64 chars)
+for f in "${IN_DIR}"/val_*_i*_r*.log; do
+    [[ ! -f "$f" ]] && continue
+    base="$(basename "$f")"
+    # Match: val_{location}_i{instance_idx}_r{run_idx}.log (location format)
+    # Check location format first to avoid conflicts with hex pattern
+    # Location is an alphabetic string like nyc, india, london, etc.
+    if [[ "$base" =~ ^val_([a-z]+)_i([0-9]+)_r([0-9]+)\.log$ ]]; then
+        location="${BASH_REMATCH[1]}"
+        instance_idx="${BASH_REMATCH[2]}"
+        run_idx="${BASH_REMATCH[3]}"
+        # Use full location name as validator identifier
+        process_log_file "$f" "$location" "$instance_idx" "$run_idx"
+    # Match: val_{public_key}_i{instance_idx}_r{run_idx}.log
+    # Public key is a hex string (typically 64 chars, but we match any hex string)
+    elif [[ "$base" =~ ^val_([0-9a-f]+)_i([0-9]+)_r([0-9]+)\.log$ ]]; then
+        public_key="${BASH_REMATCH[1]}"
+        instance_idx="${BASH_REMATCH[2]}"
+        run_idx="${BASH_REMATCH[3]}"
+        # Use full public key as validator identifier
+        process_log_file "$f" "$public_key" "$instance_idx" "$run_idx"
+    fi
 done
 
 echo "Verifying gatling logs grouped by instance (iX) and round (rX)..."
@@ -155,18 +111,37 @@ shopt -s nullglob
 
 # Build unique list of (instance, round) groups without bash associative arrays
 groups_list=""
-for f in "${OUT_DIR}"/gatling_v*_i*_r*.log; do
+file_count=0
+for f in "${OUT_DIR}"/gatling_*_i*_r*.log; do
+  [[ ! -f "$f" ]] && continue
+  file_count=$((file_count + 1))
   base="$(basename "$f")"
-  # Match validator identifier (numeric, hex, or alphabetic like location names), instance index, and run index
-  if [[ "$base" =~ ^gatling_v([0-9a-z]+)_i([0-9]+)_r([0-9]+)\.log$ ]]; then
+  # Match validator identifier (numeric, hex string of any length, or alphabetic like location names), instance index, and run index
+  # Pattern: gatling_{validator_id}_i{instance}_r{run}.log
+  # Validator ID can be: numeric (e.g., "1"), hex string (e.g., "3a5f1234..."), or location name (e.g., "nyc")
+  if [[ "$base" =~ ^gatling_([0-9a-z]+)_i([0-9]+)_r([0-9]+)\.log$ ]]; then
     iidx="${BASH_REMATCH[2]}"
     ridx="${BASH_REMATCH[3]}"
     groups_list+=" i${iidx}_r${ridx}"
   fi
 done
 
+if [[ $file_count -eq 0 ]]; then
+  echo "Error: No gatling log files found in ${OUT_DIR}" >&2
+  echo "Expected files matching pattern: gatling_*_i*_r*.log" >&2
+  exit 1
+fi
+
 # Deduplicate groups (compatible with older bash on macOS)
 unique_groups=$(printf '%s\n' ${groups_list} | tr ' ' '\n' | grep -E '^i[0-9]+_r[0-9]+$' | sort -u)
+
+if [[ -z "${unique_groups}" ]]; then
+  echo "Error: No valid (instance, round) groups found in gatling log files" >&2
+  echo "Found ${file_count} file(s) but could not extract instance/round pairs" >&2
+  exit 1
+fi
+
+echo "Found $(echo "${unique_groups}" | wc -l | tr -d ' ') group(s) to verify"
 
 overall_ok=0
 for key in ${unique_groups}; do
@@ -180,7 +155,7 @@ for key in ${unique_groups}; do
 
   tmpdir=$(mktemp -d 2>/dev/null || mktemp -d -t "gatling_verify_${key}")
   # Collect files for this (i, r)
-  files=("${OUT_DIR}/gatling_v"*_i"${iidx}"_r"${ridx}".log)
+  files=("${OUT_DIR}/gatling_"*_i"${iidx}"_r"${ridx}".log)
   # Normalize names so the verifier picks them up uniformly
   idx=1
   for src in "${files[@]}"; do
@@ -188,7 +163,7 @@ for key in ${unique_groups}; do
     idx=$((idx+1))
   done
 
-  #echo "- Checking group instance=i${iidx}, round=r${ridx} (files=${#files[@]})"
+  echo "Checking group instance=i${iidx}, round=r${ridx} (files=${#files[@]})"
   # verify_gatling_logs.py is in the same directory as this script (postprocessing folder)
   if ! python3 "${SCRIPT_DIR}/verify_gatling_logs.py" --dir "${tmpdir}"; then
     echo "Group i${iidx} r${ridx}: verification FAILED" >&2
@@ -200,13 +175,11 @@ for key in ${unique_groups}; do
   rm -rf "${tmpdir}"
 done
 
-if [[ -z "${unique_groups}" ]]; then
-  echo "No gatling files found to verify in ${OUT_DIR}" >&2
-  exit 1
-fi
-
 if [[ $overall_ok -ne 0 ]]; then
+  echo "Verification completed with errors" >&2
   exit 1
+else
+  echo "All groups verified successfully"
 fi
 
 

@@ -5,11 +5,13 @@
 
 # Example hosts (uncomment and modify as needed):
 #root@127.0.0.1
-root@134.122.73.49    # gatling-frakfurt
-root@164.90.133.225   # gatling-nyc
-root@159.65.105.83    # gatling-sf
-root@170.64.129.99    # gatling-sydney
-root@146.190.95.234   # gatling-singapore
-root@68.183.88.142    # gatling-india
-root@159.65.29.138    # gatling-london
-
+root@162.243.24.138
+root@165.22.243.85
+root@165.232.90.102
+root@167.71.36.62
+root@165.22.231.5
+root@24.144.83.212
+root@159.89.173.224
+root@170.64.221.9
+root@178.128.47.8
+root@159.203.65.147

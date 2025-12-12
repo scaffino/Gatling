@@ -18,19 +18,19 @@ set -euo pipefail
 # -----------------------------
 MIN_INSTANCES="${MIN_INSTANCES:-1}"
 MAX_INSTANCES="${MAX_INSTANCES:-10}"
-RUNS_PER_INSTANCE="${RUNS_PER_INSTANCE:-10}"
+RUNS_PER_INSTANCE="${RUNS_PER_INSTANCE:-1}"
 
 # Number of validators
-V="${V:-7}"
+V="${V:-10}"
 
 # Transaction submission parameters (built into validators via --submit-tx)
-SUBMIT_TX_RATE="${SUBMIT_TX_RATE:-0.5}"        # Transactions per second
-SUBMIT_TX_START="${SUBMIT_TX_START:-90}"      # Start delay in seconds after genesis
-SUBMIT_TX_DURATION="${SUBMIT_TX_DURATION:-180}"  # Duration in seconds
+SUBMIT_TX_RATE="${SUBMIT_TX_RATE:-0.2}"        # Transactions per second
+SUBMIT_TX_START="${SUBMIT_TX_START:-500}"      # Start delay in seconds after genesis
+SUBMIT_TX_DURATION="${SUBMIT_TX_DURATION:-600}"  # Duration in seconds
 
 # Per-run wall clock (seconds)
-RUN_DURATION_SECONDS="${RUN_DURATION_SECONDS:-450}"
-SETTLE_SECONDS="${SETTLE_SECONDS:-2}"
+RUN_DURATION_SECONDS="${RUN_DURATION_SECONDS:-750}"
+SETTLE_SECONDS="${SETTLE_SECONDS:-4}"
 
 # SSH/SCP options
 SSH_OPTS=(
@@ -457,6 +457,8 @@ start_validators() {
     local public_key="${PUBLIC_KEYS[idx]}"
     local log_name="val_${public_key}_i${instances}_r${run_idx}.log"
     local cmd="
+export PATH=\"/root/.cargo/bin:\$PATH\" && \
+[ -f /root/.cargo/env ] && source /root/.cargo/env || true && \
 cd '${REMOTE_REPO_DIR}' && \
   NO_COLOR=1 TERM=dumb \
   cargo run --release --bin validator -- \

@@ -25,10 +25,10 @@ write_files:
       export DEBIAN_FRONTEND=noninteractive
 
       # ---- Fix A: define HOME and cargo paths up front ----
-      export HOME=/root
-      export CARGO_HOME=/root/.cargo
-      export RUSTUP_HOME=/root/.rustup
-      export PATH="/root/.cargo/bin:$PATH"
+      #export HOME=/root
+      #export CARGO_HOME=/root/.cargo
+      #export RUSTUP_HOME=/root/.rustup
+      #export PATH="/root/.cargo/bin:$PATH"
       # -----------------------------------------------------
 
       # Ensure tools present (already installed via packages, but safe if image differs)
@@ -41,10 +41,11 @@ write_files:
       # Install rustup non-interactively
       curl -fsSL https://sh.rustup.rs | sh -s -- -y
 
-      # Safely source cargo env even with 'set -u'
-      set +u
-      [ -f /root/.cargo/env ] && source /root/.cargo/env || true
-      set -u
+      # Update PATH to include cargo/rustup (must be done after installation)
+      export PATH="/root/.cargo/bin:$PATH"
+
+      # Verify cargo is available
+      command -v cargo >/dev/null || { echo "ERROR: cargo not found after rustup install"; exit 1; }
 
       # Nightly toolchain
       rustup toolchain install nightly
@@ -66,6 +67,16 @@ write_files:
 
       # Build
       cargo build --release --bin validator
+
+      # Make cargo available in non-interactive shells by adding to .bashrc
+      # This ensures PATH is set when SSH runs commands
+      if ! grep -q '/root/.cargo/bin' /root/.bashrc 2>/dev/null; then
+        echo 'export PATH="/root/.cargo/bin:$PATH"' >> /root/.bashrc
+      fi
+      # Also add to .profile for login shells
+      if ! grep -q '/root/.cargo/bin' /root/.profile 2>/dev/null; then
+        echo 'export PATH="/root/.cargo/bin:$PATH"' >> /root/.profile
+      fi
 
       echo "=== Setup complete at $(date) ==="
 

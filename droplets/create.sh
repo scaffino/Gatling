@@ -1,5 +1,5 @@
 #!/bin/bash
-REGIONS=(sgp1 nyc3 ams3 fra1) # tor1 sfo2 blr1 sfo3 syd1 nyc1 nyc2)
+REGIONS=(nyc2 sgp1 ams3 fra1 tor1 sfo3 blr1 syd1 lon1 nyc3)
 
 # Get the directory where this script is located
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

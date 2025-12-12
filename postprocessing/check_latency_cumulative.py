@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-Aggregate transaction finalization latency from Gatling logs.
+Aggregate transaction finalization latency from Gatling logs across multiple runs.
 
-Reads all files under logs/gatling named gatling_{hex}_i{I}_r{R}.log,
-where {hex} is a hexadecimal validator identifier.
-Extracts finalization events, deduplicates per transaction per validator
-(using only the first finalization event per validator), computes average
-latency across validators for each transaction, then computes the overall
-average latency per instance count, writes a CSV, and plots latency vs
-instances.
+Reads all files from multiple directories (gatling-1run-10vals-1, gatling-1run-10vals-2,
+gatling-1run-10vals-3) named gatling_{hex}_i{I}_r{R}.log, where {hex} is a hexadecimal
+validator identifier. Extracts finalization events, deduplicates per transaction per validator
+(using only the first finalization event per validator), computes average latency across
+validators for each transaction, then computes the overall average latency per instance count,
+writes a CSV, and plots latency vs instances.
 
 This script is designed to be run from the postprocessing folder.
 """
@@ -48,35 +47,40 @@ def get_repo_root() -> str:
 def parse_args() -> argparse.Namespace:
     repo_root = get_repo_root()
     parser = argparse.ArgumentParser(
-        description="Aggregate Gatling latencies and plot vs instances"
+        description="Aggregate Gatling latencies across multiple runs and plot vs instances"
     )
     parser.add_argument(
-        "--dir",
-        dest="dir",
-        default=os.path.join(repo_root, "logs", "gatling"),
-        help="Directory containing gatling_*_i*_r*.log files",
+        "--dirs",
+        dest="dirs",
+        nargs="+",
+        default=[
+            os.path.join(repo_root, "logs", "gatling-1run-10vals-1"),
+            os.path.join(repo_root, "logs", "gatling-1run-10vals-2"),
+            os.path.join(repo_root, "logs", "gatling-1run-10vals-3"),
+        ],
+        help="Directories containing gatling_*_i*_r*.log files",
     )
     parser.add_argument(
         "--csv",
         dest="csv",
         default=os.path.join(
-            repo_root, "logs", "gatling", "latency_vs_instances.csv"
+            repo_root, "logs", "cumulative-3runs-10vals", "latency_vs_instances.csv"
         ),
         help="Output CSV path",
     )
     parser.add_argument(
-        "--png",
-        dest="png",
+        "--pdf",
+        dest="pdf",
         default=os.path.join(
-            repo_root, "logs", "gatling", "latency_vs_instances.png"
+            repo_root, "logs", "cumulative-3runs-10vals", "latency_vs_instances.pdf"
         ),
-        help="Output PNG path",
+        help="Output PDF path",
     )
     parser.add_argument(
         "--stats-csv",
         dest="stats_csv",
         default=os.path.join(
-            repo_root, "logs", "gatling", "stats.csv"
+            repo_root, "logs", "cumulative-3runs-10vals", "stats.csv"
         ),
         help="Output stats CSV path (contains all terminal output statistics)",
     )
@@ -105,7 +109,17 @@ def iter_gatling_files(dir_path: str) -> Iterable[Tuple[str, int, str, int]]:
         yield os.path.join(dir_path, name), i, v, r
 
 
-def check_consistency(dir_path: str) -> None:
+def iter_gatling_files_multi(dir_paths: List[str]) -> Iterable[Tuple[str, int, str, int]]:
+    """
+    Yields (file_path, instances, validator_id, run_index) from multiple directories.
+    validator_id is a hexadecimal string identifier.
+    """
+    for dir_path in dir_paths:
+        for item in iter_gatling_files(dir_path):
+            yield item
+
+
+def check_consistency(dir_paths: List[str]) -> None:
     """
     Performs basic consistency checks over discovered Gatling logs:
     - Files must follow expected naming:
@@ -114,7 +128,7 @@ def check_consistency(dir_path: str) -> None:
     Exits with non-zero status if no matching files are found.
     """
     any_file = False
-    for _, _, _, _ in iter_gatling_files(dir_path):
+    for _, _, _, _ in iter_gatling_files_multi(dir_paths):
         any_file = True
         break
 
@@ -122,8 +136,8 @@ def check_consistency(dir_path: str) -> None:
         print(
             (
                 "Error: no gatling logs found matching expected pattern in "
-                "{0}"
-            ).format(dir_path)
+                "directories: {0}"
+            ).format(", ".join(dir_paths))
         )
         sys.exit(1)
 
@@ -164,11 +178,12 @@ def parse_latency_occurrences(path: str) -> Iterable[Tuple[str, int]]:
         return
 
 
-def aggregate_by_instances(dir_path: str) -> Dict[int, Dict[str, List[int]]]:
+def aggregate_by_instances(dir_paths: List[str]) -> Dict[int, Dict[str, List[int]]]:
     """
     Returns mapping: instances -> { tx_hash -> [latency_ms, ...] }
     For each transaction, collects the first finalization event from each
     validator file (one latency value per validator).
+    Reads from multiple directories and aggregates all data.
     """
     by_instances = defaultdict(
         lambda: defaultdict(list)
@@ -182,7 +197,7 @@ def aggregate_by_instances(dir_path: str) -> Dict[int, Dict[str, List[int]]]:
         instances,
         validator,
         _run_idx,
-    ) in iter_gatling_files(dir_path):
+    ) in iter_gatling_files_multi(dir_paths):
         any_file = True
         for tx_hash, latency_ms in parse_latency_occurrences(file_path):
             # Only keep the first occurrence of each transaction per file
@@ -193,8 +208,8 @@ def aggregate_by_instances(dir_path: str) -> Dict[int, Dict[str, List[int]]]:
     if not any_file:
         print(
             (
-                "Error: no gatling_*_i*_r*.log files found in {0}"
-            ).format(dir_path)
+                "Error: no gatling_*_i*_r*.log files found in directories: {0}"
+            ).format(", ".join(dir_paths))
         )
         sys.exit(1)
     return by_instances
@@ -371,7 +386,7 @@ def prepare_plot_data(
 
 
 def plot_boxplot_with_mean(
-    by_instances: Dict[int, Dict[str, List[int]]], png_path: str
+    by_instances: Dict[int, Dict[str, List[int]]], pdf_path: str
 ) -> None:
     """Create a box plot with mean overlay using seaborn."""
     try:
@@ -488,17 +503,14 @@ def plot_boxplot_with_mean(
     plt.yscale('log')
     plt.legend(loc='best')
     plt.grid(True, linestyle=":", alpha=0.6, axis='y')
-    os.makedirs(os.path.dirname(png_path), exist_ok=True)
+    os.makedirs(os.path.dirname(pdf_path), exist_ok=True)
     plt.tight_layout()
-    plt.savefig(png_path, dpi=160)
-    # Also save as PDF
-    pdf_path = png_path.replace('.png', '.pdf')
-    plt.savefig(pdf_path)
+    plt.savefig(pdf_path, format='pdf')
     plt.close()
 
 
 def plot_boxplot_with_scatter(
-    by_instances: Dict[int, Dict[str, List[int]]], png_path: str
+    by_instances: Dict[int, Dict[str, List[int]]], pdf_path: str
 ) -> None:
     """Create a box plot with scatter overlay using seaborn."""
     try:
@@ -614,17 +626,14 @@ def plot_boxplot_with_scatter(
     plt.ylabel("Latency (ms)")
     plt.yscale('log')
     plt.grid(True, linestyle=":", alpha=0.6, axis='y')
-    os.makedirs(os.path.dirname(png_path), exist_ok=True)
+    os.makedirs(os.path.dirname(pdf_path), exist_ok=True)
     plt.tight_layout()
-    plt.savefig(png_path, dpi=160)
-    # Also save as PDF
-    pdf_path = png_path.replace('.png', '.pdf')
-    plt.savefig(pdf_path)
+    plt.savefig(pdf_path, format='pdf')
     plt.close()
 
 
 def plot_boxplot_with_mean_and_scatter(
-    by_instances: Dict[int, Dict[str, List[int]]], png_path: str
+    by_instances: Dict[int, Dict[str, List[int]]], pdf_path: str
 ) -> None:
     """Create a box plot with both mean and scatter overlay using seaborn."""
     try:
@@ -754,12 +763,9 @@ def plot_boxplot_with_mean_and_scatter(
     plt.yscale('log')
     plt.legend(loc='best')
     plt.grid(True, linestyle=":", alpha=0.6, axis='y')
-    os.makedirs(os.path.dirname(png_path), exist_ok=True)
+    os.makedirs(os.path.dirname(pdf_path), exist_ok=True)
     plt.tight_layout()
-    plt.savefig(png_path, dpi=160)
-    # Also save as PDF
-    pdf_path = png_path.replace('.png', '.pdf')
-    plt.savefig(pdf_path)
+    plt.savefig(pdf_path, format='pdf')
     plt.close()
 
 
@@ -970,8 +976,8 @@ def perform_ks_tests(
 def main() -> None:
     args = parse_args()
     # Run consistency checks before aggregation to catch mismatches early
-    check_consistency(args.dir)
-    by_instances = aggregate_by_instances(args.dir)
+    check_consistency(args.dirs)
+    by_instances = aggregate_by_instances(args.dirs)
     stats = compute_instance_stats(by_instances)
 
     # Console summary
@@ -993,15 +999,16 @@ def main() -> None:
     write_stats_csv(stats, ks_results, args.stats_csv)
     # Generate three plots: one with mean overlay, one with scatter overlay,
     # and one with both mean and scatter
-    base_path = args.png
-    if base_path.endswith('.png'):
+    base_path = args.pdf
+    if base_path.endswith('.pdf'):
         base_path = base_path[:-4]
-    plot_boxplot_with_mean(by_instances, "{0}_mean.png".format(base_path))
-    plot_boxplot_with_scatter(by_instances, "{0}_scatter.png".format(base_path))
+    plot_boxplot_with_mean(by_instances, "{0}_mean.pdf".format(base_path))
+    plot_boxplot_with_scatter(by_instances, "{0}_scatter.pdf".format(base_path))
     plot_boxplot_with_mean_and_scatter(
-        by_instances, "{0}_mean_scatter.png".format(base_path)
+        by_instances, "{0}_mean_scatter.pdf".format(base_path)
     )
 
 
 if __name__ == "__main__":
     main()
+
