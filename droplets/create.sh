@@ -17,8 +17,8 @@ else
 fi
 
 # Get SSH key IDs by name
-SSH_KEY_1=$(doctl compute ssh-key list --format ID,Name --no-header | grep "mykey" | awk '{print $1}')
-SSH_KEY_2=$(doctl compute ssh-key list --format ID,Name --no-header | grep "my-coauthor-key" | awk '{print $1}')
+SSH_KEY_1=$(doctl compute ssh-key list --format ID,Name --no-header | grep "giuliascaf" | awk '{print $1}')
+SSH_KEY_2=$(doctl compute ssh-key list --format ID,Name --no-header | grep "jneu-key-2025-05-22" | awk '{print $1}')
 SSH_KEYS="${SSH_KEY_1},${SSH_KEY_2}"
 
 # Get project ID by name

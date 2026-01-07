@@ -347,3 +347,5 @@ Transactions are verified **twice**:
 - **Account balances**: Track balances based on transaction history
 - **Transaction fees**: Implement fee mechanism (not currently supported)
 
+### Giulia's
+./target/release/submit_tx --validator-all --sender-seed 999 --receiver 3ecf551aeb957616c6c8aa603634ea55845f88712a58745e58a71fe988bb967a --amount 17
