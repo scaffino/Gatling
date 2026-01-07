@@ -17,8 +17,8 @@ else
 fi
 
 # Get SSH key IDs by name
-SSH_KEY_1=$(doctl compute ssh-key list --format ID,Name --no-header | grep "giuliascaf" | awk '{print $1}')
-SSH_KEY_2=$(doctl compute ssh-key list --format ID,Name --no-header | grep "jneu-key-2025-05-22" | awk '{print $1}')
+SSH_KEY_1=$(doctl compute ssh-key list --format ID,Name --no-header | grep "mykey" | awk '{print $1}')
+SSH_KEY_2=$(doctl compute ssh-key list --format ID,Name --no-header | grep "my-coauthor-key" | awk '{print $1}')
 SSH_KEYS="${SSH_KEY_1},${SSH_KEY_2}"
 
 # Get project ID by name
@@ -28,6 +28,21 @@ if [ -z "$PROJECT_ID" ]; then
   echo "Error: Project '2025-gatling-experiments' not found"
   exit 1
 fi
+
+# Determine path to remote-runs/ips.txt relative to script location
+if [ -d "$SCRIPT_DIR/../remote-runs" ]; then
+  # Script is in droplets folder, remote-runs is sibling directory
+  IPS_FILE="$SCRIPT_DIR/../remote-runs/ips.txt"
+elif [ -d "$SCRIPT_DIR/remote-runs" ]; then
+  # Script is in alto folder, remote-runs is subdirectory
+  IPS_FILE="$SCRIPT_DIR/remote-runs/ips.txt"
+else
+  echo "Error: remote-runs directory not found. Expected at $SCRIPT_DIR/../remote-runs or $SCRIPT_DIR/remote-runs"
+  exit 1
+fi
+
+# Initialize IPs array
+declare -a DROPLET_IPS=()
 
 # Create a droplet in each region
 for region in "${REGIONS[@]}"; do
@@ -41,7 +56,31 @@ for region in "${REGIONS[@]}"; do
     --tag-name dev \
     --project-id "$PROJECT_ID" \
     --wait
-  echo "✓ Droplet created in $region and assigned to project"
+  
+  # Get the IP address of the created droplet
+  DROPLET_IP=$(doctl compute droplet list "gatling-${region}" --format PublicIPv4 --no-header | head -n1 | tr -d ' ')
+  
+  if [ -z "$DROPLET_IP" ]; then
+    echo "Warning: Could not retrieve IP address for droplet gatling-${region}"
+  else
+    DROPLET_IPS+=("$DROPLET_IP")
+    echo "✓ Droplet created in $region with IP: $DROPLET_IP"
+  fi
 done
 
+# Write IPs to file
+echo "# Remote host IPs (one per line)" > "$IPS_FILE"
+echo "# Format: root@IP or just IP (root@ will be prepended automatically)" >> "$IPS_FILE"
+echo "# Lines starting with # are comments and will be ignored" >> "$IPS_FILE"
+echo "# Empty lines are ignored" >> "$IPS_FILE"
+echo "" >> "$IPS_FILE"
+echo "# Droplets created on $(date)" >> "$IPS_FILE"
+
+for ip in "${DROPLET_IPS[@]}"; do
+  echo "root@${ip}" >> "$IPS_FILE"
+done
+
+echo ""
 echo "All droplets created and assigned successfully!"
+echo "IP addresses written to: $IPS_FILE"
+echo "Total droplets: ${#DROPLET_IPS[@]}"
