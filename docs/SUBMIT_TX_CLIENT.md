@@ -13,7 +13,6 @@ This document explains how to use the `submit_tx` client to send transactions to
 **Option 1: Build only**
 
 ```bash
-cd /Users/gscaffino/Workspace/superfastBFT/evaluation/alto
 cargo build --bin submit_tx --release
 ```
 
@@ -24,7 +23,6 @@ The compiled binary will be at: `target/release/submit_tx`
 Use `cargo run` to automatically build (if needed) and run:
 
 ```bash
-cd /Users/gscaffino/Workspace/superfastBFT/evaluation/alto
 cargo run --release --bin submit_tx -- <ARGS>
 ```
 

@@ -28,7 +28,7 @@ INFO alto_chain::application::actor: Transaction is now final tx_id=0x1a2b3c4d..
 ### Terminal 1: Start Validator
 
 ```bash
-cd /Users/gscaffino/Workspace/superfastBFT/evaluation/alto/chain
+cd chain
 
 # Generate configs (first time only)
 cargo run --release --bin setup -- generate \
@@ -51,8 +51,6 @@ cargo run --release --bin validator -- \
 ### Terminal 2: Submit Transaction
 
 ```bash
-cd /Users/gscaffino/Workspace/superfastBFT/evaluation/alto
-
 # Get a receiver public key (use any seed)
 RECEIVER=$(./target/release/submit_tx \
   --validator http://localhost:8081 \

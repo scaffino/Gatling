@@ -7,7 +7,7 @@
 **Run this command to see transactions working:**
 
 ```bash
-cd /Users/gscaffino/Workspace/superfastBFT/evaluation/alto/chain
+cd chain
 cargo test test_transaction_flow -- --nocapture
 ```
 
@@ -47,7 +47,7 @@ INFO transaction_test: Test completed successfully! Height reached: 36
 **Run this command for a simpler demonstration:**
 
 ```bash
-cd /Users/gscaffino/Workspace/superfastBFT/evaluation/alto/chain
+cd chain
 cargo run --release --example submit_transaction
 ```
 
@@ -92,7 +92,7 @@ This example shows the submission process step-by-step. For full verification of
 
 **To save clean output to a file (without ANSI color codes):**
 ```bash
-cd /Users/gscaffino/Workspace/superfastBFT/evaluation/alto/chain
+cd chain
 cargo run --release --example submit_transaction 2>&1 | sed $'s/\x1b\\[[0-9;]*m//g' > example.txt
 ```
 

@@ -111,7 +111,7 @@ When running multiple consensus instances (via `--consensus-instances N`), the s
 ### Step 1: Start Validator with Submit-TX
 
 ```bash
-cd /Users/gscaffino/Workspace/superfastBFT/evaluation/alto/chain
+cd chain
 
 cargo run --release --bin validator -- \
   --config test/validator.yaml \

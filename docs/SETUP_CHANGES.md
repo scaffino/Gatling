@@ -40,7 +40,7 @@ When running `setup generate remote`:
 ### Full Setup Command
 
 ```bash
-cd /Users/gscaffino/Workspace/superfastBFT/evaluation/alto/chain
+cd chain
 
 cargo run --release --bin setup -- generate \
   --peers 4 \

@@ -54,7 +54,7 @@ write_files:
       # Clone and build alto
       cd /root
       rm -rf /root/alto || true
-      git clone https://github.com/scaffino/alto.git
+      git clone https://my-alto-folder.git
       cd /root/alto
       git fetch --all
 
