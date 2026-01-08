@@ -612,12 +612,20 @@ fn main() {
             .map(|e| e.application_mailbox().clone())
             .collect();
 
+        // Create channel for broadcasting transactions (only if gossip is enabled)
+        let broadcast_channel = if gossip_enabled {
+            Some(futures::channel::mpsc::unbounded())
+        } else {
+            None
+        };
+
         // Start submit-tx task if configured
         let submit_tx_task = if let Some((rate, start_delay, duration)) = submit_tx_config {
             let mut mailboxes = all_mailboxes.clone();
             let signer_clone = signer.clone();
             let receiver = public_key.clone();
             let genesis = config.genesis_timestamp;
+            let broadcast_tx_for_submit_tx = broadcast_channel.as_ref().map(|(tx, _)| tx.clone());
             
             Some(context.with_label("submit_tx").spawn(move |ctx| async move {
                 use std::time::Instant;
@@ -725,6 +733,11 @@ fn main() {
                         }
                     }
                     
+                    // Send to broadcast channel for gossip (if enabled)
+                    if let Some(broadcast_tx) = &broadcast_tx_for_submit_tx {
+                        let _ = broadcast_tx.unbounded_send(tx);
+                    }
+                    
                     tx_count += 1;
                     if tx_count % 100 == 0 || submitted_count < mailboxes.len() {
                         info!(
@@ -743,13 +756,6 @@ fn main() {
                     "submit-tx: finished transaction generation"
                 );
             }))
-        } else {
-            None
-        };
-
-        // Create channel for broadcasting transactions (only if gossip is enabled)
-        let broadcast_channel = if gossip_enabled {
-            Some(futures::channel::mpsc::unbounded())
         } else {
             None
         };
