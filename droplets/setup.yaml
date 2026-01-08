@@ -54,16 +54,12 @@ write_files:
       # Clone and build alto
       cd /root
       rm -rf /root/alto || true
-      git clone https://my-alto-folder.git
+      git clone https://github.com/scaffino/alto.git
       cd /root/alto
       git fetch --all
 
-      # Robust branch checkout: prefer remote if it exists
-      if git ls-remote --exit-code --heads origin remote-deployments >/dev/null 2>&1; then
-        git checkout -B remote-deployments origin/remote-deployments
-      else
-        git checkout remote-deployments || true
-      fi
+      # Checkout main branch
+      git checkout main
 
       # Build
       cargo build --release --bin validator
