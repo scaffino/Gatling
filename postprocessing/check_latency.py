@@ -30,6 +30,29 @@ except ImportError:
     SCIPY_AVAILABLE = False
 
 
+# ============================================================================
+# CONFIGURATION: Easily change input/output directories and file names here
+# ============================================================================
+
+# Input directory: where to read gatling log files from
+# This can be a relative path (from repo root) or absolute path
+# Default: "logs/gatling" (relative to repo root)
+INPUT_DIR = "logs/gatling-best-copy"
+
+# Output directory: where to write output files
+# This can be a relative path (from repo root) or absolute path
+# Default: same as INPUT_DIR
+OUTPUT_DIR = None  # None means use INPUT_DIR
+
+# Output file names (will be placed in OUTPUT_DIR)
+OUTPUT_CSV_NAME = "latency_vs_instances.csv"
+OUTPUT_PNG_NAME = "latency_vs_instances.png"
+OUTPUT_STATS_CSV_NAME = "stats.csv"
+
+# ============================================================================
+# END CONFIGURATION
+# ============================================================================
+
 # Match validator ID as hex string (no 'v' prefix in actual files)
 # Files are named: gatling_{hex}_i{instances}_r{run}.log
 FILENAME_RE = re.compile(r"^gatling_([0-9a-f]+)_i(\d+)_r(\d+)\.log$")
@@ -40,45 +63,69 @@ FINALIZE_RE = re.compile(
 
 
 def get_repo_root() -> str:
-    """Get the repository root directory (one level up from postprocessing folder)."""
+    """
+    Get the repository root directory (one level up from postprocessing
+    folder).
+    """
     script_dir = os.path.dirname(os.path.abspath(__file__))
     return os.path.dirname(script_dir)
 
 
 def parse_args() -> argparse.Namespace:
     repo_root = get_repo_root()
+
+    # Resolve input directory: if relative, make it absolute relative to
+    # repo root
+    if os.path.isabs(INPUT_DIR):
+        default_input_dir = INPUT_DIR
+    else:
+        default_input_dir = os.path.join(repo_root, INPUT_DIR)
+
+    # Resolve output directory: if None, use input directory; if relative,
+    # make it absolute
+    if OUTPUT_DIR is None:
+        default_output_dir = default_input_dir
+    elif os.path.isabs(OUTPUT_DIR):
+        default_output_dir = OUTPUT_DIR
+    else:
+        default_output_dir = os.path.join(repo_root, OUTPUT_DIR)
+
+    # Build default output file paths
+    default_csv = os.path.join(default_output_dir, OUTPUT_CSV_NAME)
+    default_png = os.path.join(default_output_dir, OUTPUT_PNG_NAME)
+    default_stats_csv = os.path.join(
+        default_output_dir, OUTPUT_STATS_CSV_NAME
+    )
+
     parser = argparse.ArgumentParser(
         description="Aggregate Gatling latencies and plot vs instances"
     )
     parser.add_argument(
         "--dir",
         dest="dir",
-        default=os.path.join(repo_root, "logs", "gatling"),
-        help="Directory containing gatling_*_i*_r*.log files",
+        default=default_input_dir,
+        help=(
+            "Directory containing gatling_*_i*_r*.log files "
+            "(default: from config)"
+        ),
     )
     parser.add_argument(
         "--csv",
         dest="csv",
-        default=os.path.join(
-            repo_root, "logs", "gatling", "latency_vs_instances.csv"
-        ),
-        help="Output CSV path",
+        default=default_csv,
+        help="Output CSV path (default: from config)",
     )
     parser.add_argument(
         "--png",
         dest="png",
-        default=os.path.join(
-            repo_root, "logs", "gatling", "latency_vs_instances.png"
-        ),
-        help="Output PNG path",
+        default=default_png,
+        help="Output PNG path (default: from config)",
     )
     parser.add_argument(
         "--stats-csv",
         dest="stats_csv",
-        default=os.path.join(
-            repo_root, "logs", "gatling", "stats.csv"
-        ),
-        help="Output stats CSV path (contains all terminal output statistics)",
+        default=default_stats_csv,
+        help="Output stats CSV path (default: from config)",
     )
     return parser.parse_args()
 
