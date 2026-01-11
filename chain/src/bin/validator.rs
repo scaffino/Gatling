@@ -305,7 +305,6 @@ fn main() {
         .parse()
         .expect("Invalid consensus instances count");
     assert!(consensus_instances > 0, "Number of consensus instances must be at least 1");
-    assert!(consensus_instances <= 10, "Number of consensus instances cannot exceed 10");
 
     // Parse gossip flag (default: enabled if neither flag is specified)
     let gossip_enabled = if matches.get_flag("no-gossip-txs") {
