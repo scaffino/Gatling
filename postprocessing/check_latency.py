@@ -278,7 +278,8 @@ def compute_instance_stats(
             overall_average = statistics.mean(per_tx_averages)
             overall_median = statistics.median(per_tx_averages)
             overall_std = (
-                statistics.stdev(per_tx_averages) if len(per_tx_averages) >= 2
+                statistics.stdev(per_tx_averages)
+                if len(per_tx_averages) >= 2
                 else 0.0
             )
             overall_min = min(per_tx_averages)
@@ -321,7 +322,10 @@ def write_csv(
 
 def write_stats_csv(
     stats: Dict[int, Tuple[float, float, float, float, float, int]],
-    ks_results: Tuple[List[Tuple[int, int, float, float, int, int]], Dict[int, Tuple[float, float, float, float, float, int]]],
+    ks_results: Tuple[
+        List[Tuple[int, int, float, float, int, int]],
+        Dict[int, Tuple[float, float, float, float, float, int]]
+    ],
     stats_csv_path: str,
 ) -> None:
     """
@@ -329,11 +333,13 @@ def write_stats_csv(
     """
     non_significant_pairs, group_stats = ks_results
     os.makedirs(os.path.dirname(stats_csv_path), exist_ok=True)
-    
+
     with open(stats_csv_path, "w") as f:
         # Section 1: Per-instance summary statistics
         f.write("=== PER-INSTANCE SUMMARY STATISTICS ===\n")
-        f.write("instances,avg_ms,median_ms,stddev_ms,min_ms,max_ms,unique_txs\n")
+        f.write(
+            "instances,avg_ms,median_ms,stddev_ms,min_ms,max_ms,unique_txs\n"
+        )
         for instances in sorted(stats.keys()):
             average_ms, median_ms, std_ms, min_ms, max_ms, n = stats[instances]
             f.write(
@@ -343,10 +349,14 @@ def write_stats_csv(
                 )
             )
         f.write("\n")
-        
-        # Section 2: Kolmogorov-Smirnov test results (non-significant comparisons)
+
+        # Section 2: Kolmogorov-Smirnov test results
+        # (non-significant comparisons)
         if non_significant_pairs:
-            f.write("=== KOLMOGOROV-SMIRNOV TESTS (Non-Significant Comparisons) ===\n")
+            f.write(
+                "=== KOLMOGOROV-SMIRNOV TESTS "
+                "(Non-Significant Comparisons) ===\n"
+            )
             f.write("instance_1,instance_2,ks_statistic,p_value,n1,n2\n")
             for inst1, inst2, ks_stat, p_val, n1, n2 in non_significant_pairs:
                 f.write("{0},{1},{2:.10f},{3:.10e},{4},{5}\n".format(
@@ -356,17 +366,20 @@ def write_stats_csv(
             f.write("=== KOLMOGOROV-SMIRNOV TESTS ===\n")
             f.write("No non-significant comparisons found.\n")
         f.write("\n")
-        
+
         # Section 3: Group summary statistics
         if group_stats:
             f.write("=== GROUP SUMMARY STATISTICS ===\n")
             f.write("instances,n,mean_ms,median_ms,std_ms,min_ms,max_ms\n")
             for inst in sorted(group_stats.keys()):
-                mean_val, median_val, std_val, min_val, max_val, n = group_stats[inst]
+                (mean_val, median_val, std_val, min_val, max_val, n) = (
+                    group_stats[inst]
+                )
                 f.write(
                     "{0},{1},{2:.2f},{3:.2f},"
                     "{4:.2f},{5:.2f},{6:.2f}\n".format(
-                        inst, n, mean_val, median_val, std_val, min_val, max_val
+                        inst, n, mean_val, median_val, std_val,
+                        min_val, max_val
                     )
                 )
         else:
@@ -828,20 +841,24 @@ def prepare_data_for_statistical_test(
 
 def perform_ks_tests(
     by_instances: Dict[int, Dict[str, List[int]]]
-) -> Tuple[List[Tuple[int, int, float, float, int, int]], Dict[int, Tuple[float, float, float, float, float, int]]]:
+) -> Tuple[
+    List[Tuple[int, int, float, float, int, int]],
+    Dict[int, Tuple[float, float, float, float, float, int]]
+]:
     """
     Perform Kolmogorov-Smirnov tests for pairwise comparisons between
     all instance groups with Bonferroni correction for multiple comparisons.
     Returns: (non_significant_pairs, group_stats)
-    where non_significant_pairs is list of (inst1, inst2, ks_stat, p_value, n1, n2)
+    where non_significant_pairs is list of
+    (inst1, inst2, ks_stat, p_value, n1, n2)
     and group_stats is dict of instances -> (mean, median, std, min, max, n)
     """
     non_significant_pairs = []
     group_stats = {}
-    
+
     instance_data = prepare_data_for_statistical_test(by_instances)
     sorted_instances = sorted(instance_data.keys())
-    
+
     # Compute group stats regardless of scipy availability
     for inst in sorted_instances:
         data = instance_data[inst]
@@ -850,8 +867,10 @@ def perform_ks_tests(
         std_val = statistics.stdev(data) if len(data) >= 2 else 0.0
         min_val = min(data)
         max_val = max(data)
-        group_stats[inst] = (mean_val, median_val, std_val, min_val, max_val, len(data))
-    
+        group_stats[inst] = (
+            mean_val, median_val, std_val, min_val, max_val, len(data)
+        )
+
     if not SCIPY_AVAILABLE:
         print(
             "\nWarning: scipy not available. "
@@ -980,7 +999,9 @@ def perform_ks_tests(
         )
         print(
             "Total significant pairs: "
-            "{0}/{1}".format(n_comparisons - len(non_significant_pairs), n_comparisons)
+            "{0}/{1}".format(
+                n_comparisons - len(non_significant_pairs), n_comparisons
+            )
         )
     else:
         print(
@@ -1044,7 +1065,9 @@ def main() -> None:
     if base_path.endswith('.png'):
         base_path = base_path[:-4]
     plot_boxplot_with_mean(by_instances, "{0}_mean.png".format(base_path))
-    plot_boxplot_with_scatter(by_instances, "{0}_scatter.png".format(base_path))
+    plot_boxplot_with_scatter(
+        by_instances, "{0}_scatter.png".format(base_path)
+    )
     plot_boxplot_with_mean_and_scatter(
         by_instances, "{0}_mean_scatter.png".format(base_path)
     )

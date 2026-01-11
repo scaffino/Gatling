@@ -4,5 +4,9 @@
 *.vscode
 /chain/assets
 /chain/test
+/chain/test-remote
 /test
 /types/pkg
+/remote-runs/ips.txt
+/postprocessing/__pycache__
+/__pycache__
