@@ -20,8 +20,8 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # ============================================================================
 # CONFIGURATION: Input directory
 # ============================================================================
-IN_DIR="${REPO_ROOT}/logs/validator-best-copy"
-OUT_DIR="${REPO_ROOT}/logs/gatling-best-copy"
+IN_DIR="${REPO_ROOT}/logs/validator"
+OUT_DIR="${REPO_ROOT}/logs/gatling"
 
 # ============================================================================
 # HELPER FUNCTIONS

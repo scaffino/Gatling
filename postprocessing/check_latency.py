@@ -37,14 +37,14 @@ except ImportError:
 # Input directory: where to read gatling log files from
 # This can be a relative path (from repo root) or absolute path
 # Default: "logs/gatling" (relative to repo root)
-INPUT_DIR = "logs/gatling-best-copy"
+INPUT_DIR = "logs/gatling-best"
 
 # Output directory: where to write output files
 # This can be a relative path (from repo root) or absolute path
 # Default: same as INPUT_DIR
 OUTPUT_DIR = None  # None means use INPUT_DIR
 
-# Output file names (will be placed in OUTPUT_DIR)
+# Output file names (will be placed in OUTPUT_DIR) f
 OUTPUT_CSV_NAME = "latency_vs_instances.csv"
 OUTPUT_PNG_NAME = "latency_vs_instances.png"
 OUTPUT_STATS_CSV_NAME = "stats.csv"
@@ -390,14 +390,14 @@ def write_stats_csv(
 def prepare_plot_data(
     by_instances: Dict[int, Dict[str, List[int]]]
 ) -> Tuple[
-    List[List[int]],
+    List[List[float]],
     List[int],
     List[Tuple[float, float, float, float, float]],
     List[float],
 ]:
     """
-    Prepare data for plotting: extract latencies, calculate percentiles
-    and means.
+    Prepare data for plotting: extract per-transaction average latencies,
+    calculate percentiles and means.
     Returns: (data_for_boxplot, instance_labels, percentile_data, mean_data)
     """
     data_for_boxplot = []
@@ -411,19 +411,23 @@ def prepare_plot_data(
         return [], [], [], []
 
     for instances in sorted(by_instances.keys()):
-        all_latencies = []
+        per_tx_averages = []
         for tx_hash, validator_latencies in by_instances[instances].items():
-            all_latencies.extend(validator_latencies)
-        if all_latencies:
-            data_for_boxplot.append(all_latencies)
+            if not validator_latencies:
+                continue
+            # For each transaction, compute the average latency across all validators
+            tx_average = statistics.mean(validator_latencies)
+            per_tx_averages.append(tx_average)
+        if per_tx_averages:
+            data_for_boxplot.append(per_tx_averages)
             instance_labels.append(instances)
             # Calculate 10th, 50th (median), and 90th percentiles, plus min/max
-            p10 = np.percentile(all_latencies, 10)
-            p50 = np.percentile(all_latencies, 50)
-            p90 = np.percentile(all_latencies, 90)
-            p_min = np.min(all_latencies)
-            p_max = np.max(all_latencies)
-            mean_val = np.mean(all_latencies)
+            p10 = np.percentile(per_tx_averages, 10)
+            p50 = np.percentile(per_tx_averages, 50)
+            p90 = np.percentile(per_tx_averages, 90)
+            p_min = np.min(per_tx_averages)
+            p_max = np.max(per_tx_averages)
+            mean_val = np.mean(per_tx_averages)
             percentile_data.append((p10, p50, p90, p_min, p_max))
             mean_data.append(mean_val)
 
@@ -457,8 +461,8 @@ def plot_boxplot_with_mean(
         print("Warning: no data to plot")
         return
 
-    # Set seaborn style
-    sns.set_style("whitegrid")
+    # Set seaborn style (use "ticks" to avoid vertical grid lines)
+    sns.set_style("ticks")
     plt.figure(figsize=(7, 4))
 
     # Manually create box plot with 10th-90th percentiles
@@ -538,16 +542,22 @@ def plot_boxplot_with_mean(
             label='Mean' if i == 0 else ''
         )
 
-    # Set x-axis labels and limits
-    ticks = list(range(0, 12))
-    plt.xticks(ticks, ticks)
-    plt.xlim(0.5, 10.5)
+    # Set x-axis from actual instance counts (no gaps: 1,2,...,11,49,50 etc.)
+    n = len(instance_labels)
+    positions = list(range(1, n + 1))
+    plt.xticks(positions, instance_labels)
+    plt.xlim(0.5, n + 0.5)
 
-    plt.xlabel("Number of consensus instances")
+    plt.xlabel("Number of parallel component protocol instances")
     plt.ylabel("Latency (ms)")
-    plt.yscale('log')
     plt.legend(loc='best')
     plt.grid(True, linestyle=":", alpha=0.6, axis='y')
+    # Remove all axis spines
+    ax = plt.gca()
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['bottom'].set_visible(False)
+    ax.spines['left'].set_visible(False)
     os.makedirs(os.path.dirname(png_path), exist_ok=True)
     plt.tight_layout()
     plt.savefig(png_path, dpi=160)
@@ -585,8 +595,8 @@ def plot_boxplot_with_scatter(
         print("Warning: no data to plot")
         return
 
-    # Set seaborn style
-    sns.set_style("whitegrid")
+    # Set seaborn style (use "ticks" to avoid vertical grid lines)
+    sns.set_style("ticks")
     plt.figure(figsize=(7, 4))
 
     # Manually create box plot with 10th-90th percentiles
@@ -665,15 +675,21 @@ def plot_boxplot_with_scatter(
             zorder=10
         )
 
-    # Set x-axis labels and limits
-    ticks = list(range(0, 12))
-    plt.xticks(ticks, ticks)
-    plt.xlim(0.5, 10.5)
+    # Set x-axis from actual instance counts (no gaps: 1,2,...,11,49,50 etc.)
+    n = len(instance_labels)
+    positions = list(range(1, n + 1))
+    plt.xticks(positions, instance_labels)
+    plt.xlim(0.5, n + 0.5)
 
-    plt.xlabel("Number of consensus instances")
+    plt.xlabel("Number of parallel component protocol instances")
     plt.ylabel("Latency (ms)")
-    plt.yscale('log')
     plt.grid(True, linestyle=":", alpha=0.6, axis='y')
+    # Remove all axis spines
+    ax = plt.gca()
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['bottom'].set_visible(False)
+    ax.spines['left'].set_visible(False)
     os.makedirs(os.path.dirname(png_path), exist_ok=True)
     plt.tight_layout()
     plt.savefig(png_path, dpi=160)
@@ -711,8 +727,8 @@ def plot_boxplot_with_mean_and_scatter(
         print("Warning: no data to plot")
         return
 
-    # Set seaborn style
-    sns.set_style("whitegrid")
+    # Set seaborn style (use "ticks" to avoid vertical grid lines)
+    sns.set_style("ticks")
     plt.figure(figsize=(7, 4))
 
     # Manually create box plot with 10th-90th percentiles
@@ -804,16 +820,22 @@ def plot_boxplot_with_mean_and_scatter(
             zorder=11
         )
 
-    # Set x-axis labels and limits
-    ticks = list(range(0, 12))
-    plt.xticks(ticks, ticks)
-    plt.xlim(0.5, 10.5)
+    # Set x-axis from actual instance counts (no gaps: 1,2,...,11,49,50 etc.)
+    n = len(instance_labels)
+    positions = list(range(1, n + 1))
+    plt.xticks(positions, instance_labels)
+    plt.xlim(0.5, n + 0.5)
 
-    plt.xlabel("Number of consensus instances")
+    plt.xlabel("Number of parallel component protocol instances")
     plt.ylabel("Latency (ms)")
-    plt.yscale('log')
     plt.legend(loc='best')
     plt.grid(True, linestyle=":", alpha=0.6, axis='y')
+    # Remove all axis spines
+    ax = plt.gca()
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['bottom'].set_visible(False)
+    ax.spines['left'].set_visible(False)
     os.makedirs(os.path.dirname(png_path), exist_ok=True)
     plt.tight_layout()
     plt.savefig(png_path, dpi=160)
