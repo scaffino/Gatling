@@ -44,10 +44,16 @@ fi
 # Initialize IPs array
 declare -a DROPLET_IPS=()
 
-# Create a droplet in each region
-for region in "${REGIONS[@]}"; do
-  echo "Creating droplet in region: $region"
-  doctl compute droplet create "gatling-${region}" \
+# Create 50 droplets across existing regions
+TOTAL_DROPLETS=10
+REGION_COUNT=${#REGIONS[@]}
+
+for ((i=1; i<=TOTAL_DROPLETS; i++)); do
+  region=${REGIONS[$(( (i - 1) % REGION_COUNT ))]}
+  droplet_name="gatling-${region}-${i}"
+
+  echo "Creating droplet ${i}/${TOTAL_DROPLETS} in region: $region"
+  doctl compute droplet create "$droplet_name" \
     --region "$region" \
     --size s-2vcpu-2gb \
     --image ubuntu-22-04-x64 \
@@ -56,12 +62,12 @@ for region in "${REGIONS[@]}"; do
     --tag-name dev \
     --project-id "$PROJECT_ID" \
     --wait
-  
+
   # Get the IP address of the created droplet
-  DROPLET_IP=$(doctl compute droplet list "gatling-${region}" --format PublicIPv4 --no-header | head -n1 | tr -d ' ')
-  
+  DROPLET_IP=$(doctl compute droplet list "$droplet_name" --format PublicIPv4 --no-header | head -n1 | tr -d ' ')
+
   if [ -z "$DROPLET_IP" ]; then
-    echo "Warning: Could not retrieve IP address for droplet gatling-${region}"
+    echo "Warning: Could not retrieve IP address for droplet ${droplet_name}"
   else
     DROPLET_IPS+=("$DROPLET_IP")
     echo "✓ Droplet created in $region with IP: $DROPLET_IP"
