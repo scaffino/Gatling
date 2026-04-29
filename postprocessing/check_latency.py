@@ -37,7 +37,7 @@ except ImportError:
 # Input directory: where to read gatling log files from
 # This can be a relative path (from repo root) or absolute path
 # Default: "logs/gatling" (relative to repo root)
-INPUT_DIR = "logs/gatling-best"
+INPUT_DIR = "logs/gatling"
 
 # Output directory: where to write output files
 # This can be a relative path (from repo root) or absolute path

@@ -90,16 +90,15 @@ pub async fn start_server(
 /// Shared state for multi-consensus HTTP server
 #[derive(Clone)]
 pub struct MultiServerState {
-    mailboxes: Arc<Mutex<Vec<crate::application::Mailbox>>>,
+    mempool: std::sync::Arc<std::sync::Mutex<crate::application::mempool::Mempool>>,
     tx_broadcast_channel: Option<mpsc::UnboundedSender<Transaction>>,
 }
 
-/// Handle POST /transaction endpoint for multiple consensus instances
+/// Handle POST /transaction endpoint — adds the transaction to the shared mempool once.
 async fn submit_transaction_multi(
     State(state): State<MultiServerState>,
     body: Bytes,
 ) -> impl IntoResponse {
-    // Decode transaction
     let tx = match Transaction::decode(body.as_ref()) {
         Ok(tx) => tx,
         Err(e) => {
@@ -108,58 +107,32 @@ async fn submit_transaction_multi(
         }
     };
 
-    // Get transaction identifier before moving tx
     let tx_id = tx.digest();
     let tx_timestamp = tx.timestamp;
 
-    // Verify signature
     if !tx.verify() {
         error!(tx_id = ?tx_id, "Invalid transaction signature");
         return (StatusCode::BAD_REQUEST, "Invalid signature");
     }
 
-    // Submit to ALL consensus instances' mempools
-    let mut mailboxes = state.mailboxes.lock().await;
-    let mut submitted_count = 0;
-    for (idx, mailbox) in mailboxes.iter_mut().enumerate() {
-        match mailbox.submit_transaction(tx.clone()).await {
-            Ok(_) => {
-                submitted_count += 1;
-                info!("[consensus_{}] Transaction {:?} (timestamp: {} ms) submitted to mempool via HTTP", 
-                      idx + 1, tx_id, tx_timestamp);
-            }
-            Err(e) => {
-                error!(
-                    tx_id = ?tx_id,
-                    consensus_id = idx + 1,
-                    error = %e,
-                    "Failed to submit transaction"
-                );
-            }
-        }
-    }
-    
-    if submitted_count == 0 {
-        return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to submit to any consensus");
-    }
+    state.mempool.lock().unwrap().add(tx.clone());
+    info!(tx_id = ?tx_id, timestamp = tx_timestamp, "Transaction submitted to shared mempool via HTTP");
 
-    // Send to broadcast task if available
     if let Some(broadcast_tx) = &state.tx_broadcast_channel {
         let _ = broadcast_tx.unbounded_send(tx);
     }
-    
+
     (StatusCode::OK, "Transaction accepted")
 }
 
-/// Start the HTTP server for transaction submission (multiple consensus instances)
+/// Start the HTTP server for transaction submission (shared-mempool path).
 pub async fn start_server_multi(
     addr: SocketAddr,
-    mailboxes: Vec<crate::application::Mailbox>,
+    mempool: std::sync::Arc<std::sync::Mutex<crate::application::mempool::Mempool>>,
     tx_broadcast_channel: Option<mpsc::UnboundedSender<Transaction>>,
 ) -> Result<(), std::io::Error> {
-    let instances_count = mailboxes.len();
     let state = MultiServerState {
-        mailboxes: Arc::new(Mutex::new(mailboxes)),
+        mempool,
         tx_broadcast_channel,
     };
 
@@ -167,7 +140,7 @@ pub async fn start_server_multi(
         .route("/transaction", post(submit_transaction_multi))
         .with_state(state);
 
-    info!(?addr, instances = instances_count, "Starting transaction HTTP server for multiple consensus instances");
+    info!(?addr, "Starting transaction HTTP server");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await

@@ -23,7 +23,7 @@ use futures::future::try_join_all;
 use governor::clock::Clock as GClock;
 use governor::Quota;
 use rand::{CryptoRng, Rng};
-use std::{num::NonZero, sync::{Arc, atomic::AtomicU64}, time::Duration};
+use std::{num::NonZero, sync::{Arc, Mutex, atomic::AtomicU64}, time::Duration};
 use tracing::{error, warn};
 
 /// Event sent to the gatling thread when a block is finalized.
@@ -107,6 +107,9 @@ pub struct Config<B: Blocker<PublicKey = PublicKey>, I: Indexer> {
 
     /// Genesis timestamp in seconds
     pub genesis_timestamp_secs: u64,
+
+    /// Shared mempool — all consensus instances on this validator read from one pool.
+    pub shared_mempool: Arc<Mutex<crate::application::mempool::Mempool>>,
 }
 
     /// The engine that drives the [application].
@@ -180,8 +183,9 @@ impl<
                 genesis_timestamp_secs: cfg.genesis_timestamp_secs,
                 ancestor_fetch_concurrent: cfg.ancestor_fetch_concurrent,
                 ancestor_fetch_rate_per_peer: cfg.ancestor_fetch_rate_per_peer,
+                shared_mempool: cfg.shared_mempool,
             },
-        ); 
+        );
 
         // Spawn per-instance buffer task if enabled
         if let (Some(buffer_rx), Some(g_tx)) = (buffer_rx_opt, gatling_sender_opt) {

@@ -17,8 +17,8 @@ else
 fi
 
 # Get SSH key IDs by name
-SSH_KEY_1=$(doctl compute ssh-key list --format ID,Name --no-header | grep "my-key" | awk '{print $1}')
-SSH_KEY_2=$(doctl compute ssh-key list --format ID,Name --no-header | grep "another-key" | awk '{print $1}')
+SSH_KEY_1=$(doctl compute ssh-key list --format ID,Name --no-header | grep "giuliascaf" | awk '{print $1}')
+SSH_KEY_2=$(doctl compute ssh-key list --format ID,Name --no-header | grep "jneu-key-2025-05-22" | awk '{print $1}')
 SSH_KEYS="${SSH_KEY_1},${SSH_KEY_2}"
 
 # Get project ID by name
@@ -49,7 +49,7 @@ for region in "${REGIONS[@]}"; do
   echo "Creating droplet in region: $region"
   doctl compute droplet create "gatling-${region}" \
     --region "$region" \
-    --size s-2vcpu-2gb \
+    --size s-8vcpu-16gb \
     --image ubuntu-22-04-x64 \
     --ssh-keys "$SSH_KEYS" \
     --user-data-file "$SETUP_YAML" \

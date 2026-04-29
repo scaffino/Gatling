@@ -67,9 +67,10 @@ mod tests {
     use std::{
         collections::{HashMap, HashSet},
         num::NonZeroU32,
-        sync::{Arc, atomic::AtomicU64},
+        sync::{Arc, Mutex, atomic::AtomicU64},
         time::Duration,
     };
+    use application::mempool::Mempool;
     use tracing::info;
 
     /// Limit the freezer table size to 1MB because the deterministic runtime stores
@@ -236,6 +237,7 @@ mod tests {
                     lag_threshold: 1,
                     total_instances: 1,
                     genesis_timestamp_secs: 0,
+                    shared_mempool: Arc::new(Mutex::new(Mempool::new(context.with_label("mempool")))),
                 };
                 let engine = Engine::new(context.with_label(&uid), config).await;
 
@@ -423,6 +425,7 @@ mod tests {
                     lag_threshold: 1,
                     total_instances: 1,
                     genesis_timestamp_secs: 0,
+                    shared_mempool: Arc::new(Mutex::new(Mempool::new(context.with_label("mempool")))),
                 };
                 let engine = Engine::new(context.with_label(&uid), config).await;
 
@@ -521,6 +524,7 @@ mod tests {
                 lag_threshold: 1,
                 total_instances: 1,
                 genesis_timestamp_secs: 0,
+                shared_mempool: Arc::new(Mutex::new(Mempool::new(context.with_label("mempool")))),
             };
             let engine = Engine::new(context.with_label(&uid), config).await;
 
@@ -669,6 +673,7 @@ mod tests {
                         lag_threshold: 1,
                         total_instances: 1,
                         genesis_timestamp_secs: 0,
+                        shared_mempool: Arc::new(Mutex::new(Mempool::new(context.with_label("mempool")))),
                     };
                     let engine = Engine::new(context.with_label(&uid), config).await;
 
@@ -843,6 +848,8 @@ mod tests {
                     max_fetch_size: 1024 * 512,
                     fetch_concurrent: 10,
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(10).unwrap()),
+                    ancestor_fetch_concurrent: 4,
+                    ancestor_fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(10).unwrap()),
                     indexer: Some(indexer.clone()),
                     proposal_offset_ms: 0,
                     gatling_tx: None,
@@ -851,6 +858,7 @@ mod tests {
                     lag_threshold: 1,
                     total_instances: 1,
                     genesis_timestamp_secs: 0,
+                    shared_mempool: Arc::new(Mutex::new(Mempool::new(context.with_label("mempool")))),
                 };
                 let engine = Engine::new(context.with_label(&uid), config).await;
 

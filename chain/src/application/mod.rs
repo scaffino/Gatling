@@ -11,7 +11,7 @@ mod ingress;
 pub use ingress::{FinalizationPusher, Mailbox};
 pub mod mempool;
 
-use std::sync::{Arc, atomic::AtomicU64};
+use std::sync::{Arc, Mutex, atomic::AtomicU64};
 
 /// Configuration for the application.
 pub struct Config {
@@ -64,4 +64,7 @@ pub struct Config {
     pub ancestor_fetch_concurrent: usize,
     /// Rate limit per peer for ancestor fetching
     pub ancestor_fetch_rate_per_peer: governor::Quota,
+
+    /// Shared mempool — all consensus instances on this validator read from and write to the same pool.
+    pub shared_mempool: Arc<Mutex<mempool::Mempool>>,
 }

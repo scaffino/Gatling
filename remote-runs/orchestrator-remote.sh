@@ -20,16 +20,23 @@ MIN_INSTANCES="${MIN_INSTANCES:-1}"
 MAX_INSTANCES="${MAX_INSTANCES:-10}"
 RUNS_PER_INSTANCE="${RUNS_PER_INSTANCE:-1}"
 
+# Explicit consensus instances sweep (space or comma separated).
+# If set (or left as default), MIN_INSTANCES/MAX_INSTANCES are ignored.
+# Examples:
+#   INSTANCES="1 5 10 20 30 40 50 60" ./remote-runs/orchestrator-remote.sh
+#   INSTANCES="1,5,10,20" ./remote-runs/orchestrator-remote.sh
+INSTANCES="${INSTANCES:-1 10 20 30 40 50 60}"
+
 # Number of validators
 V="${V:-10}"
 
 # Transaction submission parameters (built into validators via --submit-tx)
-SUBMIT_TX_RATE="${SUBMIT_TX_RATE:-0.2}"        # Transactions per second
-SUBMIT_TX_START="${SUBMIT_TX_START:-500}"      # Start delay in seconds after genesis
-SUBMIT_TX_DURATION="${SUBMIT_TX_DURATION:-600}"  # Duration in seconds
+SUBMIT_TX_RATE="${SUBMIT_TX_RATE:-500}"        # Transactions per second
+SUBMIT_TX_START="${SUBMIT_TX_START:-600}"      # Start delay in seconds after genesis
+SUBMIT_TX_DURATION="${SUBMIT_TX_DURATION:-900}"  # Duration in seconds
 
 # Per-run wall clock (seconds)
-RUN_DURATION_SECONDS="${RUN_DURATION_SECONDS:-750}"
+RUN_DURATION_SECONDS="${RUN_DURATION_SECONDS:-1200}"
 SETTLE_SECONDS="${SETTLE_SECONDS:-4}"
 
 # SSH/SCP options
@@ -164,12 +171,13 @@ Usage: $(basename "$0") [options]
 
 Options:
   -t, --duration SECONDS    Max run time per experiment before kill (default: ${RUN_DURATION_SECONDS})
+      --instances LIST      Explicit instances list (comma/space separated). Overrides min/max.
       --min-instances N     Min consensus instances to start from (default: ${MIN_INSTANCES})
       --max-instances N     Max consensus instances to sweep (default: ${MAX_INSTANCES})
       --runs-per-instance N Number of runs per instance (default: ${RUNS_PER_INSTANCE})
 
 You can also set environment variables:
-  RUN_DURATION_SECONDS, MIN_INSTANCES, MAX_INSTANCES, RUNS_PER_INSTANCE, 
+  RUN_DURATION_SECONDS, INSTANCES, MIN_INSTANCES, MAX_INSTANCES, RUNS_PER_INSTANCE,
   SUBMIT_TX_RATE, SUBMIT_TX_START, SUBMIT_TX_DURATION, etc.
 EOF
 }
@@ -181,6 +189,11 @@ parse_args() {
         shift
         [[ $# -gt 0 ]] || { err "Missing value for --duration"; exit 2; }
         RUN_DURATION_SECONDS="$1"
+        ;;
+      --instances)
+        shift
+        [[ $# -gt 0 ]] || { err "Missing value for --instances"; exit 2; }
+        INSTANCES="$1"
         ;;
       --min-instances)
         shift
@@ -609,16 +622,39 @@ main() {
   # Parse CLI overrides
   parse_args "$@"
   
-  # Validate instance range
-  if [[ ${MIN_INSTANCES} -lt 1 ]]; then
-    fatal "MIN_INSTANCES must be >= 1, got ${MIN_INSTANCES}"
+  # Build instances sweep:
+  # - If INSTANCES is non-empty, use it (comma/space separated).
+  # - Otherwise, fall back to MIN_INSTANCES..MAX_INSTANCES.
+  local instances_list=()
+  if [[ -n "${INSTANCES:-}" ]]; then
+    local inst
+    while IFS= read -r inst; do
+      [[ -z "${inst}" ]] && continue
+      instances_list+=("${inst}")
+    done < <(printf '%s' "${INSTANCES}" | tr ',[:space:]' '\n' | sed '/^$/d')
+  else
+    # Validate instance range
+    if [[ ${MIN_INSTANCES} -lt 1 ]]; then
+      fatal "MIN_INSTANCES must be >= 1, got ${MIN_INSTANCES}"
+    fi
+    if [[ ${MAX_INSTANCES} -lt ${MIN_INSTANCES} ]]; then
+      fatal "MAX_INSTANCES (${MAX_INSTANCES}) must be >= MIN_INSTANCES (${MIN_INSTANCES})"
+    fi
+    local i
+    for i in $(seq "${MIN_INSTANCES}" "${MAX_INSTANCES}"); do
+      instances_list+=("${i}")
+    done
   fi
-  if [[ ${MAX_INSTANCES} -lt ${MIN_INSTANCES} ]]; then
-    fatal "MAX_INSTANCES (${MAX_INSTANCES}) must be >= MIN_INSTANCES (${MIN_INSTANCES})"
-  fi
+
+  [[ ${#instances_list[@]} -gt 0 ]] || fatal "No instances specified (set INSTANCES or min/max)."
+  local i
+  for i in "${instances_list[@]}"; do
+    [[ "${i}" =~ ^[0-9]+$ ]] || fatal "Invalid instance value '${i}' (must be integer)."
+    [[ "${i}" -ge 1 ]] || fatal "Invalid instance value '${i}' (must be >= 1)."
+  done
   
   log "Run duration per experiment: ${RUN_DURATION_SECONDS}s"
-  log "Instance range: ${MIN_INSTANCES} to ${MAX_INSTANCES}"
+  log "Instances sweep: ${instances_list[*]}"
 
   # Clear log directory on all VMs once at the beginning (parallel)
   log "Clearing log directory on all VMs at start..."
@@ -629,7 +665,7 @@ main() {
   wait 2>/dev/null || true
 
   local instances run_idx
-  for instances in $(seq "${MIN_INSTANCES}" "${MAX_INSTANCES}"); do
+  for instances in "${instances_list[@]}"; do
     for run_idx in $(seq 1 "${RUNS_PER_INSTANCE}"); do
       log "===== RUN START: instances=${instances}, run=${run_idx} ====="
       export CONSENSUS_INSTANCES="${instances}"

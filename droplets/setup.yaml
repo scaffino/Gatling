@@ -10,6 +10,7 @@ packages:
   - libssl-dev
   - build-essential
   - curl
+  - chrony
 
 write_files:
   - path: /root/setup-script.sh
@@ -34,6 +35,11 @@ write_files:
       # Ensure tools present (already installed via packages, but safe if image differs)
       apt-get update -y
       apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev curl git
+
+      # Keep time in sync (important for timestamp-based measurements)
+      apt-get install chrony
+      systemctl enable chrony
+      systemctl start chrony
 
       # Verify gcc
       command -v gcc >/dev/null

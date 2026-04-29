@@ -224,6 +224,8 @@ pub struct Actor<R: Rng + CryptoRng + Spawner + Metrics + Clock> {
     ancestor_fetch_rate_per_peer: governor::Quota,
     // Participants for peer selection
     participants: Vec<commonware_cryptography::ed25519::PublicKey>,
+    // Shared mempool for all consensus instances on this validator
+    mempool: Arc<Mutex<Mempool>>,
 }
 
 impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
@@ -285,6 +287,7 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                 ancestor_fetch_concurrent: config.ancestor_fetch_concurrent,
                 ancestor_fetch_rate_per_peer: config.ancestor_fetch_rate_per_peer,
                 participants: config.participants.clone(),
+                mempool: config.shared_mempool,
             },
             Supervisor::new(config.polynomial, config.participants, config.share),
             Mailbox::new(sender),
@@ -440,9 +443,6 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
             }
         });
         
-        // Initialize mempool (wrapped in Arc<Mutex<>> to allow access from spawned tasks)
-        let mempool = Arc::new(Mutex::new(Mempool::new(self.context.with_label("mempool"))));
-        
         while let Some(message) = self.mailbox.next().await {
             match message {
                 Message::Genesis { response } => {
@@ -458,7 +458,7 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                     // First pickup: Collect transactions from mempool immediately
                     let mut transactions = Vec::new();
                     {
-                        let mut mempool_guard = mempool.lock().unwrap();
+                        let mut mempool_guard = self.mempool.lock().unwrap();
                         while transactions.len() < MAX_BLOCK_TRANSACTIONS {
                             if let Some(tx) = mempool_guard.next() {
                                 transactions.push(tx);
@@ -478,7 +478,7 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
 
                     // Wait for the parent block to be available or the request to be cancelled in a separate task (to
                     // continue processing other messages)
-                    let mempool_clone = mempool.clone();
+                    let mempool_clone = self.mempool.clone();
                     let initial_tx_count_clone = initial_tx_count;
                     self.context.with_label("propose").spawn({
                         let built = built.clone();
@@ -1130,7 +1130,7 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                 Message::SubmitTransaction { transaction } => {
                     // Verify transaction signature before adding to mempool
                     if transaction.verify() {
-                        mempool.lock().unwrap().add(transaction);
+                        self.mempool.lock().unwrap().add(transaction);
                         debug!("transaction added to mempool");
                     } else {
                         warn!("rejected invalid transaction");

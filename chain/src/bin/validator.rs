@@ -1,4 +1,4 @@
-use alto_chain::{engine, http_server, Config, Peers};
+use alto_chain::{application::mempool::Mempool, engine, http_server, Config, Peers};
 use alto_client::Client;
 use alto_types::{Transaction, NAMESPACE};
 use clap::{Arg, Command};
@@ -22,7 +22,7 @@ use std::{
     num::NonZeroU32,
     path::PathBuf,
     str::FromStr,
-    sync::{Arc, atomic::AtomicU64},
+    sync::{Arc, Mutex, atomic::AtomicU64},
     time::Duration,
 };
 use tracing::{error, info, warn, Level};
@@ -531,6 +531,10 @@ fn main() {
             indexer = Some(Client::new(&uri, identity));
         }
         
+        // Create shared mempool — one pool for all K consensus instances on this validator.
+        // Transactions are added once; each instance pulls up to MAX_BLOCK_TRANSACTIONS per proposal.
+        let shared_mempool = Arc::new(Mutex::new(Mempool::new(context.with_label("mempool"))));
+
         // Create shared state for tracking the highest view reached by each consensus instance
         // This allows instances to detect if they're lagging and skip their scheduled wait time
         let instance_views: Arc<Vec<AtomicU64>> = Arc::new(
@@ -597,6 +601,7 @@ fn main() {
                 genesis_timestamp_secs: config.genesis_timestamp,
                 ancestor_fetch_concurrent: ANCESTOR_FETCH_CONCURRENT,
                 ancestor_fetch_rate_per_peer: resolver_limit,
+                shared_mempool: shared_mempool.clone(),
             };
             let engine = engine::Engine::new(
                 context.with_label(&format!("consensus_{}", chain_id)), 
@@ -605,12 +610,6 @@ fn main() {
             consensus_engines.push(engine);
         }
         
-        // Collect all application mailboxes for transaction distribution
-        let all_mailboxes: Vec<_> = consensus_engines
-            .iter()
-            .map(|e| e.application_mailbox().clone())
-            .collect();
-
         // Create channel for broadcasting transactions (only if gossip is enabled)
         let broadcast_channel = if gossip_enabled {
             Some(futures::channel::mpsc::unbounded())
@@ -620,7 +619,7 @@ fn main() {
 
         // Start submit-tx task if configured
         let submit_tx_task = if let Some((rate, start_delay, duration)) = submit_tx_config {
-            let mut mailboxes = all_mailboxes.clone();
+            let submit_mempool = shared_mempool.clone();
             let signer_clone = signer.clone();
             let receiver = public_key.clone();
             let genesis = config.genesis_timestamp;
@@ -713,38 +712,18 @@ fn main() {
                     
                     let tx = Transaction::sign(&signer_clone, receiver.clone(), 1, timestamp);
                     let tx_id = tx.digest();
-                    
-                    // Submit to all mailboxes
-                    let mut submitted_count = 0;
-                    for (idx, mailbox) in mailboxes.iter_mut().enumerate() {
-                        match mailbox.submit_transaction(tx.clone()).await {
-                            Ok(_) => {
-                                submitted_count += 1;
-                            }
-                            Err(e) => {
-                                warn!(
-                                    tx_id = ?tx_id,
-                                    consensus_id = idx + 1,
-                                    error = %e,
-                                    "submit-tx: failed to submit transaction to mailbox"
-                                );
-                            }
-                        }
-                    }
-                    
+
+                    // Add to shared mempool once — all K consensus instances read from the same pool
+                    submit_mempool.lock().unwrap().add(tx.clone());
+
                     // Send to broadcast channel for gossip (if enabled)
                     if let Some(broadcast_tx) = &broadcast_tx_for_submit_tx {
                         let _ = broadcast_tx.unbounded_send(tx);
                     }
-                    
+
                     tx_count += 1;
-                    if tx_count % 100 == 0 || submitted_count < mailboxes.len() {
-                        info!(
-                            tx_count,
-                            submitted_count,
-                            total_mailboxes = mailboxes.len(),
-                            "submit-tx: generated transactions"
-                        );
+                    if tx_count % 100 == 0 {
+                        info!(tx_count, tx_id = ?tx_id, "submit-tx: generated transactions");
                     }
                 }
                 
@@ -765,13 +744,13 @@ fn main() {
             IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             config.transaction_port,
         );
-        let http_mailboxes = all_mailboxes.clone();
+        let http_mempool = shared_mempool.clone();
         let broadcast_tx_for_http = broadcast_channel.as_ref().map(|(tx, _)| tx.clone());
         let http_server = context.with_label("http_server").spawn(move |_| async move {
             if let Err(e) = http_server::start_server_multi(
-                transaction_addr, 
-                http_mailboxes, 
-                broadcast_tx_for_http
+                transaction_addr,
+                http_mempool,
+                broadcast_tx_for_http,
             ).await {
                 error!(?e, "HTTP server failed");
             }
@@ -804,37 +783,22 @@ fn main() {
             gossip_tasks.push(tx_broadcast_task);
             
             // Start background task to receive transactions from other validators
-            // Distribute to ALL consensus instances' mempools
-            let mut gossip_mailboxes = all_mailboxes.clone();
+            let gossip_mempool = shared_mempool.clone();
             let tx_gossip_task = context.with_label("tx_gossip").spawn(move |_| async move {
                 use commonware_codec::DecodeExt;
                 use alto_types::Transaction;
                 use commonware_cryptography::Digestible;
                 use commonware_p2p::Receiver;
-                use tracing::{info, warn};
-                
+                use tracing::{debug, warn};
+
                 loop {
                     match tx_receiver.recv().await {
                         Ok((_, tx_bytes)) => {
-                            // Decode the transaction
                             match Transaction::decode(tx_bytes.as_ref()) {
                                 Ok(tx) => {
                                     let tx_id = tx.digest();
-                                    // Submit to ALL consensus instances' mempools
-                                    for (idx, mailbox) in gossip_mailboxes.iter_mut().enumerate() {
-                                        match mailbox.submit_transaction(tx.clone()).await {
-                                            Ok(_) => info!(
-                                                "[consensus_{}] Transaction {:?} received from peer and added to mempool",
-                                                idx + 1, tx_id
-                                            ),
-                                            Err(e) => warn!(
-                                                tx_id = ?tx_id, 
-                                                consensus_id = idx + 1,
-                                                error = %e, 
-                                                "Failed to add peer transaction to mempool"
-                                            ),
-                                        }
-                                    }
+                                    gossip_mempool.lock().unwrap().add(tx);
+                                    debug!(tx_id = ?tx_id, "received transaction from peer, added to shared mempool");
                                 }
                                 Err(e) => warn!(error = ?e, "Failed to decode transaction from peer"),
                             }
