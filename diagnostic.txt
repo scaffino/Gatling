@@ -1,0 +1,870 @@
+GATLING EVALUATION — LATENCY NON-MONOTONICITY DIAGNOSTIC
+=========================================================
+Date: 2026-04-28
+Examined: Gatling/chain/src/bin/validator.rs, engine.rs, application/actor.rs,
+          postprocessing/generate_csv.py, remote-runs/orchestrator-remote.sh,
+          droplets/create.sh, droplets/setup.yaml,
+          logs/gatling/gatling-1-20/stats.csv,
+          logs/gatling/gatling-30-50/stats.csv,
+          and sampled log files for K=1,10,20,30,40,50.
+
+OBSERVED SYMPTOM
+----------------
+Running 10 validators on DigitalOcean droplets (s-2vcpu-2gb) with varying
+numbers of consensus instances K gives non-monotone average latency:
+
+  K=1   avg=25611ms  median=19081ms  unique_txs=128084
+  K=10  avg= 5661ms  median= 3233ms  unique_txs=127218
+  K=20  avg= 6876ms  median= 5622ms  unique_txs= 44846   <- worse than K=10
+  K=30  avg= 1259ms  median=  974ms  unique_txs= 28062
+  K=40  avg= 2217ms  median= 1353ms  unique_txs= 23615   <- worse than K=30
+  K=50  avg= 7689ms  median= 6897ms  unique_txs= 19090   <- worse than K=10
+
+The expected trend is strictly decreasing (more instances = lower inter-proposal
+time = lower latency). It is not observed. The causes are below.
+
+
+ROOT CAUSE 1 — CURSOR STALL (dominant issue)
+----------------------------------------------
+The Gatling ordering thread advances a cursor through (view, instance) pairs in
+lexicographic order. At position (v, k) the cursor BLOCKS if instance k has
+neither a block for view v nor any finalized block beyond view v to prove it
+skipped that view. One lagging instance freezes the cursor for all subsequent
+positions and prevents any further [gatling] log lines from being emitted for
+the rest of the run.
+
+Evidence from logs — max view reached per instance when gatling output stopped:
+
+  K=20:  instances 1-18 reached view 276; instances 19-20 only reached 275.
+         Cursor stalled at (view=276, inst=18) (0-based). Gatling output stopped
+         at T+745s into the run, even though validators ran until T+1200s.
+         The remaining ~455s of blocks were never logged.
+
+  K=30:  instances 1-26 reached view 248; instances 27-30 only reached 247.
+         Cursor stalled at (view=248, inst=26). Gatling output stopped at T+605s.
+
+  K=40:  instances 1-15 reached view 241; instances 16-40 reached only 239-240.
+         Cursor stalled at (view=241, inst=15). Gatling output stopped at T+626s.
+
+  K=50:  instances 1,4,5,7-10 reached view 231; instances 2,3,6 reached 230.
+         Cursor stalled early. Gatling output stopped at T+648s.
+
+Why the highest-numbered instances lag:
+The tproposal formula assigns instance k its proposal slot at:
+  tproposal(v, k) = genesis + v*3000 + (k-1)*3000/K  ms
+Instance K (the last one) occupies the LAST slot in each 3s window. On a
+2-vCPU machine running K concurrent consensus engines, the later instances are
+systematically delayed in processing messages. When they fall behind by even
+one view, the cursor stalls waiting for them, and the blockage compounds.
+
+Consequence for latency statistics:
+Because the stall cuts off the end of the experiment, generate_csv.py computes
+statistics over a truncated and biased sample. For K=20, only the first ~145s
+of the 600s transaction window is captured (after the cursor stalls, txs
+included in instances 19-20's blocks after view 275 are never reported). This
+biases the measured latency upward for K=20 relative to K=30, which happens to
+stall at a slightly better point in the load curve.
+
+Fix:
+Add a wall-clock timeout to the cursor. If the cursor has been waiting at
+(v, k) for longer than LEADER_TIMEOUT + NOTARIZATION_TIMEOUT (currently 25s),
+treat (v, k) as an empty gap and advance. This prevents one slow instance from
+blocking the global ordering indefinitely.
+
+  // In gatling_thread, None branch of the cursor loop:
+  None => {
+      // ... existing has_higher_view check ...
+      // NEW: also advance if we have been waiting too long
+      if waiting_since[cursor_instance].elapsed() > MAX_CURSOR_WAIT {
+          instance_queues[cursor_instance].insert(cursor_view, None);
+          advance_cursor(...);
+          continue;
+      }
+      break; // still waiting
+  }
+
+
+ROOT CAUSE 2 — UNDERPOWERED DROPLETS FOR HIGH K
+-------------------------------------------------
+Droplet spec: s-2vcpu-2gb (2 virtual CPUs, 2 GB RAM).
+
+Each validator runs K independent consensus engines. Each engine has:
+  - Its own tokio task set (application, buffer, marshal, consensus)
+  - 6 registered P2P network channels (600 channels total for K=50 per peer)
+  - Separate storage partitions (blocks + finalized freezer tables)
+
+Resource pressure by K:
+  K=1,10 : manageable; no stalls observed.
+  K=20   : CPU contention begins; 2 instances lag.
+  K=30   : 4 instances lag; clear saturation.
+  K=40   : 25 instances lag; severe saturation.
+  K=50   : nearly all instances lag; system is overwhelmed.
+
+On a saturated machine, consensus views take longer (LEADER_TIMEOUT=10s fires
+more often), blocks take longer to build, and the lagging instances never catch
+up before the cursor blocks them.
+
+Fix:
+Upgrade to at least 4 vCPU for K>=20, 8+ vCPU for K>=40.
+Rule of thumb: provision at least 0.2 dedicated vCPU per consensus instance.
+Alternatively, reduce the number of validators per machine (run fewer
+validators per droplet) so that each machine is not overloaded.
+
+
+ROOT CAUSE 3 — SEQUENTIAL GOSSIP MAILBOX INSERTION IS O(K)
+------------------------------------------------------------
+In validator.rs, every transaction (both locally generated and received via
+gossip) is forwarded to all K mempools with sequential .await calls:
+
+  // submit_tx task (validator.rs ~line 719):
+  for (idx, mailbox) in mailboxes.iter_mut().enumerate() {
+      mailbox.submit_transaction(tx.clone()).await;  // K sequential awaits
+  }
+
+  // tx_gossip task (validator.rs ~line 824):
+  for (idx, mailbox) in gossip_mailboxes.iter_mut().enumerate() {
+      mailbox.submit_transaction(tx.clone()).await;  // K sequential awaits
+  }
+
+For K=50, every incoming gossiped transaction triggers 50 sequential async
+mailbox operations. If any mailbox is slow (due to CPU starvation from other
+consensus engines), the gossip receive loop backs up. The P2P rate-limiter
+(transaction_limit = 256/s) then starts dropping transactions, reducing
+effective throughput and inflating latency.
+
+Fix:
+Replace sequential awaits with concurrent submission using join_all:
+
+  use futures::future::join_all;
+  let futs: Vec<_> = mailboxes
+      .iter_mut()
+      .map(|mb| mb.submit_transaction(tx.clone()))
+      .collect();
+  join_all(futs).await;
+
+
+ROOT CAUSE 4 — INCONSISTENT EFFECTIVE EXPERIMENT DURATION
+----------------------------------------------------------
+The experiment timing has three compounding problems that together leave only
+a tiny, K-dependent slice of the run measuring actual transaction latency.
+
+Problem (a): run_start_ts is set before genesis fires
+------------------------------------------------------
+setup.rs computes genesis_timestamp as:
+  genesis_timestamp = ((now_secs / 60) + 2) * 60
+which rounds up to the next 2-minute boundary — between 60 and 120 seconds in
+the future from when setup runs. The orchestrator then deploys configs, starts
+validators, and immediately sets run_start_ts:
+
+  start_validators "${instances}" "${run_idx}"
+  run_start_ts="$(date +%s)"          # set RIGHT HERE, genesis not yet fired
+  ...
+  remaining="$(( RUN_DURATION_SECONDS - elapsed ))"   # elapsed ≈ 0
+  sleep "${remaining}"
+  kill_everything
+
+Validators launched by start_validators() connect via SSH (background &), then
+execute "cargo run --release --bin validator" on the remote machine. The
+validator binary waits until genesis_timestamp before starting the tokio
+runtime. So the actual sequence on each remote machine is:
+
+  SSH connection arrives       → T=0   (run_start_ts ≈ T=0)
+  cargo checks/starts binary   → T~0s
+  validator waits for genesis  → T+60 to T+120s
+  genesis fires, runtime starts→ T+~120s  (first [gatling] line appears here)
+  validators killed            → T+1200s  (RUN_DURATION from run_start_ts)
+  effective consensus window   → 1200 - 120 = ~1080s
+
+The orchestrator kills validators at run_start_ts + 1200, but only ~1080s of
+that were actual consensus operation. 120 seconds are silently wasted.
+
+Problem (b): SUBMIT_TX_START=600s consumes most of the remaining window
+-----------------------------------------------------------------------
+Transactions are submitted starting at genesis + SUBMIT_TX_START seconds. With
+SUBMIT_TX_START=600, this is genesis + 600s = run_start + ~720s. The
+validators are killed at run_start + 1200s. The maximum possible TX window is:
+
+  1200 - 720 = 480 seconds
+
+At 20 tx/s per validator × 10 validators = 200 tx/s, that gives at most
+200 × 480 = 96,000 transactions if nothing else goes wrong. Compare this to
+K=1 and K=10 (which had no cursor stalls and no timing issues) where the TX
+window was effectively the same 480s — but those runs captured 127k and 127k
+txs respectively, consistent with 200 tx/s × ~635s. The discrepancy suggests
+K=1 and K=10 had a slightly smaller genesis offset (~0-60s) in that batch,
+giving a longer effective TX window.
+
+Problem (c): cursor stalls (Root Cause 1) shrink the TX window further
+----------------------------------------------------------------------
+The cursor stalls partway through the TX window, stopping all [gatling] output.
+Transactions included in blocks after the stall point are never reported.
+Cross-referencing the cursor stall timestamps with genesis + SUBMIT_TX_START:
+
+  K=20: genesis ≈ 15:12:30, TX start ≈ 15:22:30, last gatling line 15:32:34
+        → TX window captured: ~10 min = 600s, which is the FULL TX window
+        → BUT only 10 validators total: 7 reporting × 127k txs accounts for it
+        → Actually K=10 had full duration; K=20 stalled at T+745s from genesis
+        → TX start at genesis+600 = T+600; stall at T+745; TX captured = 145s
+        → 200 tx/s × 145s = 29k. Observed unique_txs = 44,846 (close enough,
+          some txs submitted before T+600 were already in mempools)
+
+  K=30: genesis ≈ 16:01:00, TX start = 16:11:00 (genesis+600)
+        last gatling line = 16:11:26; TX window captured = ~26s
+        but actual unique_txs = 28,062 ≈ 200 tx/s × ~140s
+        Reconciliation: genesis was actually ~15:59:00 (not 16:01:00),
+        putting TX start at ~16:09:00, which matches the first tx timestamp
+        in the logs (16:09:00.618). Stall at 16:11:26 → captured = ~146s.
+
+  K=40: TX captured ≈ 166s → unique_txs = 23,615 ≈ 200 × 118s (consistent)
+  K=50: TX captured ≈ 188s → unique_txs = 19,090 ≈ 200 × 95s (consistent)
+
+Summary: the effective TX measurement windows are:
+  K=1  : ~635s  (full window, no stall)
+  K=10 : ~635s  (full window, no stall)
+  K=20 : ~145s  (stall 145s into TX window)
+  K=30 : ~146s  (stall 146s into TX window)
+  K=40 : ~166s  (stall 166s into TX window)
+  K=50 : ~188s  (stall 188s into TX window)
+
+The K=20-50 values are all far shorter than K=1/10 AND they differ from each
+other. Each K value is sampling a different and non-representative slice of
+the transaction stream. Combined, this makes cross-K latency comparison
+meaningless without fixing the cursor stall first.
+
+Fix:
+Option A — measure run_start_ts at genesis, not at SSH start:
+  Set run_start_ts via a coordination signal once validators emit their first
+  consensus message, ensuring RUN_DURATION_SECONDS of actual consensus time.
+
+Option B — reduce SUBMIT_TX_START:
+  Change SUBMIT_TX_START from 600 to ~30-60 seconds (just enough for validators
+  to connect and reach first consensus). This gives ~1020s of TX activity
+  within the 1200s window even with a 120s genesis offset.
+
+Option C — increase RUN_DURATION:
+  Use RUN_DURATION_SECONDS=2400 to ensure sufficient TX activity even with
+  genesis delay, cursor stalls, and startup overhead.
+
+
+ROOT CAUSE 5 — TWO VALIDATORS PRODUCE NO OUTPUT (78-byte logs)
+---------------------------------------------------------------
+For K=30 and K=50, exactly 2 out of 10 validators emit a log file containing
+only a single line:
+  "2026-04-28T...Z [gatling] Gatling thread started for N instances"
+
+The file is 78 bytes. No block finalization, no transaction finalization. The
+gatling thread started but then produced nothing for the entire run.
+
+Mechanistic explanation:
+The gatling_thread waits on an UnboundedReceiver<GatlingEvent>. Events are
+sent via an UnboundedSender<GatlingEvent> inside each consensus engine's
+application actor, which fires on Message::Finalized. For an event to arrive,
+the following chain must complete:
+  1. Consensus reaches quorum for view v in instance k
+  2. The finalization proof is delivered to the application actor
+  3. The actor processes Message::Finalized and sends to buffer_tx
+  4. run_buffer receives the block and forwards a GatlingEvent to gatling_rx
+  5. gatling_thread receives the event and advances the cursor
+
+If step 1 never completes for instance 1 on these validators, no events are
+ever produced. The cursor sits at (view=1, inst=0) indefinitely.
+
+Why does step 1 fail for some validators?
+On a 2-vCPU machine launching K=30-50 consensus engines simultaneously, the
+startup phase is extremely CPU-intensive: each engine initializes its storage
+(opening freezer tables, replaying journals), registers P2P channels (6 per
+instance, up to 300 total), and enters the first consensus view. Under heavy
+resource pressure, some engines may:
+  - Fail to open their storage partition (I/O contention, 30-50 concurrent
+    freezer table opens)
+  - Miss the first view's LEADER_TIMEOUT (10s) because message processing is
+    delayed; the view is nullified before the engine is ready
+  - Fail to register their network channels before the P2P layer initialises,
+    causing them to miss incoming consensus messages entirely
+
+The 2/10 silent validators are likely those whose engines finished
+initializing latest (due to scheduler jitter) and missed the bootstrapping
+window for instance 1. With 8-vCPU machines (already planned), this pressure
+is greatly reduced and the problem may disappear entirely.
+
+Effect on latency statistics:
+generate_csv.py computes per-transaction average latency across all validators
+that report each transaction. For a transaction reported by 8/10 validators,
+the mean is taken over those 8. The 2 silent validators are systematically the
+slowest to initialize, suggesting they may also have been slowest to finalize
+transactions — meaning their latency values would likely be the highest. Their
+absence therefore biases the average downward, making K=30 and K=50 appear
+faster than they truly are. The effect is modest (2/10 validators absent) but
+it is a consistent directional bias.
+
+Fix:
+Add a readiness check in the orchestrator after start_validators: poll until
+all validators have emitted at least one [gatling] block finalization line
+before setting run_start_ts and starting the run timer. If any validator fails
+to become ready within a timeout, abort and retry the run rather than
+collecting biased data.
+
+
+MINOR ISSUE — DUPLICATE BLOCK SEND TO run_buffer
+-------------------------------------------------
+In actor.rs, when Message::Finalized is received, the block is forwarded to
+buffer_tx twice:
+  1. Inside the finalize_ancestors spawned task (actor.rs ~line 1052):
+       let _ = tx.unbounded_send(anc.clone());
+  2. In the main Finalized handler (actor.rs ~line 1102):
+       let _ = tx.unbounded_send(block.clone());
+
+The run_buffer's seen HashSet deduplicates them, but the double-send wastes
+CPU and memory bandwidth proportionally to block size × K. At K=50 with
+large blocks (up to MAX_BLOCK_TRANSACTIONS), this adds up. Not a correctness
+issue, but contributes to resource pressure.
+
+Fix:
+Remove one of the two sends. The main handler send at line 1102 is the
+correct one (the finalize_ancestors task's send was intended for ancestors
+only, not for the triggering block itself).
+
+
+SUMMARY OF FIXES BY PRIORITY
+------------------------------
+1. [Critical] Add cursor timeout in gatling_thread to prevent indefinite stall
+              on lagging instances.
+2. [Critical] Use larger droplets (4+ vCPU) for K>=20, or reduce validators
+              per machine.  [VM upgrade to 8 vCPU already planned]
+3. [High]     Parallelize mailbox submissions with join_all instead of
+              sequential .await in submit_tx and tx_gossip tasks.
+4. [High]     Fix experiment timing: measure run duration from genesis, not
+              from SSH start. Reduce SUBMIT_TX_START (e.g., to 30s) so that
+              most of the RUN_DURATION captures transaction activity.
+5. [Medium]   Add validator readiness check before starting the run timer.
+6. [Low]      Remove duplicate block forward to run_buffer in actor.rs.
+
+
+===========================================================================
+PROPOSED FIX PLANS (2026-04-29)
+===========================================================================
+
+FIX 1 — CURSOR STALL (validator.rs: gatling_thread)
+-----------------------------------------------------
+File: Gatling/chain/src/bin/validator.rs
+
+The cursor at (v, k) currently blocks indefinitely when instance k has no
+entry for view v and no higher view in its queue. Two options:
+
+  Option A — Wall-clock timeout per cursor position
+  --------------------------------------------------
+  Track when the cursor first got stuck at (cursor_view, cursor_instance).
+  On each new incoming event, check elapsed time. If it exceeds
+  LEADER_TIMEOUT + NOTARIZATION_TIMEOUT (25s, already defined as constants),
+  insert a None gap for that position and advance.
+
+  Rationale: 25s is the exact threshold after which the consensus protocol
+  itself would have timed out and moved on from a view. If the cursor has
+  been waiting longer than that, the view is dead by protocol definition.
+
+  Sketch:
+    // New field alongside the main data structures:
+    let mut cursor_stall_since: Option<std::time::Instant> = None;
+
+    // In the None => { ... break } arm:
+    None => {
+        let has_higher_view = instance_queues[cursor_instance]
+            .keys().any(|&v| v > cursor_view);
+        if has_higher_view {
+            // existing gap-fill logic
+        } else {
+            let stall_deadline = std::time::Duration::from_millis(
+                LEADER_TIMEOUT.as_millis() as u64
+                + NOTARIZATION_TIMEOUT.as_millis() as u64
+            );
+            let stuck_since = cursor_stall_since
+                .get_or_insert_with(std::time::Instant::now);
+            if stuck_since.elapsed() >= stall_deadline {
+                // Treat as empty gap, advance
+                instance_queues[cursor_instance].insert(cursor_view, None);
+                cursor_stall_since = None;
+                advance_cursor(&mut cursor_view, &mut cursor_instance,
+                               num_instances);
+                continue;
+            }
+            break;
+        }
+    }
+    // Reset stall timer whenever the cursor successfully advances:
+    // add `cursor_stall_since = None;` after each advance_cursor call
+    // in the Some(Some) and Some(None) arms.
+
+  Pro: semantically grounded; threshold is already a named constant.
+  Con: requires tracking one Instant; the 25s wait is real wall time during
+       which the cursor genuinely idles.
+
+  Option B — Use instance_views as the unblock signal
+  ----------------------------------------------------
+  instance_views[k] is already updated in actor.rs (Message::Finalized
+  handler, line ~1091) to track the latest finalized view for each instance.
+  If instance_views[k] > cursor_view, the instance has provably advanced past
+  cursor_view even though the block hasn't been consumed from the channel yet.
+  Consult this in the None arm before breaking:
+
+    None => {
+        let has_higher_view = /* existing */ ...;
+        if has_higher_view { /* existing */ }
+        else {
+            // NEW: check the shared view counter
+            let current_view = instance_views[cursor_instance]
+                .load(std::sync::atomic::Ordering::Relaxed);
+            if current_view > cursor_view {
+                instance_queues[cursor_instance].insert(cursor_view, None);
+                advance_cursor(...);
+                continue;
+            }
+            break;
+        }
+    }
+
+  Pro: zero-latency unblock — fires as soon as the instance advances,
+       not after a fixed timeout. No additional state needed.
+  Con: instance_views is updated in actor.rs after the block is sent to
+       buffer_tx; if the gatling channel is backed up, instance_views may
+       already be ahead while the queue still has blocks to deliver. This
+       could cause the cursor to mark a view as a gap when a block is
+       actually in flight. Need to verify ordering guarantees.
+
+  Recommendation: implement Option B as the primary signal (immediate
+  unblock), with Option A as a safety fallback (catches cases where
+  instance_views also stalls, e.g., if actor.rs itself is stuck).
+  Both can coexist: check instance_views first, fall through to the
+  timeout if that also fails.
+
+
+FIX 2 — SEQUENTIAL MAILBOX SUBMISSIONS (validator.rs)
+------------------------------------------------------
+File: Gatling/chain/src/bin/validator.rs
+Lines: ~719 (submit_tx task) and ~824 (tx_gossip task)
+
+Both loops do K sequential .await calls to submit one transaction to all K
+mempools. At K=50 this serializes 50 async operations per transaction.
+
+  Option A — join_all (recommended)
+  ----------------------------------
+  Replace each loop with:
+
+    // In submit_tx task (~line 719):
+    let submit_futs: Vec<_> = mailboxes
+        .iter_mut()
+        .map(|mb| mb.submit_transaction(tx.clone()))
+        .collect();
+    futures::future::join_all(submit_futs).await;
+
+    // In tx_gossip task (~line 824):
+    let submit_futs: Vec<_> = gossip_mailboxes
+        .iter_mut()
+        .map(|mb| mb.submit_transaction(tx.clone()))
+        .collect();
+    futures::future::join_all(submit_futs).await;
+
+  All K mailboxes receive the transaction concurrently. The total wait time
+  drops from O(K * slowest_mailbox) to O(slowest_mailbox).
+
+  Pro: minimal code change; correct behaviour preserved; errors per mailbox
+       can still be handled via the join_all result.
+  Con: does not reduce the total CPU cost (K clone+insert operations still
+       happen), only the serialization delay.
+
+  Option B — try_send (non-blocking, best-effort)
+  ------------------------------------------------
+  Use a non-blocking channel send. If a mailbox queue is full, drop the
+  transaction for that instance and log a warning.
+
+  Pro: gossip loop never stalls regardless of K or load.
+  Con: a transaction may be missing from some instances' mempools.
+       Acceptable only if latency is measured as the first finalization
+       across any instance, not as the average across all validators.
+       Not recommended for correctness-sensitive experiments.
+
+  Option C — single shared mempool (architectural)
+  -------------------------------------------------
+  Replace K separate Mempool instances with a single Arc<Mutex<Mempool>>.
+  Each consensus instance's Propose handler pulls from the shared pool,
+  marking or removing transactions as it does. Transaction submission
+  becomes O(1) regardless of K.
+
+  Pro: eliminates fan-out entirely; cleanest long-term architecture.
+  Con: most invasive change. Requires modifying application/actor.rs,
+       application/mempool.rs, and the Propose handler to handle concurrent
+       access. A "soft reservation" mechanism is needed to prevent two
+       instances from including the same transaction in the same view.
+
+  Recommendation: Option A immediately (one-line change per loop).
+  Option C is worth considering as a follow-up if K grows large.
+
+
+FIX 3 — EXPERIMENT TIMING (orchestrator-remote.sh + parameters)
+----------------------------------------------------------------
+Files: Gatling/remote-runs/orchestrator-remote.sh
+       Gatling/chain/src/bin/setup.rs  (Option A3 only)
+       Gatling/postprocessing/generate_csv.py  (Option C1/C2)
+Parameters: SUBMIT_TX_START, RUN_DURATION_SECONDS
+
+Three independent sub-problems, each with its own options:
+
+  Sub-problem (a): run_start_ts measured before genesis
+  ======================================================
+  The orchestrator today:
+
+    start_validators "${instances}" "${run_idx}"   # SSH & in background
+    run_start_ts="$(date +%s)"                     # <-- set immediately here
+    now_ts="$(date +%s)"
+    elapsed="$(( now_ts - run_start_ts ))"         # ≈ 0
+    remaining="$(( RUN_DURATION_SECONDS - elapsed ))"
+    sleep "${remaining}"
+    kill_everything
+
+  The validators launched by start_validators() need to:
+    (1) establish the SSH connection
+    (2) run cargo (already built, so this is fast)
+    (3) wait in a spin-sleep until genesis_timestamp fires (60-120s)
+    (4) initialize the tokio runtime and K consensus engines (~10-30s)
+
+  So the first consensus activity happens at run_start_ts + ~90-150s,
+  but the sleep ends at run_start_ts + 1200s, wasting 90-150s of budget.
+  Across experiments, the genesis offset varies depending on when exactly
+  setup ran (minutes round to the next 2-min boundary), meaning different
+  K values in the same sweep can have slightly different effective windows.
+
+  Option A1 — Capture genesis_timestamp from setup output and pad the sleep
+  ---------------------------------------------------------------------------
+  setup.rs already prints "genesis timestamp: <N>" to stdout. Capture it
+  during generate_configs() and compute how far in the future genesis is
+  relative to the moment validators are killed:
+
+    In generate_configs():
+      local setup_out
+      setup_out=$(cargo run --bin setup -- generate ... 2>&1)
+      echo "${setup_out}"
+      GENESIS_TS=$(echo "${setup_out}" | grep "genesis timestamp:" \
+                   | awk '{print $NF}')
+
+    Then in the run loop, after start_validators():
+      run_start_ts="$(date +%s)"
+      now_ts="$(date +%s)"
+      genesis_offset=$(( GENESIS_TS - now_ts ))
+      [[ ${genesis_offset} -lt 0 ]] && genesis_offset=0
+      # sleep long enough that validators are killed RUN_DURATION_SECONDS
+      # after genesis fires, not after SSH start
+      adjusted_remaining=$(( RUN_DURATION_SECONDS + genesis_offset \
+                              - (now_ts - run_start_ts) ))
+      log "genesis_offset=${genesis_offset}s; sleeping ${adjusted_remaining}s"
+      sleep "${adjusted_remaining}"
+
+  No validator code changes needed. The genesis_offset is computed once per
+  K value right after setup, before any deployment delay, so it is accurate
+  to within a few seconds.
+
+  Pro: orchestrator-only change; does not require any validator modifications;
+       corrects for variable genesis offset across different K runs.
+  Con: if deployment (scp + SSH startup) takes longer than expected and
+       genesis has already fired by the time validators start, genesis_offset
+       becomes negative and is clamped to 0, which is correct.
+
+  Option A2 — Poll remote logs until first consensus activity, then start timer
+  ------------------------------------------------------------------------------
+  After start_validators(), poll each remote validator's log file (via SSH)
+  until the string "[gatling] Validator" (first block finalization) appears.
+  Set run_start_ts only after ALL validators are confirmed active:
+
+    wait_for_first_block() {
+      local timeout=300
+      local deadline=$(( $(date +%s) + timeout ))
+      for idx in "${!REMOTE_HOSTS[@]}"; do
+        local host="${REMOTE_HOSTS[idx]}"
+        local log="${REMOTE_LOG_DIR}/val_${PUBLIC_KEYS[idx]}_i${instances}_r${run_idx}.log"
+        until remote_cmd "${host}" "grep -qF '[gatling] Validator' '${log}'" \
+              2>/dev/null; do
+          [[ $(date +%s) -gt ${deadline} ]] && return 1
+          sleep 3
+        done
+      done
+    }
+    wait_for_first_block || { err "validators not ready"; continue; }
+    run_start_ts="$(date +%s)"    # now precisely aligned to consensus start
+
+  This also solves Root Cause 5 (silent validators) simultaneously: if any
+  validator doesn't produce output within 300s, the run is aborted.
+
+  Pro: run_start_ts is exactly aligned to the moment all validators are
+       confirmed healthy and producing consensus output; doubles as a
+       readiness check.
+  Con: adds SSH polling overhead (one grep per validator every 3s); in the
+       worst case delays the timer by up to 5 minutes; requires that the
+       remote log file is being written in near-real-time (it is, via tee).
+
+  Option A3 — Pass genesis_timestamp explicitly via setup CLI
+  ------------------------------------------------------------
+  Add a --genesis-ts <UNIX_SECONDS> flag to setup.rs. The orchestrator
+  computes genesis = now + DEPLOY_BUDGET (e.g., 180s, enough for all VMs
+  to receive configs and start) and passes it explicitly:
+
+    now_ts=$(date +%s)
+    GENESIS_TS=$(( now_ts + 180 ))
+    cargo run --bin setup -- generate ... --genesis-ts "${GENESIS_TS}"
+
+  The orchestrator then sleeps until GENESIS_TS + RUN_DURATION_SECONDS,
+  regardless of when run_start_ts was set:
+
+    sleep_until=$(( GENESIS_TS + RUN_DURATION_SECONDS ))
+    sleep_for=$(( sleep_until - $(date +%s) ))
+    sleep "${sleep_for}"
+
+  Pro: complete orchestrator control over genesis timing; no polling; the
+       sleep is anchored to a known absolute time rather than elapsed offsets.
+  Con: requires a small change to setup.rs to accept --genesis-ts; if
+       DEPLOY_BUDGET is too short and some VMs haven't started before genesis,
+       those validators wait 0s and start immediately (harmless but may cause
+       the first view to start with fewer participants).
+
+  Recommendation: Option A1 for a quick fix with no code changes.
+  Option A3 if setup.rs is being modified anyway (cleanest long-term).
+  Option A2 if the readiness check (Fix 4) is being implemented anyway
+  (combines both fixes in one polling loop).
+
+  Sub-problem (b): SUBMIT_TX_START=600s consumes most of the available window
+  =============================================================================
+  Current budget breakdown (using Option A1 to correct the genesis offset):
+    RUN_DURATION_SECONDS = 1200s  (from genesis, after fix)
+    SUBMIT_TX_START      = 600s   (warm-up / allow consensus to stabilise)
+    Available TX window  = 1200 - 600 = 600s
+
+  600 seconds at 200 tx/s = 120k transactions. That would be adequate, but
+  SUBMIT_TX_DURATION=900s means tx generation is configured to run 300s past
+  the kill time. Those last 300s of submissions never get finalized. The
+  effective submission window is 600s, not 900s. The duration parameter is
+  currently misleading — it sets a ceiling that is never reached.
+
+  More importantly, with cursor stalls still possible (before Fix 1 is
+  deployed), the 600s effective window is reduced further. Even with Fix 1,
+  SUBMIT_TX_START=600s is large relative to how quickly consensus actually
+  stabilizes in practice (the logs show the first block is finalized within
+  ~55s of genesis for all K values).
+
+  Option B1 — Reduce SUBMIT_TX_START to 60s (recommended)
+  ---------------------------------------------------------
+  A 60s warm-up gives validators two full consensus view cycles (views take
+  ~3s each, so ~20 views) to stabilize before transactions begin. The first
+  blocks in the logs confirm this is sufficient: block 1 is finalized within
+  55s of genesis across all tested K values.
+
+  Change in orchestrator-remote.sh:
+    SUBMIT_TX_START="${SUBMIT_TX_START:-60}"
+
+  Budget after this change (with genesis offset corrected by Option A1):
+    Available TX window = 1200 - 60 = 1140s
+    Transactions        = 200 tx/s × 1140s = ~228k per K value
+
+  Also set SUBMIT_TX_DURATION to match, to avoid the misleading ceiling:
+    SUBMIT_TX_DURATION="${SUBMIT_TX_DURATION:-1140}"  # = RUN_DURATION - SUBMIT_TX_START
+
+  Pro: maximises usable TX window; no validator code change; consistent
+       with observed convergence time in the logs.
+  Con: the first ~60s of transactions may experience slightly higher latency
+       as mempools are filling for the first time, but this is negligible
+       relative to 1140s of steady-state data.
+
+  Option B2 — Increase RUN_DURATION_SECONDS to 2400
+  ---------------------------------------------------
+  Keep SUBMIT_TX_START=600s as a warm-up; double the run duration.
+  Available TX window = 2400 - 600 = 1800s → 360k transactions.
+  Drawback: each experiment takes 40 wall-clock minutes; a 6-value K sweep
+  takes ~4 hours plus setup/teardown time per run. Not recommended given
+  that Option B1 achieves comparable sample sizes in half the time.
+
+  Option B3 — Make SUBMIT_TX_START relative to validator launch, not genesis
+  ---------------------------------------------------------------------------
+  Redefine SUBMIT_TX_START as seconds after run_start_ts (validator launch),
+  not after genesis. Change validator.rs ~line 626:
+
+    // Current:
+    let start_time_secs = genesis + start_delay;
+    // Proposed:
+    let start_time_secs = run_start_ts_secs + start_delay;
+
+  where run_start_ts_secs would be passed via a new --run-start flag or an
+  environment variable set by the orchestrator. This makes the timing fully
+  orchestrator-controlled without parsing setup output.
+
+  Pro: removes the dependency on genesis_timestamp for TX scheduling.
+  Con: requires a validator code change; adds a new CLI parameter; the
+       semantics are less intuitive (why would tx submission be anchored
+       to SSH start rather than consensus start?).
+
+  Recommendation: Option B1, combined with aligning SUBMIT_TX_DURATION
+  to RUN_DURATION - SUBMIT_TX_START so it is always fully consumed.
+
+  Sub-problem (c): generate_csv.py has no knowledge of the measurement window
+  =============================================================================
+  Even after fixes A and B, generate_csv.py processes every transaction in
+  the log files without knowing which ones fall within the intended steady-
+  state measurement window. Transactions from the warm-up phase (before
+  SUBMIT_TX_START) or from near the kill boundary (partially propagated) may
+  appear in the stats with unusual latencies, adding noise.
+
+  Option C1 — Add --tx-window-start / --tx-window-end to generate_csv.py
+  -----------------------------------------------------------------------
+  Accept two optional arguments (Unix milliseconds). When provided, only
+  include transactions whose tx_ts_ms falls within [start, end]:
+
+    parser.add_argument("--tx-window-start", type=int, default=None,
+        help="Ignore txs created before this Unix ms timestamp")
+    parser.add_argument("--tx-window-end",   type=int, default=None,
+        help="Ignore txs created after this Unix ms timestamp")
+
+    # In parse_latency_occurrences:
+    if args.tx_window_start and tx_ts_ms < args.tx_window_start: continue
+    if args.tx_window_end   and tx_ts_ms > args.tx_window_end:   continue
+
+  The orchestrator computes and passes these values:
+    TX_START_MS=$(( (GENESIS_TS + SUBMIT_TX_START) * 1000 ))
+    TX_END_MS=$(( (GENESIS_TS + SUBMIT_TX_START + SUBMIT_TX_DURATION) * 1000 ))
+    python3 generate_csv.py --tx-window-start ${TX_START_MS} \
+                            --tx-window-end   ${TX_END_MS}
+
+  Pro: makes the measurement window explicit, reproducible, and identical
+       across all K values; eliminates noise from warm-up and kill-boundary
+       effects; easy to audit which transactions were included.
+  Con: requires GENESIS_TS to be available in the orchestrator at
+       postprocessing time (it is, if Option A1 or A3 is implemented).
+
+  Option C2 — Infer TX window from sentinel log lines in generate_csv.py
+  -----------------------------------------------------------------------
+  The validator already emits:
+    "submit-tx: starting transaction generation"
+    "submit-tx: finished transaction generation"
+  These appear in the full validator log (logs/validator/), not the gatling
+  log (logs/gatling/). generate_csv.py would need to be extended to also
+  read the validator logs to extract these timestamps, then use them as the
+  filter window.
+
+  Pro: fully self-contained; no orchestrator changes needed.
+  Con: couples generate_csv.py to the validator log format; requires
+       matching validator logs to gatling logs by public key; more complex.
+
+  Recommendation: Option C1. The orchestrator already has GENESIS_TS after
+  Option A1/A3, so passing the window to generate_csv.py is a one-liner.
+
+
+FIX 4 — SILENT VALIDATORS / READINESS CHECK (orchestrator-remote.sh)
+----------------------------------------------------------------------
+File: Gatling/remote-runs/orchestrator-remote.sh
+
+For K=30 and K=50, 2/10 validators never emit any block finalization.
+The run timer starts regardless, and generate_csv.py averages over the
+8 validators that do report, producing a biased sample.
+
+  Option A — Poll remote logs for readiness before starting the timer
+  -------------------------------------------------------------------
+  After start_validators(), add a wait_for_readiness() function:
+
+    wait_for_readiness() {
+      local timeout=300  # 5 minute ceiling
+      local deadline=$(( $(date +%s) + timeout ))
+      for idx in "${!REMOTE_HOSTS[@]}"; do
+        local host="${REMOTE_HOSTS[idx]}"
+        local log="${REMOTE_LOG_DIR}/val_${PUBLIC_KEYS[idx]}_i${instances}_r${run_idx}.log"
+        until remote_cmd "${host}" "grep -q 'finalized block' '${log}'" 2>/dev/null; do
+          if [[ $(date +%s) -gt ${deadline} ]]; then
+            err "Validator ${host} not ready after ${timeout}s — aborting run"
+            kill_everything
+            return 1
+          fi
+          sleep 5
+        done
+      done
+    }
+
+  Then call wait_for_readiness before setting run_start_ts. If it returns
+  non-zero, the run loop skips to the next iteration (or retries).
+
+  Pro: guarantees all validators are healthy before the run clock starts;
+       eliminates biased averages from silent validators.
+  Con: adds up to 5 minutes of startup overhead per run in the worst case;
+       requires SSH polling.
+
+  Option B — Post-hoc run validity check before log collection
+  ------------------------------------------------------------
+  After killing validators, before importing logs, check:
+    for each gatling log file: if size <= 100 bytes, mark run as INVALID
+  Log the failure, skip postprocessing for this K/run, and optionally
+  re-run automatically.
+
+  Pro: zero impact on run timing; simple to implement.
+  Con: wastes the entire RUN_DURATION before detecting failure; does not
+       prevent the biased timing issue if run_start_ts was set too early.
+
+  Option C — Health endpoint on validator
+  ----------------------------------------
+  Add a /ready HTTP endpoint to the validator's http_server.rs that returns
+  200 once at least one block has been finalized via the gatling thread. The
+  orchestrator polls this endpoint instead of the log file.
+
+  Pro: cleaner interface; reusable for other health checks.
+  Con: requires modifying http_server.rs and validator.rs.
+
+  Recommendation: Option A for immediate correctness. Option B as a
+  supplementary safety net to auto-detect and discard bad runs in the
+  postprocessing pipeline regardless.
+
+
+FIX 5 — DUPLICATE BLOCK SEND TO run_buffer (actor.rs)
+------------------------------------------------------
+File: Gatling/chain/src/application/actor.rs
+
+When Message::Finalized is received, the triggering block is forwarded to
+buffer_tx in two places:
+  1. finalize_ancestors task (~line 1052): sends ancestor blocks (height < block.height)
+  2. Main Finalized handler (~line 1102): sends the triggering block itself
+
+The run_buffer deduplicates via a seen HashSet, so there is no correctness
+issue. But the duplicate consumes CPU and channel bandwidth proportional to
+block size × K (at K=50 with large blocks, non-trivial).
+
+  Option A — Give finalize_ancestors ownership of the triggering block send
+  --------------------------------------------------------------------------
+  Append the triggering block to final_ancestors before the forwarding loop
+  (at the end of the finalize_ancestors task), then remove the send at line
+  1102 from the main Finalized handler entirely.
+
+    // In finalize_ancestors task, after reversing:
+    final_ancestors.push(block_clone_for_log.clone()); // append triggering block
+
+    // Then the existing loop sends all of them including the trigger.
+    // Remove line 1102 from the main handler.
+
+  Pro: single ownership; no duplication; no behaviour change.
+  Con: slightly more invasive — need to ensure block_clone_for_log is in
+       scope in the finalize_ancestors task (it already is).
+
+  Option B — Remove the send from finalize_ancestors, keep main handler
+  ----------------------------------------------------------------------
+  The main handler's send at line 1102 already covers the triggering block.
+  The finalize_ancestors task's send at line 1052 was intended only for
+  ancestor blocks. If final_ancestors never contains the triggering block
+  (it doesn't — it's built from start_parent upward, not including block),
+  then the loop at line 1048-1078 never duplicates it. The duplicate comes
+  from a separate unconditional send in the main handler at 1102 AND the
+  fact that the same block can appear in final_ancestors if the ancestor
+  traversal logic wraps around.
+  Simply remove the buffer_tx send inside finalize_ancestors entirely and
+  let the main handler's send at 1102 cover the triggering block.
+  Add explicit ancestor-only sends in finalize_ancestors for actual
+  ancestors (height < triggering block height).
+
+  Pro: clear separation of concerns.
+  Con: requires careful audit that no ancestor is missed.
+
+  Recommendation: Option B is the safest. Audit that final_ancestors
+  contains only blocks with height < block.height, then remove the
+  buffer_tx send from finalize_ancestors. The main handler covers the
+  triggering block; the ancestor task should not send anything to
+  buffer_tx at all (the run_buffer processes blocks in height order
+  anyway, so ancestors arriving later via this path are redundant once
+  the triggering block's height is the next expected one).
