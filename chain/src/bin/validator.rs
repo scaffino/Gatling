@@ -343,19 +343,6 @@ fn main() {
     let signer = PrivateKey::decode(key.as_ref()).expect("Private key is invalid");
     let public_key = signer.public_key();
 
-    // Gate startup until genesis timestamp (no runtime/network/consensus before this time)
-    {
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        if now_secs < config.genesis_timestamp {
-            let wait_secs = config.genesis_timestamp - now_secs;
-            info!(genesis_timestamp = config.genesis_timestamp, wait_secs, "waiting for genesis timestamp before starting validator");
-            std::thread::sleep(std::time::Duration::from_secs(wait_secs));
-        }
-    }
-
     // Initialize runtime
     let cfg = tokio::Config::default()
         .with_tcp_nodelay(Some(true))
@@ -551,63 +538,70 @@ fn main() {
             (None, None)
         };
         
-        // Create multiple independent consensus instances
-        let mut consensus_engines = Vec::new();
-        for i in 0..consensus_instances {
-            // Each consensus instance has a unique chain ID via partition_prefix
-            // This makes them completely independent blockchains
-            let chain_id = i + 1;
-            // Create unique namespace for each instance to enable independent leader schedules
-            let namespace = format!("{}_{}",
-                std::str::from_utf8(NAMESPACE).unwrap(),
-                chain_id).into_bytes();
-            
-            // Calculate time offset for this instance to stagger proposals evenly across the second
-            // For N instances: instance 0 gets 0ms, instance 1 gets 3000/N ms, instance 2 gets 3000/N ms, etc.
-            let proposal_offset_ms = (i * 3000 / consensus_instances) as u64; 
-            tracing::info!("Consensus instance {} will send proposals at offset {} ms wrt instance 1", 
-                          chain_id, proposal_offset_ms);
-            
-            let engine_config = engine::Config {
-                blocker: oracle.clone(),
-                partition_prefix: format!("consensus_{}", chain_id),
-                namespace,
-                blocks_freezer_table_initial_size: BLOCKS_FREEZER_TABLE_INITIAL_SIZE,
-                finalized_freezer_table_initial_size: FINALIZED_FREEZER_TABLE_INITIAL_SIZE,
-                signer: signer.clone(),
-                polynomial: polynomial.clone(),
-                share: share.clone(),
-                participants: peers.clone(),
-                mailbox_size: config.mailbox_size,
-                deque_size: config.deque_size,
-                backfill_quota,
-                leader_timeout: LEADER_TIMEOUT,
-                notarization_timeout: NOTARIZATION_TIMEOUT,
-                nullify_retry: NULLIFY_RETRY,
-                activity_timeout: ACTIVITY_TIMEOUT,
-                skip_timeout: SKIP_TIMEOUT,
-                fetch_timeout: FETCH_TIMEOUT,
-                max_fetch_count: MAX_FETCH_COUNT,
-                max_fetch_size: MAX_FETCH_SIZE,
-                fetch_concurrent: FETCH_CONCURRENT,
-                fetch_rate_per_peer: resolver_limit,
-                indexer: indexer.clone(),
-                proposal_offset_ms,
-                gatling_tx: gatling_tx.clone(),
-                gatling_instance_id: chain_id,
-                instance_views: instance_views.clone(),
-                lag_threshold: 1, // Default threshold: skip wait if 1+ views behind
-                total_instances: consensus_instances,
-                genesis_timestamp_secs: config.genesis_timestamp,
-                ancestor_fetch_concurrent: ANCESTOR_FETCH_CONCURRENT,
-                ancestor_fetch_rate_per_peer: resolver_limit,
-                shared_mempool: shared_mempool.clone(),
-            };
-            let engine = engine::Engine::new(
-                context.with_label(&format!("consensus_{}", chain_id)), 
-                engine_config
-            ).await;
-            consensus_engines.push(engine);
+        // Initialize all K engines concurrently so storage opens happen in parallel.
+        // Each future owns its config (all shared state is Arc/Clone), so there are no conflicts.
+        info!(consensus_instances, "initializing consensus engines");
+        let consensus_engines = futures::future::join_all(
+            (0..consensus_instances).map(|i| {
+                let chain_id = i + 1;
+                let namespace = format!("{}_{}", std::str::from_utf8(NAMESPACE).unwrap(), chain_id).into_bytes();
+                let proposal_offset_ms = (i * 3000 / consensus_instances) as u64;
+                let engine_config = engine::Config {
+                    blocker: oracle.clone(),
+                    partition_prefix: format!("consensus_{}", chain_id),
+                    namespace,
+                    blocks_freezer_table_initial_size: BLOCKS_FREEZER_TABLE_INITIAL_SIZE,
+                    finalized_freezer_table_initial_size: FINALIZED_FREEZER_TABLE_INITIAL_SIZE,
+                    signer: signer.clone(),
+                    polynomial: polynomial.clone(),
+                    share: share.clone(),
+                    participants: peers.clone(),
+                    mailbox_size: config.mailbox_size,
+                    deque_size: config.deque_size,
+                    backfill_quota,
+                    leader_timeout: LEADER_TIMEOUT,
+                    notarization_timeout: NOTARIZATION_TIMEOUT,
+                    nullify_retry: NULLIFY_RETRY,
+                    activity_timeout: ACTIVITY_TIMEOUT,
+                    skip_timeout: SKIP_TIMEOUT,
+                    fetch_timeout: FETCH_TIMEOUT,
+                    max_fetch_count: MAX_FETCH_COUNT,
+                    max_fetch_size: MAX_FETCH_SIZE,
+                    fetch_concurrent: FETCH_CONCURRENT,
+                    fetch_rate_per_peer: resolver_limit,
+                    indexer: indexer.clone(),
+                    proposal_offset_ms,
+                    gatling_tx: gatling_tx.clone(),
+                    gatling_instance_id: chain_id,
+                    instance_views: instance_views.clone(),
+                    lag_threshold: 1,
+                    total_instances: consensus_instances,
+                    genesis_timestamp_secs: config.genesis_timestamp,
+                    ancestor_fetch_concurrent: ANCESTOR_FETCH_CONCURRENT,
+                    ancestor_fetch_rate_per_peer: resolver_limit,
+                    shared_mempool: shared_mempool.clone(),
+                };
+                engine::Engine::new(
+                    context.with_label(&format!("consensus_{}", chain_id)),
+                    engine_config,
+                )
+            })
+        ).await;
+
+        // Wait until genesis inside the runtime so P2P can bootstrap during this window.
+        // This replaces the blocking thread::sleep that previously ran before the runtime started.
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let genesis_ms = config.genesis_timestamp * 1000;
+        if now_ms < genesis_ms {
+            let wait_ms = genesis_ms - now_ms;
+            info!(wait_ms, "engines ready, waiting for genesis");
+            context.sleep(Duration::from_millis(wait_ms)).await;
+        } else {
+            let overrun_ms = now_ms.saturating_sub(genesis_ms);
+            warn!(overrun_ms, "engines initialized after genesis; consider increasing the genesis delay");
         }
         
         // Create channel for broadcasting transactions (only if gossip is enabled)

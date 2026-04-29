@@ -34,7 +34,7 @@ def parse_args() -> argparse.Namespace:
     repo_root = get_repo_root()
 
     # Default locations mirror compute_latency.py outputs
-    default_output_dir = os.path.join(repo_root, "logs", "gatling-best")
+    default_output_dir = os.path.join(repo_root, "logs", "gatling")
     default_plot_data_csv = os.path.join(
         default_output_dir, "latency_plot_data.csv"
     )
