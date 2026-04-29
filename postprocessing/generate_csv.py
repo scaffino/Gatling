@@ -142,6 +142,20 @@ def parse_args() -> argparse.Namespace:
             "(default: from config)"
         ),
     )
+    parser.add_argument(
+        "--tx-window-start",
+        dest="tx_window_start",
+        type=int,
+        default=None,
+        help="Exclude transactions created before this Unix ms timestamp",
+    )
+    parser.add_argument(
+        "--tx-window-end",
+        dest="tx_window_end",
+        type=int,
+        default=None,
+        help="Exclude transactions created after this Unix ms timestamp",
+    )
     return parser.parse_args()
 
 
@@ -209,9 +223,15 @@ def parse_log_line(line: str) -> Optional[Tuple[int, str, int]]:
     return log_ts_ms, tx_hash, tx_ts_ms
 
 
-def parse_latency_occurrences(path: str) -> Iterable[Tuple[str, int]]:
+def parse_latency_occurrences(
+    path: str,
+    tx_window_start: Optional[int] = None,
+    tx_window_end: Optional[int] = None,
+) -> Iterable[Tuple[str, int]]:
     """
     Yields (tx_hash, latency_ms) for each matching line in a file.
+    If tx_window_start or tx_window_end are provided (Unix ms), only
+    transactions whose creation timestamp falls within the window are included.
     """
     try:
         with open(path, "r") as f:
@@ -220,13 +240,21 @@ def parse_latency_occurrences(path: str) -> Iterable[Tuple[str, int]]:
                 if not parsed:
                     continue
                 log_ts_ms, tx_hash, tx_ts_ms = parsed
+                if tx_window_start is not None and tx_ts_ms < tx_window_start:
+                    continue
+                if tx_window_end is not None and tx_ts_ms > tx_window_end:
+                    continue
                 yield tx_hash, log_ts_ms - tx_ts_ms
     except IOError:
         # Skip unreadable files
         return
 
 
-def aggregate_by_instances(dir_path: str) -> Dict[int, Dict[str, List[int]]]:
+def aggregate_by_instances(
+    dir_path: str,
+    tx_window_start: Optional[int] = None,
+    tx_window_end: Optional[int] = None,
+) -> Dict[int, Dict[str, List[int]]]:
     """
     Returns mapping: instances -> { tx_hash -> [latency_ms, ...] }
     For each transaction, collects the first finalization event from each
@@ -246,7 +274,9 @@ def aggregate_by_instances(dir_path: str) -> Dict[int, Dict[str, List[int]]]:
         _run_idx,
     ) in iter_gatling_files(dir_path):
         any_file = True
-        for tx_hash, latency_ms in parse_latency_occurrences(file_path):
+        for tx_hash, latency_ms in parse_latency_occurrences(
+            file_path, tx_window_start, tx_window_end
+        ):
             # Only keep the first occurrence of each transaction per file
             file_key = (instances, validator, tx_hash)
             if file_key not in seen_per_file:
@@ -647,7 +677,9 @@ def main() -> None:
     args = parse_args()
     # Run consistency checks before aggregation to catch mismatches early
     check_consistency(args.dir)
-    by_instances = aggregate_by_instances(args.dir)
+    by_instances = aggregate_by_instances(
+        args.dir, args.tx_window_start, args.tx_window_end
+    )
     stats = compute_instance_stats(by_instances)
 
     # Console summary
