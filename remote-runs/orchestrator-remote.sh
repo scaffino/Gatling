@@ -27,7 +27,7 @@ V="${V:-10}"
 # Per-run wall clock (seconds)
 RUN_DURATION_SECONDS="${RUN_DURATION_SECONDS:-1200}"
 SETTLE_SECONDS="${SETTLE_SECONDS:-4}"
-READINESS_TIMEOUT="${READINESS_TIMEOUT:-240}"    # seconds to wait for first finalized block per validator
+READINESS_TIMEOUT="${READINESS_TIMEOUT:-300}"    # seconds to wait for first finalized block per validator
 MAX_RUN_RETRIES="${MAX_RUN_RETRIES:-2}"          # total attempts per (instances, run_idx) before giving up
 
 # Transaction submission parameters (built into validators via --submit-tx)
@@ -47,10 +47,10 @@ SSH_OPTS=(
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 CONFIG_OUTPUT_DIR="${REPO_ROOT}/chain/test-remote"
-REMOTE_REPO_DIR="${REMOTE_REPO_DIR:-/root/alto}"
-REMOTE_BASE_DIR="${REMOTE_BASE_DIR:-/root/alto/deploy/manual}"
-REMOTE_LOG_DIR="${REMOTE_LOG_DIR:-/root/alto/logs/validator}"
-REMOTE_STORAGE_DIR="${REMOTE_STORAGE_DIR:-/root/alto/deploy/manual}"
+REMOTE_REPO_DIR="${REMOTE_REPO_DIR:-/root/Gatling}"
+REMOTE_BASE_DIR="${REMOTE_BASE_DIR:-/root/Gatling/deploy/manual}"
+REMOTE_LOG_DIR="${REMOTE_LOG_DIR:-/root/Gatling/logs/validator}"
+REMOTE_STORAGE_DIR="${REMOTE_STORAGE_DIR:-/root/Gatling/deploy/manual}"
 
 # -----------------------------
 # Helpers (needed early)
