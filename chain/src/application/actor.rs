@@ -725,10 +725,11 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                         
                         self.context.with_label("finalize_ancestors").spawn(move |context| async move {
                             // Constants
-                            const PEER_RESPONSE_TIMEOUT_MS: u64 = 2000; // Timeout for waiting for peer response
-                            const LOCAL_CHECK_TIMEOUT_MS: u64 = 15; // Marshal local storage check timeout
-                            const MAX_RETRIES_PER_BATCH: usize = 3; // Maximum retries per batch with different peers
-                            const RETRY_DELAY_MS: u64 = 100; // Delay between retries
+                            const PEER_RESPONSE_TIMEOUT_MS: u64 = 2000; // Timeout per peer response attempt
+                            const LOCAL_CHECK_TIMEOUT_MS: u64 = 500; // Marshal local storage check timeout — must cover archive restoration (~200ms per engine)
+                            const MAX_TOTAL_FETCH_MS: u64 = 60_000; // Give up after 60s (~2× LEADER_TIMEOUT)
+                            const INITIAL_RETRY_DELAY_MS: u64 = 200; // Initial backoff delay
+                            const MAX_RETRY_DELAY_MS: u64 = 5_000; // Cap backoff at 5s
                             
                             debug!("[{}] Starting ancestor finalization task for block {} (view {}) with parent: {:?}", 
                                   engine_id_clone, block_clone_for_log.height, block_clone_for_log.view, start_parent);
@@ -871,25 +872,20 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                                     // Track which digests we still need from this batch
                                     let mut batch_needed: BTreeSet<Digest> = batch.iter().cloned().collect();
                                     
-                                    // Retry logic with peer rotation
-                                    // Use indices to avoid Send trait issues
-                                    let mut tried_peer_indices: HashSet<usize> = HashSet::new();
-                                    let mut retry_count = 0;
-                                    
-                                    while !batch_needed.is_empty() && retry_count < MAX_RETRIES_PER_BATCH && tried_peer_indices.len() < available_peers.len() {
-                                        // Select a peer we haven't tried yet
-                                        let selected_peer_idx = available_peers.iter()
-                                            .enumerate()
-                                            .find(|(idx, _)| !tried_peer_indices.contains(idx))
-                                            .map(|(idx, _)| idx);
-                                        
-                                        let Some(peer_idx) = selected_peer_idx else {
-                                            debug!("[{}] All peers tried for batch, giving up", engine_id_clone);
+                                    // Retry with exponential backoff, cycling through all peers until success or timeout
+                                    let batch_fetch_start_ms = context.current().epoch_millis() as u64;
+                                    let mut retry_delay_ms = INITIAL_RETRY_DELAY_MS;
+                                    let mut peer_cycle_idx = 0usize;
+
+                                    while !batch_needed.is_empty() {
+                                        if (context.current().epoch_millis() as u64).saturating_sub(batch_fetch_start_ms) > MAX_TOTAL_FETCH_MS {
+                                            warn!("[{}] Timed out fetching {} ancestor digest(s) after {}ms",
+                                                  engine_id_clone, batch_needed.len(), MAX_TOTAL_FETCH_MS);
                                             break;
-                                        };
-                                        
-                                        tried_peer_indices.insert(peer_idx);
-                                        let peer = available_peers[peer_idx].clone();
+                                        }
+
+                                        let peer = available_peers[peer_cycle_idx % available_peers.len()].clone();
+                                        peer_cycle_idx += 1;
                                         
                                         // Create request for remaining digests in this batch
                                         let request_id = request_id_counter_clone.fetch_add(1, Ordering::Relaxed);
@@ -926,15 +922,12 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                                                 let mut pending = pending_ancestor_requests_clone.lock().unwrap();
                                                 pending.remove(&request_id);
                                             }
-                                            retry_count += 1;
-                                            if retry_count < MAX_RETRIES_PER_BATCH {
-                                                context.sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
-                                            }
+                                            context.sleep(Duration::from_millis(INITIAL_RETRY_DELAY_MS)).await;
                                             continue;
                                         }
                                         
-                                        debug!("[{}] Sent ancestor request {} for {} digests to peer (retry {})", 
-                                               engine_id_clone, request_id, batch_digests.len(), retry_count);
+                                        debug!("[{}] Sent ancestor request {} for {} digests to peer",
+                                               engine_id_clone, request_id, batch_digests.len());
                                         
                                         // Wait for responses with timeout
                                         let timeout_fut = context.sleep(Duration::from_millis(PEER_RESPONSE_TIMEOUT_MS));
@@ -986,35 +979,24 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                                             }
                                         }
                                         
-                                        // If we received at least some blocks, consider it a partial success
                                         if received_any {
-                                            // If we got all blocks, we're done with this batch
+                                            // Got at least one block; reset backoff and continue for any remaining
+                                            retry_delay_ms = INITIAL_RETRY_DELAY_MS;
                                             if batch_needed.is_empty() {
                                                 break;
                                             }
-                                            // Otherwise, continue to next retry for remaining digests
-                                            // Reset retry count since we made progress
-                                            retry_count = 0;
-                                        }
-                                        
-                                        // If we didn't receive anything, try next peer
-                                        if !received_any {
-                                            retry_count += 1;
-                                            if retry_count < MAX_RETRIES_PER_BATCH && tried_peer_indices.len() < available_peers.len() {
-                                                debug!("[{}] No response from peer, retrying with different peer (retry {}/{})", 
-                                                       engine_id_clone, retry_count, MAX_RETRIES_PER_BATCH);
-                                                context.sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
-                                            }
+                                        } else {
+                                            // No response from this peer; back off before trying the next one
+                                            debug!("[{}] No response from peer, backing off {}ms before retry",
+                                                   engine_id_clone, retry_delay_ms);
+                                            context.sleep(Duration::from_millis(retry_delay_ms)).await;
+                                            retry_delay_ms = (retry_delay_ms * 2).min(MAX_RETRY_DELAY_MS);
                                         }
                                     }
                                     
-                                    // Log final status for this batch
-                                    if batch_needed.is_empty() {
-                                        debug!("[{}] Successfully fetched all {} digests in batch", 
-                                               engine_id_clone, batch.len());
-                                    } else {
-                                        warn!("[{}] Failed to fetch {} out of {} digests in batch after {} retries", 
-                                              engine_id_clone, batch_needed.len(), batch.len(), retry_count);
+                                    if !batch_needed.is_empty() {
+                                        warn!("[{}] Failed to fetch {} out of {} ancestor digest(s) within {}ms; reconstruction will be partial",
+                                              engine_id_clone, batch_needed.len(), batch.len(), MAX_TOTAL_FETCH_MS);
                                     }
                                 }
                                 
@@ -1078,10 +1060,16 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                             }
                             
                             if ancestor_count > 0 {
-                                debug!("[{}] Completed ancestor finalization chain: {} ancestors finalized", 
+                                debug!("[{}] Completed ancestor finalization chain: {} ancestors finalized",
                                       engine_id_clone, ancestor_count);
                             } else {
                                 debug!("[{}] No missing ancestors found to finalize", engine_id_clone);
+                            }
+
+                            // Fix 1: send the current block last so run_buffer always sees heights
+                            // in ascending order (ancestors first, then the block that triggered them).
+                            if let Some(ref tx) = buffer_tx {
+                                let _ = tx.unbounded_send(block_clone_for_log);
                             }
                         });
                     }
@@ -1095,13 +1083,6 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                         if view > old_view {
                             self.instance_views[instance_idx].store(view, Ordering::Relaxed);
                             debug!("[{}] Instance {} advanced to view {}", engine_id, self.gatling_instance_id, view);
-                        }
-                    }
-                    
-                    // Forward finalized block to per-instance buffer if enabled
-                    if let Some(ref tx) = self.buffer_tx {
-                        if let Err(e) = tx.unbounded_send(block.clone()) {
-                            warn!(error=?e, "Failed to send finalized block to buffer");
                         }
                     }
                     
