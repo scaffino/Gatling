@@ -286,7 +286,7 @@ fn generate_local(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    let genesis_timestamp = ((now_secs / 60) + 2) * 60;
+    let genesis_timestamp = ((now_secs / 60) + 3) * 60;
     println!("genesis timestamp: {}", genesis_timestamp);
     let mut addresses = HashMap::new();
     let mut configurations = Vec::new();
