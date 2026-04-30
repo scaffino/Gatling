@@ -20,7 +20,7 @@ use futures::StreamExt;
 use futures::{channel::{mpsc, oneshot}, future::try_join};
 use futures::{future, future::Either};
 use rand::{CryptoRng, Rng};
-use std::collections::{HashMap, HashSet, BTreeMap, BTreeSet};
+use std::collections::{HashMap, HashSet, BTreeMap};
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -720,7 +720,6 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                         let mut ancestor_sender_clone = ancestor_sender.clone();
                         let pending_ancestor_requests_clone = pending_ancestor_requests.clone();
                         let request_id_counter_clone = request_id_counter.clone();
-                        let ancestor_fetch_concurrent = self.ancestor_fetch_concurrent;
                         let participants_clone = self.participants.clone();
                         
                         self.context.with_label("finalize_ancestors").spawn(move |context| async move {
@@ -735,271 +734,147 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                                   engine_id_clone, block_clone_for_log.height, block_clone_for_log.view, start_parent);
                             
                             // Step 1: Collect all missing ancestor digests and check local storage
-                            let mut missing_digests: Vec<Digest> = Vec::new();
                             let mut found_blocks: HashMap<Digest, Block> = HashMap::new();
-                            let mut cursor_digest = start_parent;
-                            
-                            // First pass: check local storage and collect missing digests
-                            // We need to walk the entire chain to find all missing blocks
-                            let mut chain_digests: Vec<Digest> = Vec::new();
-                            let mut temp_cursor = start_parent;
-                            
-                            // Build list of all ancestor digests we need to check
-                            while temp_cursor != genesis_digest_clone {
-                                if finalized_seen.lock().unwrap().contains(&temp_cursor.to_vec()) {
-                                    break;
-                                }
-                                chain_digests.push(temp_cursor);
-                                // We don't have the block yet, so we can't get its parent
-                                // We'll need to fetch blocks to continue
-                                break; // For now, we'll fetch one at a time
-                            }
-                            
-                            // Check each digest in local storage
-                            for digest in chain_digests {
-                                let subscribe_fut = marshal.subscribe(None, digest).await;
-                                let local_check_result = select!(
-                                    result = subscribe_fut => {
-                                        match result {
-                                            Ok(block) => Some(block),
-                                            Err(_) => None,
-                                        }
-                                    },
-                                    _ = context.sleep(Duration::from_millis(LOCAL_CHECK_TIMEOUT_MS)) => {
-                                        None
-                                    }
-                                );
-                                
-                                match local_check_result {
-                                    Some(block) => {
-                                        found_blocks.insert(digest, block);
-                                    }
-                                    None => {
-                                        missing_digests.push(digest);
-                                    }
-                                }
-                            }
-                            
-                            // If we have missing digests, we need to fetch them and continue walking the chain
-                            // For simplicity, let's fetch them one by one and reconstruct the chain
-                            // This is a simplified version - a full implementation would fetch all concurrently
-                            while !missing_digests.is_empty() && cursor_digest != genesis_digest_clone {
-                                if finalized_seen.lock().unwrap().contains(&cursor_digest.to_vec()) {
-                                    break;
-                                }
-                                
-                                // Check if we already have this block
-                                if found_blocks.contains_key(&cursor_digest) {
-                                    let block = found_blocks.get(&cursor_digest).unwrap();
-                                    cursor_digest = block.parent;
-                                    continue;
-                                }
-                                
-                                // Check local storage one more time
-                                let subscribe_fut = marshal.subscribe(None, cursor_digest).await;
-                                let local_check_result = select!(
-                                    result = subscribe_fut => {
-                                        match result {
-                                            Ok(block) => Some(block),
-                                            Err(_) => None,
-                                        }
-                                    },
-                                    _ = context.sleep(Duration::from_millis(LOCAL_CHECK_TIMEOUT_MS)) => {
-                                        None
-                                    }
-                                );
-                                
-                                match local_check_result {
-                                    Some(block) => {
-                                        found_blocks.insert(cursor_digest, block.clone());
-                                        cursor_digest = block.parent;
-                                    }
-                                    None => {
-                                        // Add to missing if not already there
-                                        if !missing_digests.contains(&cursor_digest) {
-                                            missing_digests.push(cursor_digest);
-                                        }
-                                        // Can't continue without this block
-                                        break;
-                                    }
-                                }
-                            }
-                            
-                            // Step 2: Fetch missing ancestors concurrently
-                            if !missing_digests.is_empty() {
-                                debug!("[{}] Need to fetch {} missing ancestors", engine_id_clone, missing_digests.len());
-                                
-                                // Create a map to track which digests we still need
-                                let mut needed_digests: BTreeSet<Digest> = missing_digests.iter().cloned().collect();
-                                
-                                // Batch digests into requests (up to concurrent limit)
-                                let mut request_batches: Vec<Vec<Digest>> = Vec::new();
-                                let mut current_batch = Vec::new();
-                                
-                                for digest in &missing_digests {
-                                    current_batch.push(*digest);
-                                    if current_batch.len() >= ancestor_fetch_concurrent {
-                                        request_batches.push(current_batch);
-                                        current_batch = Vec::new();
-                                    }
-                                }
-                                if !current_batch.is_empty() {
-                                    request_batches.push(current_batch);
-                                }
-                                
-                                // Process batches sequentially, but fetch within each batch concurrently
-                                for batch in request_batches {
-                                    if needed_digests.is_empty() {
-                                        break;
-                                    }
-                                    
-                                    // Filter batch to only include still-needed digests
-                                    let batch: Vec<Digest> = batch.into_iter()
-                                        .filter(|d| needed_digests.contains(d))
-                                        .collect();
-                                    
-                                    if batch.is_empty() {
-                                        continue;
-                                    }
-                                    
-                                    // Get available peers (clone the list for rotation)
-                                    let available_peers: Vec<commonware_cryptography::ed25519::PublicKey> = participants_clone.clone();
-                                    if available_peers.is_empty() {
-                                        warn!("[{}] No peers available for ancestor fetching", engine_id_clone);
-                                        break;
-                                    }
-                                    
-                                    // Track which digests we still need from this batch
-                                    let mut batch_needed: BTreeSet<Digest> = batch.iter().cloned().collect();
-                                    
-                                    // Retry with exponential backoff, cycling through all peers until success or timeout
-                                    let batch_fetch_start_ms = context.current().epoch_millis() as u64;
-                                    let mut retry_delay_ms = INITIAL_RETRY_DELAY_MS;
-                                    let mut peer_cycle_idx = 0usize;
+                            let fetch_start_ms = context.current().epoch_millis() as u64;
 
-                                    while !batch_needed.is_empty() {
-                                        if (context.current().epoch_millis() as u64).saturating_sub(batch_fetch_start_ms) > MAX_TOTAL_FETCH_MS {
-                                            warn!("[{}] Timed out fetching {} ancestor digest(s) after {}ms",
-                                                  engine_id_clone, batch_needed.len(), MAX_TOTAL_FETCH_MS);
-                                            break;
-                                        }
+                            // Walk the ancestor chain iteratively, fetching one level at a time.
+                            // Each pass: walk through already-found blocks to the deepest unknown,
+                            // check local storage, then fetch from a peer if still missing.
+                            // After each successful fetch we know the next parent digest and loop back.
+                            'fetch_loop: loop {
+                                // Walk from start_parent through already-found blocks to find the frontier.
+                                let mut walk_cursor = start_parent;
+                                let mut frontier: Option<Digest> = None;
 
-                                        let peer = available_peers[peer_cycle_idx % available_peers.len()].clone();
-                                        peer_cycle_idx += 1;
-                                        
-                                        // Create request for remaining digests in this batch
-                                        let request_id = request_id_counter_clone.fetch_add(1, Ordering::Relaxed);
-                                        let batch_digests: Vec<Digest> = batch_needed.iter().cloned().collect();
-                                        let request = Request::new(request_id, batch_digests.clone());
-                                        
-                                        // Create oneshot channels for each digest in the batch
-                                        let mut digest_senders: HashMap<Digest, oneshot::Sender<Block>> = HashMap::new();
-                                        let mut response_rxs: Vec<(Digest, oneshot::Receiver<Block>)> = Vec::new();
-                                        
-                                        for digest in &batch_digests {
-                                            let (tx, rx) = oneshot::channel();
-                                            digest_senders.insert(*digest, tx);
-                                            response_rxs.push((*digest, rx));
-                                        }
-                                        
-                                        // Register pending request
-                                        {
-                                            let mut pending = pending_ancestor_requests_clone.lock().unwrap();
-                                            pending.insert(request_id, digest_senders);
-                                        }
-                                        
-                                        // Send request to selected peer
-                                        let request_msg = AncestorFetcher::Request(request);
-                                        let request_bytes = Bytes::from(request_msg.encode());
-                                        
-                                        let send_result = ancestor_sender_clone.send(Recipients::One(peer.clone()), request_bytes, true).await;
-                                        
-                                        if let Err(e) = send_result {
-                                            warn!("[{}] Failed to send ancestor request {} to peer: {:?}", 
-                                                  engine_id_clone, request_id, e);
-                                            // Remove from pending (drop lock before await)
-                                            {
-                                                let mut pending = pending_ancestor_requests_clone.lock().unwrap();
-                                                pending.remove(&request_id);
-                                            }
-                                            context.sleep(Duration::from_millis(INITIAL_RETRY_DELAY_MS)).await;
-                                            continue;
-                                        }
-                                        
-                                        debug!("[{}] Sent ancestor request {} for {} digests to peer",
-                                               engine_id_clone, request_id, batch_digests.len());
-                                        
-                                        // Wait for responses with timeout
-                                        let timeout_fut = context.sleep(Duration::from_millis(PEER_RESPONSE_TIMEOUT_MS));
-                                        let mut response_futs = Vec::new();
-                                        
-                                        for (digest, rx) in response_rxs {
-                                            response_futs.push(async move {
-                                                (digest, rx.await.ok())
-                                            });
-                                        }
-                                        
-                                        let responses_result = select!(
-                                            responses = future::join_all(response_futs) => {
-                                                Some(responses)
-                                            },
-                                            _ = timeout_fut => {
-                                                debug!("[{}] Timeout waiting for ancestor response {} from peer", 
-                                                       engine_id_clone, request_id);
-                                                None
-                                            }
+                                loop {
+                                    if walk_cursor == genesis_digest_clone { break; }
+                                    if finalized_seen.lock().unwrap().contains(&walk_cursor.to_vec()) { break; }
+
+                                    if let Some(known) = found_blocks.get(&walk_cursor) {
+                                        walk_cursor = known.parent;
+                                    } else {
+                                        // Check local marshal storage before going to the network.
+                                        let subscribe_fut = marshal.subscribe(None, walk_cursor).await;
+                                        let local_result = select!(
+                                            result = subscribe_fut => { result.ok() },
+                                            _ = context.sleep(Duration::from_millis(LOCAL_CHECK_TIMEOUT_MS)) => { None },
                                         );
-                                        
-                                        // Remove from pending
+                                        match local_result {
+                                            Some(block) => {
+                                                let parent = block.parent;
+                                                found_blocks.insert(walk_cursor, block);
+                                                walk_cursor = parent;
+                                            }
+                                            None => {
+                                                frontier = Some(walk_cursor);
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+
+                                let digest_to_fetch = match frontier {
+                                    None => break 'fetch_loop, // Fully walked to genesis / finalized_seen
+                                    Some(d) => d,
+                                };
+
+                                // Global timeout guard
+                                if (context.current().epoch_millis() as u64).saturating_sub(fetch_start_ms) > MAX_TOTAL_FETCH_MS {
+                                    warn!("[{}] Timed out fetching ancestors after {}ms",
+                                          engine_id_clone, MAX_TOTAL_FETCH_MS);
+                                    break 'fetch_loop;
+                                }
+
+                                // Fetch the frontier block from peers with exponential backoff.
+                                let available_peers: Vec<commonware_cryptography::ed25519::PublicKey> = participants_clone.clone();
+                                if available_peers.is_empty() {
+                                    warn!("[{}] No peers available for ancestor fetching", engine_id_clone);
+                                    break 'fetch_loop;
+                                }
+
+                                debug!("[{}] Need to fetch ancestor {:?}", engine_id_clone, digest_to_fetch);
+
+                                let mut peer_cycle_idx = 0usize;
+                                let mut retry_delay_ms = INITIAL_RETRY_DELAY_MS;
+                                let mut fetched = false;
+
+                                while !fetched {
+                                    if (context.current().epoch_millis() as u64).saturating_sub(fetch_start_ms) > MAX_TOTAL_FETCH_MS {
+                                        warn!("[{}] Timed out fetching ancestors after {}ms",
+                                              engine_id_clone, MAX_TOTAL_FETCH_MS);
+                                        break;
+                                    }
+
+                                    let peer = available_peers[peer_cycle_idx % available_peers.len()].clone();
+                                    peer_cycle_idx += 1;
+
+                                    let request_id = request_id_counter_clone.fetch_add(1, Ordering::Relaxed);
+                                    let request = Request::new(request_id, vec![digest_to_fetch]);
+                                    let (resp_tx, resp_rx) = oneshot::channel::<Block>();
+
+                                    {
+                                        let mut pending = pending_ancestor_requests_clone.lock().unwrap();
+                                        pending.insert(request_id, HashMap::from([(digest_to_fetch, resp_tx)]));
+                                    }
+
+                                    let request_msg = AncestorFetcher::Request(request);
+                                    let request_bytes = Bytes::from(request_msg.encode());
+                                    let send_result = ancestor_sender_clone.send(Recipients::One(peer.clone()), request_bytes, true).await;
+
+                                    if let Err(e) = send_result {
+                                        warn!("[{}] Failed to send ancestor request {} to peer: {:?}",
+                                              engine_id_clone, request_id, e);
                                         {
                                             let mut pending = pending_ancestor_requests_clone.lock().unwrap();
                                             pending.remove(&request_id);
                                         }
-                                        
-                                        // Process responses
-                                        let mut received_any = false;
-                                        if let Some(responses) = responses_result {
-                                            for (digest, block_opt) in responses {
-                                                if let Some(block) = block_opt {
-                                                    // Verify digest matches
-                                                    if block.digest() == digest {
-                                                        debug!("[{}] Received ancestor {} (view {}) from peer", 
-                                                               engine_id_clone, block.height, block.view);
-                                                        // Store in marshal
-                                                        marshal.verified(block.view, block.clone()).await;
-                                                        found_blocks.insert(digest, block);
-                                                        batch_needed.remove(&digest);
-                                                        needed_digests.remove(&digest);
-                                                        received_any = true;
-                                                    } else {
-                                                        warn!("[{}] Received ancestor block with mismatched digest from peer", 
-                                                              engine_id_clone);
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        
-                                        if received_any {
-                                            // Got at least one block; reset backoff and continue for any remaining
-                                            retry_delay_ms = INITIAL_RETRY_DELAY_MS;
-                                            if batch_needed.is_empty() {
-                                                break;
-                                            }
-                                        } else {
-                                            // No response from this peer; back off before trying the next one
-                                            debug!("[{}] No response from peer, backing off {}ms before retry",
-                                                   engine_id_clone, retry_delay_ms);
-                                            context.sleep(Duration::from_millis(retry_delay_ms)).await;
-                                            retry_delay_ms = (retry_delay_ms * 2).min(MAX_RETRY_DELAY_MS);
-                                        }
+                                        context.sleep(Duration::from_millis(INITIAL_RETRY_DELAY_MS)).await;
+                                        continue;
                                     }
-                                    
-                                    if !batch_needed.is_empty() {
-                                        warn!("[{}] Failed to fetch {} out of {} ancestor digest(s) within {}ms; reconstruction will be partial",
-                                              engine_id_clone, batch_needed.len(), batch.len(), MAX_TOTAL_FETCH_MS);
+
+                                    debug!("[{}] Sent ancestor request {} for 1 digest to peer",
+                                           engine_id_clone, request_id);
+
+                                    let response = select!(
+                                        result = resp_rx => { result.ok() },
+                                        _ = context.sleep(Duration::from_millis(PEER_RESPONSE_TIMEOUT_MS)) => {
+                                            debug!("[{}] Timeout waiting for ancestor response {} from peer",
+                                                   engine_id_clone, request_id);
+                                            None
+                                        }
+                                    );
+
+                                    {
+                                        let mut pending = pending_ancestor_requests_clone.lock().unwrap();
+                                        pending.remove(&request_id);
+                                    }
+
+                                    if let Some(block) = response {
+                                        if block.digest() == digest_to_fetch {
+                                            debug!("[{}] Received ancestor {} (view {}) from peer",
+                                                   engine_id_clone, block.height, block.view);
+                                            marshal.verified(block.view, block.clone()).await;
+                                            found_blocks.insert(digest_to_fetch, block);
+                                            fetched = true;
+                                            retry_delay_ms = INITIAL_RETRY_DELAY_MS;
+                                        } else {
+                                            warn!("[{}] Received ancestor block with mismatched digest from peer",
+                                                  engine_id_clone);
+                                        }
+                                    } else {
+                                        debug!("[{}] No response from peer, backing off {}ms before retry",
+                                               engine_id_clone, retry_delay_ms);
+                                        context.sleep(Duration::from_millis(retry_delay_ms)).await;
+                                        retry_delay_ms = (retry_delay_ms * 2).min(MAX_RETRY_DELAY_MS);
                                     }
                                 }
-                                
+
+                                if !fetched {
+                                    warn!("[{}] Failed to fetch ancestor {:?}; reconstruction will be partial",
+                                          engine_id_clone, digest_to_fetch);
+                                    break 'fetch_loop;
+                                }
+                                // Block fetched — loop back to walk one level deeper
                             }
                             
                             // Step 4: Reconstruct final ancestor chain from all found blocks
