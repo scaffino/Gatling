@@ -12,6 +12,43 @@ set -euo pipefail
 # - Validators automatically generate transactions at configured rate
 # - After RUN_DURATION_SECONDS, kills all validators on remotes and locally
 # =============================================================================
+#
+# =============================================================================
+# Usage
+#
+#   ./remote-runs/orchestrator-remote.sh [options]
+#
+# Options (CLI flags)
+#   -t, --duration SECONDS
+#       Wall-clock run duration per experiment (genesis+SECONDS), then kill validators.
+#
+#   --instances LIST
+#       Explicit consensus instances sweep (comma/space separated), e.g. "1,10,20" or "1 10 20".
+#
+#   --runs-per-instance N
+#       Number of repetitions per instance value.
+#
+#   --crash-validator-index N
+#       Fault injection: after readiness succeeds, crash exactly one validator by index (0-based).
+#       Index is the line order in remote-runs/ips.txt (and therefore the validator config order).
+#
+#   --crash-delay SECONDS
+#       Optional delay (after readiness) before crashing the validator (default: 0).
+#
+#   -h, --help
+#       Print usage and exit.
+#
+# Inputs / conventions
+#   - remote-runs/ips.txt: one host per line (IP or root@IP). Lines starting with # are ignored.
+#   - The script expects exactly V hosts in ips.txt (default V=10).
+#
+# Environment variables (override defaults)
+#   - V: number of validators (must match ips.txt line count)
+#   - RUN_DURATION_SECONDS, INSTANCES, RUNS_PER_INSTANCE
+#   - SUBMIT_TX_RATE, SUBMIT_TX_START, SUBMIT_TX_DURATION (computed if not set)
+#   - REMOTE_REPO_DIR, REMOTE_BASE_DIR, REMOTE_LOG_DIR, REMOTE_STORAGE_DIR
+#   - CRASH_VALIDATOR_INDEX, CRASH_DELAY_SECONDS (alternatives to flags)
+# =============================================================================
 
 # -----------------------------
 # Configuration (overridable)
@@ -23,6 +60,10 @@ INSTANCES="${INSTANCES:-1 10 20 30 40 50}"
 
 # Number of validators
 V="${V:-10}"
+
+# Fault injection: optionally crash one validator after readiness
+CRASH_VALIDATOR_INDEX="${CRASH_VALIDATOR_INDEX:-}"   # 0-based index into REMOTE_HOSTS/PUBLIC_KEYS
+CRASH_DELAY_SECONDS="${CRASH_DELAY_SECONDS:-0}"      # delay after readiness before crashing
 
 # Per-run wall clock (seconds)
 RUN_DURATION_SECONDS="${RUN_DURATION_SECONDS:-1200}"
@@ -168,10 +209,13 @@ Options:
   -t, --duration SECONDS    Max run time per experiment before kill (default: ${RUN_DURATION_SECONDS})
       --instances LIST      Explicit instances list (comma/space separated, default: ${INSTANCES})
       --runs-per-instance N Number of runs per instance (default: ${RUNS_PER_INSTANCE})
+      --crash-validator-index N  After readiness, crash validator at 0-based index N (default: disabled)
+      --crash-delay SECONDS      Delay after readiness before crashing (default: ${CRASH_DELAY_SECONDS})
 
 You can also set environment variables:
   RUN_DURATION_SECONDS, INSTANCES, RUNS_PER_INSTANCE,
-  SUBMIT_TX_RATE, SUBMIT_TX_START, SUBMIT_TX_DURATION, etc.
+  SUBMIT_TX_RATE, SUBMIT_TX_START, SUBMIT_TX_DURATION,
+  CRASH_VALIDATOR_INDEX, CRASH_DELAY_SECONDS, etc.
 EOF
 }
 
@@ -193,6 +237,16 @@ parse_args() {
         [[ $# -gt 0 ]] || { err "Missing value for --runs-per-instance"; exit 2; }
         RUNS_PER_INSTANCE="$1"
         ;;
+      --crash-validator-index)
+        shift
+        [[ $# -gt 0 ]] || { err "Missing value for --crash-validator-index"; exit 2; }
+        CRASH_VALIDATOR_INDEX="$1"
+        ;;
+      --crash-delay)
+        shift
+        [[ $# -gt 0 ]] || { err "Missing value for --crash-delay"; exit 2; }
+        CRASH_DELAY_SECONDS="$1"
+        ;;
       -h|--help)
         print_usage
         exit 0
@@ -205,6 +259,45 @@ parse_args() {
     esac
     shift
   done
+}
+
+crash_one_validator() {
+  local instances="$1" run_idx="$2"
+  [[ -n "${CRASH_VALIDATOR_INDEX}" ]] || return 0
+
+  if [[ ! "${CRASH_VALIDATOR_INDEX}" =~ ^[0-9]+$ ]]; then
+    err "Invalid --crash-validator-index '${CRASH_VALIDATOR_INDEX}' (must be integer >= 0); skipping crash injection"
+    return 0
+  fi
+
+  if [[ "${CRASH_VALIDATOR_INDEX}" -ge ${#REMOTE_HOSTS[@]} ]]; then
+    err "Crash index ${CRASH_VALIDATOR_INDEX} out of range (hosts=${#REMOTE_HOSTS[@]}); skipping crash injection"
+    return 0
+  fi
+
+  if [[ ! "${CRASH_DELAY_SECONDS}" =~ ^[0-9]+$ ]]; then
+    err "Invalid --crash-delay '${CRASH_DELAY_SECONDS}' (must be integer >= 0); defaulting to 0"
+    CRASH_DELAY_SECONDS=0
+  fi
+
+  if [[ "${CRASH_DELAY_SECONDS}" -gt 0 ]]; then
+    log "Crash injection armed: will kill validator idx=${CRASH_VALIDATOR_INDEX} after ${CRASH_DELAY_SECONDS}s (instances=${instances}, run=${run_idx})..."
+    sleep "${CRASH_DELAY_SECONDS}"
+  else
+    log "Crash injection armed: killing validator idx=${CRASH_VALIDATOR_INDEX} now (instances=${instances}, run=${run_idx})..."
+  fi
+
+  local host="${REMOTE_HOSTS[CRASH_VALIDATOR_INDEX]}"
+  local public_key="${PUBLIC_KEYS[CRASH_VALIDATOR_INDEX]}"
+  local match="validator --.*--config=${REMOTE_BASE_DIR}/${public_key}.yaml"
+
+  if is_local_idx "${CRASH_VALIDATOR_INDEX}"; then
+    pkill -KILL -f "${match}" 2>/dev/null || true
+  else
+    remote_cmd "${host}" "pkill -KILL -f '${match}' || true" || true
+  fi
+
+  log "Crash injection complete (killed idx=${CRASH_VALIDATOR_INDEX} ident=${public_key} host=${host})"
 }
 
 # ---------------------------------
@@ -579,6 +672,9 @@ main() {
 
   log "Run duration per experiment: ${RUN_DURATION_SECONDS}s"
   log "Instances sweep: ${instances_list[*]}"
+  if [[ -n "${CRASH_VALIDATOR_INDEX}" ]]; then
+    log "Fault injection: crash validator idx=${CRASH_VALIDATOR_INDEX} after readiness (delay=${CRASH_DELAY_SECONDS}s)"
+  fi
 
   # Clear log directory on all VMs once at the beginning (parallel)
   log "Clearing log directory on all VMs at start..."
@@ -610,6 +706,8 @@ main() {
             kill_everything || true
             exit 1
           fi
+
+          crash_one_validator "${instances}" "${run_idx}"
 
           local kill_at sleep_for
           kill_at=$(( GENESIS_TS + RUN_DURATION_SECONDS ))
