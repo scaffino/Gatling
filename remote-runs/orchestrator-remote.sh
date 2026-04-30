@@ -4,8 +4,8 @@ set -euo pipefail
 
 # =============================================================================
 # Remote Orchestrator
-# - Iterates consensus instances 1..MAX_INSTANCES
-# - For each instances count, runs RUNS_PER_INSTANCE repetitions
+# - Iterates over INSTANCES (explicit list of consensus instance counts)
+# - For each instance count, runs RUNS_PER_INSTANCE repetitions
 # - Before each run: re-run setup (fresh configs)
 # - Deploys configs + per-validator peers.yaml to each remote
 # - Starts validators on remotes with --submit-tx (built-in transaction generation)
@@ -16,16 +16,10 @@ set -euo pipefail
 # -----------------------------
 # Configuration (overridable)
 # -----------------------------
-MIN_INSTANCES="${MIN_INSTANCES:-1}"
-MAX_INSTANCES="${MAX_INSTANCES:-10}"
 RUNS_PER_INSTANCE="${RUNS_PER_INSTANCE:-1}"
 
 # Explicit consensus instances sweep (space or comma separated).
-# If set (or left as default), MIN_INSTANCES/MAX_INSTANCES are ignored.
-# Examples:
-#   INSTANCES="1 5 10 20 30 40 50 60" ./remote-runs/orchestrator-remote.sh
-#   INSTANCES="1,5,10,20" ./remote-runs/orchestrator-remote.sh
-INSTANCES="${INSTANCES:-1 10 20 30 40 50 60}"
+INSTANCES="${INSTANCES:-1 10 20 30 40 50}"
 
 # Number of validators
 V="${V:-10}"
@@ -33,13 +27,13 @@ V="${V:-10}"
 # Per-run wall clock (seconds)
 RUN_DURATION_SECONDS="${RUN_DURATION_SECONDS:-1200}"
 SETTLE_SECONDS="${SETTLE_SECONDS:-4}"
-READINESS_TIMEOUT="${READINESS_TIMEOUT:-180}"    # seconds to wait for first finalized block per validator
+READINESS_TIMEOUT="${READINESS_TIMEOUT:-240}"    # seconds to wait for first finalized block per validator
 MAX_RUN_RETRIES="${MAX_RUN_RETRIES:-2}"          # total attempts per (instances, run_idx) before giving up
 
 # Transaction submission parameters (built into validators via --submit-tx)
-SUBMIT_TX_RATE="${SUBMIT_TX_RATE:-500}"        # Transactions per second
-SUBMIT_TX_START="${SUBMIT_TX_START:-600}"      # Start delay in seconds after genesis
-SUBMIT_TX_DURATION="${SUBMIT_TX_DURATION:-$(( RUN_DURATION_SECONDS - SUBMIT_TX_START ))}"  # Duration in seconds
+SUBMIT_TX_RATE="${SUBMIT_TX_RATE:-100}"          # Transactions per second
+SUBMIT_TX_START="${SUBMIT_TX_START:-600}"        # Start delay in seconds after genesis
+# SUBMIT_TX_DURATION is computed in main() after parse_args so --duration is respected
 
 # SSH/SCP options
 SSH_OPTS=(
@@ -71,33 +65,27 @@ fatal() { err "$@"; exit 1; }
 load_remote_hosts() {
   local ips_file="${SCRIPT_DIR}/ips.txt"
   REMOTE_HOSTS=()
-  
+
   if [[ ! -f "${ips_file}" ]]; then
     fatal "ips.txt not found at ${ips_file}. Please create it with one host per line (format: root@IP or IP)"
   fi
-  
+
   while IFS= read -r line || [[ -n "${line}" ]]; do
-    # Strip leading/trailing whitespace
-    line="${line%%#*}"  # Remove inline comments
-    line="${line#"${line%%[![:space:]]*}"}"  # Trim leading whitespace
-    line="${line%"${line##*[![:space:]]}"}"  # Trim trailing whitespace
-    
-    # Skip empty lines and comment lines
+    line="${line%%#*}"                              # Strip inline comments
+    line="${line#"${line%%[![:space:]]*}"}"         # Trim leading whitespace
+    line="${line%"${line##*[![:space:]]}"}"         # Trim trailing whitespace
     [[ -z "${line}" ]] && continue
-    [[ "${line}" =~ ^[[:space:]]*# ]] && continue
-    
-    # If line doesn't start with root@, assume it's just an IP and prepend root@
+
     if [[ ! "${line}" =~ ^root@ ]]; then
       line="root@${line}"
     fi
-    
     REMOTE_HOSTS+=("${line}")
   done < "${ips_file}"
-  
+
   if [[ ${#REMOTE_HOSTS[@]} -eq 0 ]]; then
     fatal "No valid hosts found in ${ips_file}"
   fi
-  
+
   log "Loaded ${#REMOTE_HOSTS[@]} remote host(s) from ${ips_file}"
 }
 
@@ -145,6 +133,11 @@ is_localhost() {
   [[ "${ip}" == "127.0.0.1" || "${ip}" == "localhost" || "${ip}" == "::1" ]]
 }
 
+# True if idx is the local validator index
+is_local_idx() {
+  [[ ${LOCAL_VALIDATOR_INDEX} -ge 0 && $1 -eq ${LOCAL_VALIDATOR_INDEX} ]]
+}
+
 remote_cmd() {
   local host="$1"; shift
   if is_localhost "${host}"; then
@@ -164,7 +157,6 @@ copy_file() {
   fi
 }
 
-
 # ---------------------------------
 # CLI parsing
 # ---------------------------------
@@ -174,13 +166,11 @@ Usage: $(basename "$0") [options]
 
 Options:
   -t, --duration SECONDS    Max run time per experiment before kill (default: ${RUN_DURATION_SECONDS})
-      --instances LIST      Explicit instances list (comma/space separated). Overrides min/max.
-      --min-instances N     Min consensus instances to start from (default: ${MIN_INSTANCES})
-      --max-instances N     Max consensus instances to sweep (default: ${MAX_INSTANCES})
+      --instances LIST      Explicit instances list (comma/space separated, default: ${INSTANCES})
       --runs-per-instance N Number of runs per instance (default: ${RUNS_PER_INSTANCE})
 
 You can also set environment variables:
-  RUN_DURATION_SECONDS, INSTANCES, MIN_INSTANCES, MAX_INSTANCES, RUNS_PER_INSTANCE,
+  RUN_DURATION_SECONDS, INSTANCES, RUNS_PER_INSTANCE,
   SUBMIT_TX_RATE, SUBMIT_TX_START, SUBMIT_TX_DURATION, etc.
 EOF
 }
@@ -197,16 +187,6 @@ parse_args() {
         shift
         [[ $# -gt 0 ]] || { err "Missing value for --instances"; exit 2; }
         INSTANCES="$1"
-        ;;
-      --min-instances)
-        shift
-        [[ $# -gt 0 ]] || { err "Missing value for --min-instances"; exit 2; }
-        MIN_INSTANCES="$1"
-        ;;
-      --max-instances)
-        shift
-        [[ $# -gt 0 ]] || { err "Missing value for --max-instances"; exit 2; }
-        MAX_INSTANCES="$1"
         ;;
       --runs-per-instance)
         shift
@@ -278,11 +258,10 @@ collect_validator_info() {
     PUBLIC_KEYS+=("$(basename "${cfg}" .yaml)")
   done
 
+  local idx
   for idx in "${!REMOTE_HOSTS[@]}"; do
     local host="${REMOTE_HOSTS[idx]}"
-    local ip
-    ip="$(extract_ip "${host}")"
-    REMOTE_IPS+=("${ip}")
+    REMOTE_IPS+=("$(extract_ip "${host}")")
     if is_localhost "${host}"; then
       [[ ${LOCAL_VALIDATOR_INDEX} -eq -1 ]] || fatal "Multiple localhost entries not supported"
       LOCAL_VALIDATOR_INDEX=${idx}
@@ -357,13 +336,14 @@ wait_for_readiness() {
 
   while true; do
     local all_ready=true
+    local not_ready=()
     local idx
     for idx in "${!REMOTE_HOSTS[@]}"; do
       local host="${REMOTE_HOSTS[idx]}"
       local log_file="${REMOTE_LOG_DIR}/val_${PUBLIC_KEYS[idx]}_i${instances}_r${run_idx}.log"
       if ! remote_cmd "${host}" "grep -qF '[gatling] Validator' '${log_file}'" 2>/dev/null; then
         all_ready=false
-        break
+        not_ready+=("${idx}")
       fi
     done
 
@@ -374,6 +354,13 @@ wait_for_readiness() {
 
     if [[ $(date +%s) -ge ${deadline} ]]; then
       err "Readiness timeout after ${READINESS_TIMEOUT}s — one or more validators produced no finalized block"
+      err "Validators that did NOT finalize the first block:"
+      for idx in "${not_ready[@]}"; do
+        local ip="${REMOTE_IPS[idx]:-unknown}"
+        local ident="${PUBLIC_KEYS[idx]:-unknown}"
+        local log_file="${REMOTE_LOG_DIR}/val_${ident}_i${instances}_r${run_idx}.log"
+        err "  - ip=${ip} ident=${ident} log=${log_file}"
+      done
       return 1
     fi
 
@@ -382,24 +369,69 @@ wait_for_readiness() {
 }
 
 # ---------------------------------
-# Fast validator shutdown across all hosts (sequential, like run-remote.sh)
+# Kill and wait for SSH background PIDs
 # ---------------------------------
-stop_validators_parallel() {
-  local instances="${1:-}"
-  local idx
-
-  # Stop validators on remote VMs (sequential, fast)
-  for idx in "${!REMOTE_HOSTS[@]}"; do
-    local host="${REMOTE_HOSTS[idx]}"
-    # Skip localhost (handled separately)
-    if [[ ${idx} -eq ${LOCAL_VALIDATOR_INDEX} ]] && [[ ${LOCAL_VALIDATOR_INDEX} -ge 0 ]]; then
-      continue
+_kill_ssh_pids() {
+  local pid
+  for pid in "${ACTIVE_VALIDATOR_SSH_PIDS[@]:-}"; do
+    if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
+      kill "${pid}" 2>/dev/null || true
     fi
-    
-    remote_cmd "${host}" "pkill -INT -f 'validator --' || true" || true
-    sleep 1
-    remote_cmd "${host}" "pkill -KILL -f 'validator --' || true" || true
   done
+  for pid in "${ACTIVE_VALIDATOR_SSH_PIDS[@]:-}"; do
+    [[ -n "${pid}" ]] && wait "${pid}" 2>/dev/null || true
+  done
+  ACTIVE_VALIDATOR_SSH_PIDS=()
+}
+
+# ---------------------------------
+# Kill validators everywhere (graceful: INT then KILL)
+# ---------------------------------
+kill_everything() {
+  log "Stopping validators on all hosts..."
+
+  local idx
+  for idx in "${!REMOTE_HOSTS[@]}"; do
+    is_local_idx "${idx}" && continue
+    remote_cmd "${REMOTE_HOSTS[idx]}" "pkill -INT -f 'validator --' || true" || true &
+  done
+  pkill -INT -f "validator --" 2>/dev/null || true
+  wait 2>/dev/null || true
+
+  sleep 1
+
+  for idx in "${!REMOTE_HOSTS[@]}"; do
+    is_local_idx "${idx}" && continue
+    remote_cmd "${REMOTE_HOSTS[idx]}" "pkill -KILL -f 'validator --' || true" || true &
+  done
+  pkill -KILL -f "validator --" 2>/dev/null || true
+  wait 2>/dev/null || true
+
+  _kill_ssh_pids
+  log "Validator cleanup completed"
+}
+
+# ---------------------------------
+# Cleanup on interrupt (immediate KILL, no graceful shutdown)
+# ---------------------------------
+cleanup_on_interrupt() {
+  log ""
+  log "===== INTERRUPT RECEIVED ====="
+  log "Cleaning up all validators and exiting..."
+
+  local idx
+  for idx in "${!REMOTE_HOSTS[@]}"; do
+    is_local_idx "${idx}" && continue
+    remote_cmd "${REMOTE_HOSTS[idx]}" "pkill -KILL -f 'validator --' || true" || true &
+  done
+  pkill -KILL -f "validator --" 2>/dev/null || true
+  wait 2>/dev/null || true
+
+  _kill_ssh_pids
+
+  log "Cleanup complete. Exiting."
+  log "===== EXIT ====="
+  exit 130
 }
 
 # ---------------------------------
@@ -411,27 +443,22 @@ deploy_to_vms() {
   temp_dir="$(mktemp -d)"
   trap 'rm -rf "${temp_dir}"' RETURN
 
+  local idx
   for idx in "${!REMOTE_HOSTS[@]}"; do
     local host="${REMOTE_HOSTS[idx]}"
     local public_key="${PUBLIC_KEYS[idx]}"
     local config_file="${CONFIG_FILES[idx]}"
     local remote_ip="${REMOTE_IPS[idx]}"
-    local is_local="false"
-    [[ ${idx} -eq ${LOCAL_VALIDATOR_INDEX} ]] && is_local="true"
-
     local peers_output="${temp_dir}/peers_${public_key}.yaml"
-    if [[ "${is_local}" == "true" ]]; then
-      generate_peers_yaml "${peers_template}" "${public_key}" "${peers_output}" ""
-    else
-      generate_peers_yaml "${peers_template}" "${public_key}" "${peers_output}" "${remote_ip}"
-    fi
 
-    if [[ "${is_local}" == "true" ]]; then
+    if is_local_idx "${idx}"; then
+      generate_peers_yaml "${peers_template}" "${public_key}" "${peers_output}" ""
       local local_base_dir="${REPO_ROOT}/chain/test-remote"
       mkdir -p "${local_base_dir}"
       cp "${peers_output}" "${local_base_dir}/peers.yaml"
       log "Deployed peers.yaml for localhost (${public_key})"
     else
+      generate_peers_yaml "${peers_template}" "${public_key}" "${peers_output}" "${remote_ip}"
       local modified_config="${temp_dir}/config_${public_key}.yaml"
       local new_storage_dir="${REMOTE_STORAGE_DIR}/${public_key}"
       if ! grep -q "^directory:" "${config_file}"; then
@@ -448,20 +475,6 @@ deploy_to_vms() {
 }
 
 # ---------------------------------
-# Kill validators on remote host (pre-run cleanup)
-# ---------------------------------
-kill_validator_remote() {
-  local host="$1"
-  local instances="${2:-}"
-  log "Stopping validator processes on ${host} (instances=${instances:-any})..."
-  
-  # Fast sequential kill (matching run-remote.sh approach)
-  remote_cmd "${host}" "pkill -INT -f 'validator --' || true" || true
-  sleep 1
-  remote_cmd "${host}" "pkill -KILL -f 'validator --' || true" || true
-}
-
-# ---------------------------------
 # Clear storage directories
 # ---------------------------------
 clear_storage_directories() {
@@ -469,20 +482,13 @@ clear_storage_directories() {
   local idx
   for idx in "${!REMOTE_HOSTS[@]}"; do
     local host="${REMOTE_HOSTS[idx]}"
-    local public_key="${PUBLIC_KEYS[idx]}"
-    local storage_dir="${REMOTE_STORAGE_DIR}/${public_key}"
-    
+    local storage_dir="${REMOTE_STORAGE_DIR}/${PUBLIC_KEYS[idx]}"
     if is_localhost "${host}"; then
-      if [[ -d "${storage_dir}" ]]; then
-        find "${storage_dir}" -mindepth 1 -delete 2>/dev/null || true
-        log "Cleared local storage: ${storage_dir}"
-      fi
+      rm -rf "${storage_dir}" && mkdir -p "${storage_dir}" || true
+      log "Cleared local storage: ${storage_dir}"
     else
-      # Check if storage directory exists and clear it
-      if remote_cmd "${host}" "test -d '${storage_dir}'" 2>/dev/null; then
-        remote_cmd "${host}" "find '${storage_dir}' -mindepth 1 -delete 2>/dev/null || true" 2>/dev/null || true
-        log "Cleared remote storage on ${host}: ${storage_dir}"
-      fi
+      remote_cmd "${host}" "rm -rf '${storage_dir}' && mkdir -p '${storage_dir}'" 2>/dev/null || true
+      log "Cleared remote storage on ${host}: ${storage_dir}"
     fi
   done
 }
@@ -500,10 +506,12 @@ start_validators() {
   local idx
   for idx in "${!REMOTE_HOSTS[@]}"; do
     local host="${REMOTE_HOSTS[idx]}"
-    kill_validator_remote "${host}" "${instances}" || true
+    log "Stopping validator processes on ${host} (instances=${instances})..."
+    remote_cmd "${host}" "pkill -INT -f 'validator --' || true" || true
+    sleep 1
+    remote_cmd "${host}" "pkill -KILL -f 'validator --' || true" || true
   done
-  
-  # Wait longer for ports to be released (TIME_WAIT state)
+
   log "Waiting for ports to be released..."
   sleep 3
 
@@ -532,73 +540,6 @@ cd '${REMOTE_REPO_DIR}' && \
 }
 
 # ---------------------------------
-# Phase: Submit transactions (built into validators)
-# ---------------------------------
-# Transactions are now automatically generated by validators using --submit-tx
-# No separate submission phase needed
-
-# ---------------------------------
-# Kill validators everywhere
-# ---------------------------------
-kill_everything() {
-  log "Stopping validators on all hosts..."
-  
-  # Fast parallel kill: send INT to all hosts simultaneously
-  for idx in "${!REMOTE_HOSTS[@]}"; do
-    local host="${REMOTE_HOSTS[idx]}"
-    # Skip localhost (handled separately)
-    if [[ ${idx} -eq ${LOCAL_VALIDATOR_INDEX} ]] && [[ ${LOCAL_VALIDATOR_INDEX} -ge 0 ]]; then
-      continue
-    fi
-    remote_cmd "${host}" "pkill -INT -f 'validator --' || true" || true &
-  done
-  
-  # Local INT
-  pkill -INT -f "validator --" 2>/dev/null || true
-  
-  # Wait for all INT signals to be sent
-  wait 2>/dev/null || true
-  
-  # Short grace period (once for all hosts)
-  sleep 1
-  
-  # Fast parallel kill: send KILL to all hosts simultaneously
-  for idx in "${!REMOTE_HOSTS[@]}"; do
-    local host="${REMOTE_HOSTS[idx]}"
-    # Skip localhost (handled separately)
-    if [[ ${idx} -eq ${LOCAL_VALIDATOR_INDEX} ]] && [[ ${LOCAL_VALIDATOR_INDEX} -ge 0 ]]; then
-      continue
-    fi
-    remote_cmd "${host}" "pkill -KILL -f 'validator --' || true" || true &
-  done
-  
-  # Local KILL
-  pkill -KILL -f "validator --" 2>/dev/null || true
-  
-  # Wait for all KILL signals to be sent
-  wait 2>/dev/null || true
-  
-  # Kill local SSH processes (non-blocking, validators already stopped)
-  for pid in "${ACTIVE_VALIDATOR_SSH_PIDS[@]:-}"; do
-    if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
-      kill "${pid}" 2>/dev/null || true
-    fi
-  done
-  
-  # Wait for SSH processes (non-blocking)
-  for pid in "${ACTIVE_VALIDATOR_SSH_PIDS[@]:-}"; do
-    if [[ -n "${pid}" ]]; then
-      wait "${pid}" 2>/dev/null || true
-    fi
-  done
-  
-  # Clear the array for next iteration
-  ACTIVE_VALIDATOR_SSH_PIDS=()
-  
-  log "Validator cleanup completed"
-}
-
-# ---------------------------------
 # Prereqs
 # ---------------------------------
 validate_prerequisites() {
@@ -610,99 +551,39 @@ validate_prerequisites() {
 }
 
 # ---------------------------------
-# Cleanup on interrupt
-# ---------------------------------
-cleanup_on_interrupt() {
-  log ""
-  log "===== INTERRUPT RECEIVED ====="
-  log "Cleaning up all validators and exiting..."
-  
-  # Fast parallel kill on all hosts (immediate KILL, no graceful shutdown on interrupt)
-  log "Stopping all validator processes on remote hosts..."
-  for idx in "${!REMOTE_HOSTS[@]}"; do
-    local host="${REMOTE_HOSTS[idx]}"
-    # Skip localhost (handled separately)
-    if [[ ${idx} -eq ${LOCAL_VALIDATOR_INDEX} ]] && [[ ${LOCAL_VALIDATOR_INDEX} -ge 0 ]]; then
-      continue
-    fi
-    # Kill in parallel (background)
-    remote_cmd "${host}" "pkill -KILL -f 'validator --' || true" || true &
-  done
-  
-  # Local cleanup (immediate KILL)
-  pkill -KILL -f "validator --" 2>/dev/null || true
-  
-  # Wait for all parallel kills to complete
-  wait 2>/dev/null || true
-  
-  # Kill SSH background processes (non-blocking, validators already stopped)
-  for pid in "${ACTIVE_VALIDATOR_SSH_PIDS[@]:-}"; do
-    if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
-      kill "${pid}" 2>/dev/null || true
-    fi
-  done
-  
-  # Wait for SSH processes (non-blocking)
-  for pid in "${ACTIVE_VALIDATOR_SSH_PIDS[@]:-}"; do
-    if [[ -n "${pid}" ]]; then
-      wait "${pid}" 2>/dev/null || true
-    fi
-  done
- 
-  log "Cleanup complete. Exiting."
-  log "===== EXIT ====="
-  exit 130  # Exit code 130 is standard for SIGINT
-}
-
-# ---------------------------------
 # Main
 # ---------------------------------
 main() {
   validate_prerequisites
   trap cleanup_on_interrupt INT TERM
 
-  # Parse CLI overrides
   parse_args "$@"
-  
-  # Build instances sweep:
-  # - If INSTANCES is non-empty, use it (comma/space separated).
-  # - Otherwise, fall back to MIN_INSTANCES..MAX_INSTANCES.
-  local instances_list=()
-  if [[ -n "${INSTANCES:-}" ]]; then
-    local inst
-    while IFS= read -r inst; do
-      [[ -z "${inst}" ]] && continue
-      instances_list+=("${inst}")
-    done < <(printf '%s' "${INSTANCES}" | tr ',[:space:]' '\n' | sed '/^$/d')
-  else
-    # Validate instance range
-    if [[ ${MIN_INSTANCES} -lt 1 ]]; then
-      fatal "MIN_INSTANCES must be >= 1, got ${MIN_INSTANCES}"
-    fi
-    if [[ ${MAX_INSTANCES} -lt ${MIN_INSTANCES} ]]; then
-      fatal "MAX_INSTANCES (${MAX_INSTANCES}) must be >= MIN_INSTANCES (${MIN_INSTANCES})"
-    fi
-    local i
-    for i in $(seq "${MIN_INSTANCES}" "${MAX_INSTANCES}"); do
-      instances_list+=("${i}")
-    done
-  fi
 
-  [[ ${#instances_list[@]} -gt 0 ]] || fatal "No instances specified (set INSTANCES or min/max)."
+  # Compute SUBMIT_TX_DURATION after parse_args so --duration is respected
+  SUBMIT_TX_DURATION="${SUBMIT_TX_DURATION:-$(( RUN_DURATION_SECONDS - SUBMIT_TX_START ))}"
+
+  # Build instances list from INSTANCES (comma/space separated)
+  local instances_list=()
+  local inst
+  while IFS= read -r inst; do
+    [[ -z "${inst}" ]] && continue
+    instances_list+=("${inst}")
+  done < <(printf '%s\n' "${INSTANCES}" | tr ',[:space:]' '\n' | sed '/^$/d')
+
+  [[ ${#instances_list[@]} -gt 0 ]] || fatal "No instances specified (set INSTANCES env var or use --instances)."
   local i
   for i in "${instances_list[@]}"; do
     [[ "${i}" =~ ^[0-9]+$ ]] || fatal "Invalid instance value '${i}' (must be integer)."
     [[ "${i}" -ge 1 ]] || fatal "Invalid instance value '${i}' (must be >= 1)."
   done
-  
+
   log "Run duration per experiment: ${RUN_DURATION_SECONDS}s"
   log "Instances sweep: ${instances_list[*]}"
 
   # Clear log directory on all VMs once at the beginning (parallel)
   log "Clearing log directory on all VMs at start..."
   for idx in "${!REMOTE_HOSTS[@]}"; do
-    local host="${REMOTE_HOSTS[idx]}"
-    remote_cmd "${host}" "rm -rf '${REMOTE_LOG_DIR}'/* 2>/dev/null || true" || true &
+    remote_cmd "${REMOTE_HOSTS[idx]}" "rm -rf '${REMOTE_LOG_DIR}'/* 2>/dev/null || true" || true &
   done
   wait 2>/dev/null || true
 
@@ -745,7 +626,7 @@ main() {
         fi
       done
       [[ ${run_ok} -eq 1 ]] || err "All attempts exhausted for instances=${instances}, run=${run_idx}, skipping"
-      
+
       log "Settle ${SETTLE_SECONDS}s..."
       sleep "${SETTLE_SECONDS}"
       log "===== RUN END: instances=${instances}, run=${run_idx} ====="
@@ -757,5 +638,3 @@ main() {
 }
 
 main "$@"
-
-
