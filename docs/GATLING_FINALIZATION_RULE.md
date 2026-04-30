@@ -8,6 +8,25 @@ Gatling combines blocks from multiple consensus instances into a single globally
 - **Directly finalized views**: Views that have a finalized block from consensus
 - **Indirectly finalized views**: Views that are marked as finalized (without blocks) to fill gaps when instances skip views
 
+## Critical Invariant: Height-Ordered Delivery via `run_buffer`
+
+Before any block reaches the `gatling_thread`, it passes through a per-instance `run_buffer` task.
+`run_buffer` starts at `next_expected_height = 1` and buffers blocks, only forwarding them once it
+has a contiguous sequence from height 1 upward. It never skips heights.
+
+**Consequence**: If height 1 for instance k is never delivered to `run_buffer`, the gatling cursor
+will stall permanently at the first cell of instance k — even if all other instances are running
+normally and `instance_queues[k]` has blocks at views 1, 2, 3, ...
+
+**Why height 1 can be missing**: When a validator starts after genesis (`overrun_ms > 0`), it catches
+up by finalizing a block at height N > 1. The `finalize_ancestors` task must successfully fetch and
+deliver heights 1..N-1 before height N reaches `run_buffer`. Any failure in ancestor fetching (peer
+unavailable, timeout, partial chain walk) will leave height 1 undelivered and permanently stall that
+instance's slot in the cursor.
+
+This is the reason ancestor fetching correctness is a liveness requirement, not merely a performance
+concern. See `ANCESTOR_FETCHING.md` for the full fetch protocol.
+
 ## The Matrix View
 
 Conceptually, Gatling maintains a 2D matrix where:

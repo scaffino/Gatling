@@ -2,569 +2,177 @@
 
 ## Overview
 
-When a block is finalized, the system recursively fetches and finalizes all missing ancestor blocks in the chain. The ancestor fetching mechanism uses two sources in order:
-1. **Marshal local storage** (checked first, with short timeout to avoid triggering backfill)
-2. **Peer requests via ancestor channel** (if not found locally)
+When a validator starts after genesis (`overrun_ms > 0`), it may receive a finalized block at height N
+without having heights 1..N-1 in local storage. The `finalize_ancestors` task fetches the full ancestor
+chain before forwarding blocks to `run_buffer`, which enforces that the gatling thread sees each
+instance's blocks in ascending height order.
 
-This ensures efficient block retrieval without interfering with marshal's backfill mechanism.
+**Why this matters for correctness**: `run_buffer` per instance buffers blocks and only forwards them
+once it has seen every height starting from 1 in order. If height 1 is never delivered, the gatling
+thread cursor stalls permanently on that instance — even if all other instances have finalized
+thousands of blocks.
 
 ## Architecture
 
-### Components Involved
+### Components
 
-1. **Application Actor** (`chain/src/application/actor.rs`)
-   - Spawns `finalize_ancestors` task when a block is finalized
-   - Manages ancestor fetching logic
+1. **`finalize_ancestors` task** (`actor.rs`)  
+   Spawned on every `Message::Finalized` event. Walks the ancestor chain from `block.parent` back to
+   genesis (or a previously-finalized ancestor), fetching any missing blocks, then forwards them to
+   `run_buffer` in ascending height order followed by the triggering block.
 
-2. **Ancestor Channel** (Per-instance P2P channel)
-   - Channel number: `base_channel + 6` (where base = instance_id * 10)
+2. **`run_buffer` task** (`actor.rs`)  
+   One per consensus instance. Receives blocks from `finalize_ancestors` and buffers them until it
+   can forward a contiguous sequence starting from `next_expected_height = 1` to the gatling thread.
+
+3. **Ancestor channel** (per-instance P2P channel)  
+   Used for peer-to-peer ancestor request/response messages.
+   - Channel number: `base_channel + 6` (where `base = instance_id * 10`)
    - Rate limit: 16 messages/second
-   - Used for peer-to-peer ancestor requests/responses
 
-3. **Marshal** (`marshal::Actor`)
-   - Provides local block storage
-   - Used for quick local lookup (10ms timeout to avoid backfill)
+4. **Ancestor message handler** (background task per actor)  
+   Receives incoming `AncestorFetcher::Request` messages from peers, looks up requested blocks in
+   marshal local storage, and responds with `AncestorFetcher::Response`.
 
-4. **Ancestor Message Handler** (background task)
-   - Handles incoming ancestor requests from peers
-   - Handles incoming ancestor responses
-   - Runs continuously throughout actor lifetime
+5. **`pending_ancestor_requests`** (`Arc<Mutex<HashMap<u32, HashMap<Digest, oneshot::Sender<Block>>>>>`)  
+   Shared map from `request_id` → (digest → sender). Allows the message handler to route incoming
+   responses to the correct waiting `finalize_ancestors` task.
 
-## Workflow
+## Message Protocol
 
-### High-Level Flow
-
-```
-Block Finalized
-    │
-    ▼
-Spawn finalize_ancestors Task
-    │
-    ├─→ For each missing ancestor:
-    │       │
-    │       ├─→ 1. Check Marshal Local Storage (10ms timeout)
-    │       │       ├─→ Found? → Use block, continue chain
-    │       │       └─→ Not found? → Continue to step 2
-    │       │
-    │       └─→ 2. Request from Peers (via ancestor channel)
-    │               ├─→ Send Digest request to all peers
-    │               ├─→ Wait for Block response
-    │               ├─→ Verify digest matches
-    │               ├─→ Store in marshal
-    │               └─→ Continue ancestor chain
-    │
-    └─→ Finalize ancestors in ascending height order
-```
-
-## Detailed Mechanism
-
-### 1. Trigger: Block Finalization
-
-When consensus finalizes a block, the `FinalizationPusher` sends a `Message::Finalized` to the Application Actor:
+Messages on the ancestor channel are encoded as `AncestorFetcher` enum variants:
 
 ```rust
-Message::Finalized { view, block }
-```
+enum AncestorFetcher {
+    Request(Request),   // sent by the validator needing a block
+    Response(Response), // sent back by the peer that has it
+}
 
-The Actor processes this message and spawns the `finalize_ancestors` task:
-
-```rust
-self.context.with_label("finalize_ancestors").spawn(move |context| async move {
-    // Ancestor fetching logic here
-});
-```
-
-### 2. Ancestor Chain Discovery
-
-The task walks up the parent chain starting from `block.parent`:
-
-```rust
-let mut missing_ancestors: Vec<Block> = Vec::new();
-let mut cursor_digest = block.parent;
-
-while cursor_digest != genesis_digest {
-    // Skip if already finalized
-    if finalized_seen.contains(&cursor_digest) {
-        break;
-    }
-    
-    // Fetch ancestor block
-    // ... (see step 3)
-    
-    // Continue up chain
-    cursor_digest = ancestor.parent;
-    missing_ancestors.push(ancestor);
+struct Request {
+    request_id: u32,
+    digests: Vec<Digest>,
 }
 ```
 
-### 3. Fetching Each Ancestor
+Responses carry the actual `Block` and the `request_id` so the receiver can route to the correct
+pending entry.
 
-For each missing ancestor, the system attempts to fetch it using a two-step process:
+## Iterative Chain Walk Algorithm
 
-#### Step 3a: Check Marshal Local Storage
+The `finalize_ancestors` task uses an outer `'fetch_loop` loop to discover ancestor blocks
+level-by-level. This is necessary because each block's parent digest is only known once the block
+itself is fetched.
 
-First, check if the block is immediately available in marshal's local storage:
+```
+'fetch_loop:
+  1. Walk from start_parent through already-found blocks (found_blocks map)
+     following .parent links until hitting an unknown digest (the "frontier").
+  2. If no frontier → walked to genesis or a previously-finalized block → done.
+  3. Check marshal local storage for the frontier digest (500ms timeout).
+     - Found locally → insert into found_blocks, loop back to step 1.
+     - Not found → go to step 4.
+  4. Check global timeout (MAX_TOTAL_FETCH_MS = 60s). If exceeded → warn and stop.
+  5. Fetch the frontier digest from a peer (with per-peer 2s timeout, exponential backoff).
+     - Success → insert into found_blocks, loop back to step 1 to discover the next level.
+     - All retries exhausted → warn "partial reconstruction", stop loop.
+```
+
+After the loop, `found_blocks` is reconstructed into ascending-height order and forwarded
+to `run_buffer`.
+
+### Why iterative (not recursive / pre-walk)?
+
+A validator in catch-up mode may be missing a chain of depth D (e.g., received block at height 50,
+needs heights 1–49). Without knowing each block's parent digest in advance, the chain can only be
+discovered one level at a time: fetch height 49 → learn its parent = height 48 → fetch height 48 → …
+The `'fetch_loop` handles this correctly regardless of chain depth.
+
+## Constants
 
 ```rust
-// Use very short timeout to check if block is immediately available locally
-// If timeout triggers quickly, block is not in local storage, skip backfill
-let subscribe_fut = marshal.subscribe(None, cursor_digest).await;
-let local_check_timeout = Duration::from_millis(10); // 10ms
-
-let local_check_result = select!(
-    result = subscribe_fut => {
-        match result {
-            Ok(ancestor) => Some(ancestor),
-            Err(_) => None,
-        }
-    },
-    _ = context.sleep(local_check_timeout) => {
-        // Timeout quickly - block not in local storage, skip backfill
-        None
-    }
-);
+const PEER_RESPONSE_TIMEOUT_MS: u64 = 2_000;  // Timeout per peer attempt
+const LOCAL_CHECK_TIMEOUT_MS:    u64 =   500;  // Marshal local lookup (covers archive restoration)
+const MAX_TOTAL_FETCH_MS:        u64 = 60_000; // Overall budget (~2× LEADER_TIMEOUT)
+const INITIAL_RETRY_DELAY_MS:    u64 =   200;  // First backoff delay
+const MAX_RETRY_DELAY_MS:        u64 = 5_000;  // Backoff cap
 ```
 
-**Why 10ms timeout?**
-- If the block is in local storage, `marshal.subscribe()` returns immediately (< 1ms)
-- If not in local storage, marshal would trigger backfill which takes time
-- The 10ms timeout prevents marshal backfill from being triggered
-- If timeout occurs, we know block is not locally available and proceed to peer request
+**Why `LOCAL_CHECK_TIMEOUT_MS = 500ms`?**  
+When a block is in marshal's archive (freezer), restoration can take ~200ms per engine. A 500ms
+timeout covers this without falsely treating archived blocks as missing.
 
-#### Step 3b: Request from Peers via Ancestor Channel
+**Why `MAX_TOTAL_FETCH_MS = 60s` instead of a retry count?**  
+Retrying N times against a slow or partitioned peer could stall indefinitely. A wall-clock budget
+bounds the worst-case stall regardless of how many peers/retries are attempted.
 
-If marshal doesn't have the block locally, request it from peers:
+## Peer Selection
 
-```rust
-// Create oneshot channel for response
-let (response_tx, response_rx) = oneshot::channel();
+The task cycles through all validator participants round-robin, trying one peer per attempt.
+Backoff applies when a peer does not respond within `PEER_RESPONSE_TIMEOUT_MS`. This distributes
+load and avoids hammering a single slow peer.
 
-// Register pending request
-{
-    let mut pending = pending_ancestor_requests.lock().unwrap();
-    pending.insert(cursor_digest, response_tx);
-}
+## Forwarding Order to `run_buffer`
 
-// Send request to all peers
-let request_bytes = Bytes::from(cursor_digest.encode().to_vec());
-ancestor_sender.send(Recipients::All, request_bytes, true).await;
-
-// Wait for response (no timeout - waits indefinitely)
-let response_result = response_rx.await.ok();
-
-// Remove from pending
-pending_ancestor_requests.remove(&cursor_digest);
-```
-
-**Message Format**:
-- **Request**: Encoded `Digest` (block digest being requested)
-- **Response**: Encoded `Block` (the actual block data)
-
-### 4. Handling Incoming Requests (Serving Peers)
-
-A background task continuously handles incoming ancestor messages:
-
-```rust
-// Spawn task to handle incoming ancestor messages (both requests and responses)
-self.context.with_label("ancestor_message_handler").spawn(move |_| async move {
-    loop {
-        match ancestor_receiver.recv().await {
-            Ok((_peer, message_bytes)) => {
-                // Try to decode as a block first (response)
-                match Block::decode(message_bytes.as_ref()) {
-                    Ok(block) => {
-                        // This is a block response - fulfill pending request
-                        let block_digest = block.digest();
-                        if let Some(response_tx) = pending_requests.remove(&block_digest) {
-                            response_tx.send(block);  // Send to waiting task
-                        }
-                    }
-                    Err(_) => {
-                        // Not a block, try decoding as a digest (request)
-                        match Digest::decode(message_bytes.as_ref()) {
-                            Ok(requested_digest) => {
-                                // Check marshal local storage (10ms timeout)
-                                match marshal.subscribe(None, requested_digest).await {
-                                    Ok(block) => {
-                                        // We have it - send block response
-                                        let block_bytes = Bytes::from(block.encode().to_vec());
-                                        ancestor_sender.send(Recipients::All, block_bytes, true).await;
-                                    }
-                                    Err(_) => {
-                                        // Don't have it - ignore request
-                                    }
-                                }
-                            }
-                            Err(_) => {
-                                // Invalid message - ignore
-                            }
-                        }
-                    }
-                }
-            }
-            Err(_) => break,  // Receiver closed
-        }
-    }
-});
-```
-
-### 5. Processing Responses
-
-When a block response is received:
-
-```rust
-match response_result {
-    Some(block) => {
-        // Verify digest matches
-        if block.digest() == cursor_digest {
-            // Store in marshal
-            marshal.verified(block.view, block.clone()).await;
-            ancestor_opt = Some(block);
-            break;  // Success - continue to next ancestor
-        } else {
-            warn!("Received ancestor block with mismatched digest");
-        }
-    }
-    None => {
-        // No response received (channel closed or cancelled)
-        // Will retry with exponential backoff
-    }
-}
-```
-
-### 6. Retry Logic
-
-If fetching from peers fails, the system retries with exponential backoff:
-
-```rust
-const MAX_RETRIES: usize = 5;
-const INITIAL_RETRY_DELAY_MS: u64 = 100;
-const MAX_RETRY_DELAY_MS: u64 = 1000;
-
-// Retry loop
-while ancestor_opt.is_none() && retry_count <= MAX_RETRIES {
-    // Try marshal local storage (step 3a)
-    // If not found, try peer request (step 3b)
-    
-    if ancestor_opt.is_none() {
-        // Exponential backoff before retry
-        let delay_ms = (INITIAL_RETRY_DELAY_MS * (1 << retry_count))
-            .min(MAX_RETRY_DELAY_MS);
-        context.sleep(Duration::from_millis(delay_ms)).await;
-        retry_count += 1;
-    }
-}
-```
-
-**Retry delays**: 100ms, 200ms, 400ms, 800ms, 1000ms (max)
-
-## Message Flow Diagrams
-
-### Request Flow (When Block Missing Locally)
+After reconstruction, blocks are sent in strictly ascending height order:
 
 ```
-Validator A (Needs Ancestor)
-    │
-    │ 1. Check Marshal (10ms timeout)
-    │    └─→ Not in local storage
-    │
-    │ 2. Create oneshot channel
-    │ 3. Register pending request (digest → oneshot sender)
-    │ 4. Send Digest request on ancestor channel (Recipients::All)
-    │
-    ▼
-[P2P Network - Ancestor Channel]
-    │
-    │ 5. Broadcast request to all peers
-    │
-    ├──────────────────────────┼──────────────────────────┐
-    │                          │                          │
-    ▼                          ▼                          ▼
-Validator B              Validator C              Validator D
-    │                          │                          │
-    │ 6. Receive request       │ 6. Receive request       │ 6. Receive request
-    │ 7. Check Marshal         │ 7. Check Marshal         │ 7. Check Marshal
-    │    (10ms timeout)        │    (10ms timeout)        │    (10ms timeout)
-    │                          │                          │
-    ├─→ Has block?             ├─→ Has block?             ├─→ Has block?
-    │   │                          │                          │
-    │   │ 8. Send Block            │                          │
-    │   │    response               │                          │
-    │   │                          │                          │
-    │   └─→ No block?           └─→ No block?           └─→ No block?
-    │       (ignore)                   (ignore)                   (ignore)
-    │
-    ▼
-[P2P Network - Ancestor Channel]
-    │
-    │ 9. Deliver Block response
-    │
-    ▼
-Validator A
-    │
-    │ 10. Match response to pending request (by digest)
-    │ 11. Send block via oneshot channel
-    │ 12. Verify digest matches
-    │ 13. Store in marshal
-    │ 14. Continue ancestor chain
+ancestor[height=1] → ancestor[height=2] → ... → ancestor[height=N-1] → block[height=N]
 ```
 
-### Response Flow (When Serving Peers)
+`run_buffer` starts at `next_expected_height = 1` and stalls if any height is missing. Sending
+in ascending order, with the triggering block last, ensures `run_buffer` can drain its buffer
+completely on the first delivery.
 
-```
-Validator X (Has Ancestor)
-    │
-    │ 1. Receive Digest request from peer
-    │ 2. Decode as Digest
-    │ 3. Check Marshal local storage (10ms timeout)
-    │
-    ├─→ Found in local storage?
-    │   │
-    │   ├─→ Yes: Encode Block → Send to Recipients::All
-    │   └─→ No: Ignore request (don't have block)
-    │
-    ▼
-[P2P Network - Ancestor Channel]
-    │
-    │ 4. Broadcast Block response (all peers receive it)
-    │
-    ▼
-Requesting Validators
-    │
-    │ 5. Receive Block response
-    │ 6. Decode as Block
-    │ 7. Check pending requests (by digest)
-    │ 8. If matches: Fulfill oneshot channel
-```
+## Startup Behaviour (catch-up mode)
 
-## Key Design Decisions
+When `overrun_ms > 0` (validator process started after genesis), consensus immediately catches
+up to the current view. The first finalized block will likely be at height > 1. The first
+`finalize_ancestors` invocation must fetch the entire chain back to height 1.
 
-### 1. Marshal Local Storage Check First
-
-**Why?**
-- Local storage is fastest (usually < 1ms)
-- Avoids network overhead
-- Reduces load on ancestor channel
-
-**Implementation**:
-- Uses `marshal.subscribe()` with 10ms timeout
-- If timeout triggers, block is not in local storage
-- Proceeds to peer request without waiting for marshal backfill
-
-### 2. No Timeout for Peer Requests
-
-**Why?**
-- Retry logic already handles failures
-- Prevents premature timeout when peers are slow to respond
-- Exponential backoff provides natural timeout behavior
-
-**Trade-off**:
-- If no peer responds, request waits indefinitely for that retry attempt
-- But retry loop (up to 5 retries) ensures eventual timeout
-
-### 3. Broadcast Responses (Recipients::All)
-
-**Why?**
-- Simpler implementation (no need for peer-specific sending)
-- Multiple validators might need the same block
-- Recipients filter by digest matching in pending requests
-
-**Trade-off**:
-- Slightly less efficient (all peers receive response)
-- But ancestor requests are infrequent, so overhead is minimal
-
-### 4. Per-Instance Ancestor Channel
-
-**Why?**
-- Each consensus instance is independent
-- Prevents cross-instance interference
-- Allows per-instance rate limiting
-
-**Channel Assignment**:
-- Instance 0: channels 0-9 (ancestor = 6)
-- Instance 1: channels 10-19 (ancestor = 16)
-- Instance 2: channels 20-29 (ancestor = 26)
-- etc.
-
-### 5. Separate Message Handler Task
-
-**Why?**
-- Ancestor requests can arrive at any time
-- Not tied to a specific `finalize_ancestors` task
-- Can serve multiple concurrent ancestor fetches
-
-**Lifecycle**:
-- Spawned once at Actor startup
-- Runs continuously throughout Actor lifetime
-- Handles requests from all peers for all consensus instances
+A peer will only respond if it already has the requested block in its marshal storage. Blocks
+finalized before the late validator started are guaranteed to be present on honest peers that
+ran from genesis.
 
 ## Error Handling
 
-### Missing Blocks
+| Situation | Behaviour |
+|---|---|
+| Peer timeout | Back off, try next peer in rotation |
+| Global timeout exceeded | Log warning, partial reconstruction forwarded |
+| Digest mismatch on response | Log warning, discard block, retry |
+| No peers available | Log warning, stop loop |
+| Send failure to peer | Retry immediately with next peer |
+| Partial reconstruction | `run_buffer` stalls waiting for the missing height; the gatling cursor for that instance will remain blocked until the block is eventually fetched via a future finalization event |
 
-If an ancestor block cannot be fetched after all retries:
+## Serving Ancestor Requests
 
-```rust
-// Max retries reached - give up on this ancestor
-info!("Could not fetch ancestor {} after {} retries - stopping ancestor chain", 
-      cursor_digest, MAX_RETRIES);
-break;  // Stop walking up the chain
-```
+The `ancestor_message_handler` task (spawned at actor startup) handles incoming requests:
 
-**Impact**:
-- Ancestor chain finalization stops at this point
-- Blocks above this ancestor remain unfinalized
-- System continues normally (doesn't crash)
+1. Decode as `AncestorFetcher::Request`.
+2. For each requested digest, call `marshal.subscribe(None, digest)` with `LOCAL_CHECK_TIMEOUT_MS`.
+3. If found: reply with `AncestorFetcher::Response` containing the block.
+4. If not found: do not reply (the requester will timeout and retry another peer).
 
-### Invalid Responses
-
-If a block response doesn't match the requested digest:
-
-```rust
-if block.digest() != cursor_digest {
-    warn!("Received ancestor block with mismatched digest");
-    // Continue retry loop
-}
-```
-
-### Network Failures
-
-If ancestor channel send fails:
+## Channel Registration
 
 ```rust
-if send_result.is_err() {
-    warn!("Failed to send ancestor request to peers: {:?}", send_result.err());
-    // Remove from pending and continue retry
-    pending_ancestor_requests.remove(&cursor_digest);
-}
-```
-
-## Metrics and Logging
-
-### Log Messages
-
-- `"Starting ancestor finalization task for block X with parent: Y"`
-- `"Attempting to fetch ancestor X"`
-- `"Successfully fetched ancestor X (view Y) from marshal local storage"`
-- `"Ancestor X not in marshal, requesting from peers"`
-- `"Received ancestor X (view Y) from peer, verifying digest"`
-- `"Retry N for ancestor X (waiting Yms)"`
-- `"Could not fetch ancestor X after N retries - stopping ancestor chain"`
-- `"Completed ancestor finalization chain: N ancestors finalized"`
-
-### Debug Messages
-
-- `"Received ancestor request from peer for digest: X"`
-- `"Sent ancestor block X to peers"`
-- `"Don't have requested ancestor X in local storage, ignoring request"`
-- `"Received ancestor response for block X"`
-
-## Configuration
-
-### Channel Registration
-
-```rust
-// In validator.rs
+// validator.rs
 const ANCESTOR_CHANNEL: u32 = 6;
-
-// Per-instance channel
-let ancestor_channel = base_channel + ANCESTOR_CHANNEL;
+let ancestor_channel = base_channel + ANCESTOR_CHANNEL; // base = instance_id * 10
 let ancestor = network.register(
     ancestor_channel,
-    Quota::per_second(NonZeroU32::new(16).unwrap()),  // 16 msg/sec
+    Quota::per_second(NonZeroU32::new(16).unwrap()),
     config.message_backlog
 );
-```
-
-### Timeouts and Constants
-
-```rust
-// In actor.rs finalize_ancestors task
-const MAX_RETRIES: usize = 5;
-const INITIAL_RETRY_DELAY_MS: u64 = 100;
-const MAX_RETRY_DELAY_MS: u64 = 1000;
-const LOCAL_CHECK_TIMEOUT_MS: u64 = 10;  // Marshal local storage check
 ```
 
 ## Comparison with Marshal Backfill
 
 | Aspect | Ancestor Channel | Marshal Backfill |
-|--------|------------------|------------------|
-| **Purpose** | Fetch ancestors for finalization | General block fetching |
-| **Trigger** | Explicit request in `finalize_ancestors` | Automatic when `marshal.subscribe()` fails |
-| **Scope** | Only ancestor blocks | Any missing blocks |
-| **Channel** | Dedicated ancestor channel (per-instance) | Backfill channel (shared) |
-| **Local Check** | 10ms timeout (avoid backfill) | Full backfill mechanism |
-| **Rate Limit** | 16 msg/sec per instance | 8 msg/sec shared |
-| **Message Format** | Request: Digest, Response: Block | Internal to marshal |
-
-## Example Scenarios
-
-### Scenario 1: All Ancestors in Local Storage
-
-```
-1. Block 10 finalized → parent = block_9_digest
-2. Check marshal for block_9 → Found immediately (< 1ms)
-3. Use block 9, continue to block 8
-4. Check marshal for block_8 → Found immediately
-5. Continue until genesis
-6. All ancestors finalized from local storage
-```
-
-### Scenario 2: Missing Ancestor, Peer Has It
-
-```
-1. Block 10 finalized → parent = block_9_digest
-2. Check marshal for block_9 → Not found (10ms timeout)
-3. Send ancestor request to peers
-4. Validator B receives request, has block_9 in local storage
-5. Validator B sends block_9 response
-6. Validator A receives response, verifies digest
-7. Store block_9 in marshal
-8. Continue ancestor chain
-```
-
-### Scenario 3: Missing Ancestor, No Peer Has It
-
-```
-1. Block 10 finalized → parent = block_9_digest
-2. Check marshal → Not found
-3. Send ancestor request → No response (after waiting)
-4. Retry 1: Wait 100ms, check marshal, send request → No response
-5. Retry 2: Wait 200ms, check marshal, send request → No response
-6. Retry 3: Wait 400ms, check marshal, send request → No response
-7. Retry 4: Wait 800ms, check marshal, send request → No response
-8. Retry 5: Wait 1000ms, check marshal, send request → No response
-9. Give up: "Could not fetch ancestor X after 5 retries"
-10. Stop ancestor chain finalization
-```
-
-## Performance Characteristics
-
-### Latency
-
-- **Local storage hit**: < 1ms
-- **Peer request round-trip**: ~50-200ms (depending on network)
-- **Retry delay**: 100ms, 200ms, 400ms, 800ms, 1000ms
-
-### Throughput
-
-- **Rate limit**: 16 ancestor requests/second per consensus instance
-- **Concurrent requests**: Multiple ancestors can be fetched concurrently
-- **Message handler**: Single handler serves all requests/responses
-
-### Resource Usage
-
-- **Memory**: Pending requests map (HashMap<Digest, oneshot::Sender>)
-- **Network**: Ancestor channel messages (Digest + Block encodings)
-- **CPU**: Minimal (mostly message encoding/decoding)
-
-## Future Improvements
-
-Potential enhancements:
-1. **Request deduplication**: If multiple tasks request same ancestor, share response
-2. **Response routing**: Send responses directly to requesting peer (more efficient)
-3. **Adaptive timeout**: Adjust timeout based on network conditions
-4. **Batch requests**: Request multiple ancestors in single message
-5. **Priority queuing**: Prioritize more recent ancestors
-
+|---|---|---|
+| Purpose | Fetch ancestors for finalization ordering | General missing-block recovery |
+| Trigger | Explicit: `finalize_ancestors` task | Automatic: `marshal.subscribe()` miss |
+| Scope | Ancestor chain of a specific finalized block | Any missing block |
+| Peer targeting | One peer at a time (round-robin) | Internal to marshal |
+| Local check timeout | 500ms (covers archive restoration) | Full backfill duration |
+| On failure | Partial reconstruction, logged | Backfill retries indefinitely |
