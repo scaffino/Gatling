@@ -35,8 +35,8 @@ const BACKFILL_BY_DIGEST_CHANNEL: u32 = 4;
 const TRANSACTION_CHANNEL: u32 = 5;
 const ANCESTOR_CHANNEL: u32 = 6;
 
-const LEADER_TIMEOUT: Duration = Duration::from_millis(10000);
-const NOTARIZATION_TIMEOUT: Duration = Duration::from_millis(15000);
+const LEADER_TIMEOUT: Duration = Duration::from_millis(12500);
+const NOTARIZATION_TIMEOUT: Duration = Duration::from_millis(17500);
 const NULLIFY_RETRY: Duration = Duration::from_secs(10);
 const ACTIVITY_TIMEOUT: u64 = 256;
 const SKIP_TIMEOUT: u64 = 32;
