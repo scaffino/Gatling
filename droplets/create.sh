@@ -1,5 +1,5 @@
 #!/bin/bash
-REGIONS=(lon1 nyc2 sgp1 ams3 fra1 tor1 sfo3 blr1 syd1 nyc3)
+REGIONS=(lon1 nyc1 sgp1 ams3 sfo2 tor1 sfo3 blr1 syd1 nyc3) 
 
 # Get the directory where this script is located
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -49,7 +49,7 @@ for region in "${REGIONS[@]}"; do
   echo "Creating droplet in region: $region"
   doctl compute droplet create "gatling-${region}" \
     --region "$region" \
-    --size s-8vcpu-16gb \
+    --size g-8vcpu-32gb \
     --image ubuntu-22-04-x64 \
     --ssh-keys "$SSH_KEYS" \
     --user-data-file "$SETUP_YAML" \

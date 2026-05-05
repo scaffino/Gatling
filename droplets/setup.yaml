@@ -11,6 +11,7 @@ packages:
   - build-essential
   - curl
   - chrony
+  - sysstat
 
 write_files:
   - path: /root/setup-script.sh
@@ -32,14 +33,30 @@ write_files:
       #export PATH="/root/.cargo/bin:$PATH"
       # -----------------------------------------------------
 
-      # Ensure tools present (already installed via packages, but safe if image differs)
-      apt-get update -y
-      apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev curl git
+      # Ensure tools present (already installed via cloud-init packages, but safe if image differs)
+      if command -v apt-get >/dev/null 2>&1; then
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -y
+        apt-get install -y --no-install-recommends \
+          build-essential pkg-config libssl-dev curl git chrony sysstat
+      elif command -v dnf >/dev/null 2>&1; then
+        dnf makecache -y
+        dnf install -y \
+          gcc gcc-c++ make pkgconf-pkg-config openssl-devel curl git chrony sysstat || \
+          dnf install -y gcc gcc-c++ make pkgconf-pkg-config openssl-devel curl git chrony
+      elif command -v yum >/dev/null 2>&1; then
+        yum makecache -y
+        yum install -y \
+          gcc gcc-c++ make pkgconfig openssl-devel curl git chrony sysstat || \
+          yum install -y gcc gcc-c++ make pkgconfig openssl-devel curl git chrony
+      else
+        echo "ERROR: no supported package manager found (apt-get/dnf/yum)" >&2
+        exit 1
+      fi
 
       # Keep time in sync (important for timestamp-based measurements)
-      apt-get install chrony
-      systemctl enable chrony
-      systemctl start chrony
+      systemctl enable chrony || true
+      systemctl start chrony || true
 
       # Verify gcc
       command -v gcc >/dev/null
