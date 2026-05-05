@@ -22,7 +22,7 @@ use std::{
     num::NonZeroU32,
     path::PathBuf,
     str::FromStr,
-    sync::{Arc, Mutex, atomic::AtomicU64},
+    sync::{atomic::AtomicU64, Arc, Mutex},
     time::Duration,
 };
 use tracing::{error, info, warn, Level};
@@ -35,8 +35,8 @@ const BACKFILL_BY_DIGEST_CHANNEL: u32 = 4;
 const TRANSACTION_CHANNEL: u32 = 5;
 const ANCESTOR_CHANNEL: u32 = 6;
 
-const LEADER_TIMEOUT: Duration = Duration::from_millis(6000);
-const NOTARIZATION_TIMEOUT: Duration = Duration::from_millis(7000);
+const LEADER_TIMEOUT: Duration = Duration::from_millis(4800);
+const NOTARIZATION_TIMEOUT: Duration = Duration::from_millis(5500);
 const NULLIFY_RETRY: Duration = Duration::from_secs(10);
 const ACTIVITY_TIMEOUT: u64 = 256;
 const SKIP_TIMEOUT: u64 = 32;
@@ -50,7 +50,7 @@ const BLOCKS_FREEZER_TABLE_INITIAL_SIZE: u32 = 2u32.pow(21); // 100MB
 const FINALIZED_FREEZER_TABLE_INITIAL_SIZE: u32 = 2u32.pow(21); // 100MB
 
 /// Gatling thread that orders blocks from all consensus instances by view and instance number.
-/// 
+///
 /// Uses a cursor-based algorithm to finalize blocks strictly in ascending order of (view, instance).
 /// The algorithm maintains a cursor that always points to the top-leftmost unfinalized cell in the
 /// matrix of instances (rows) × views (columns), ensuring strict ordering guarantees.
@@ -60,44 +60,47 @@ async fn gatling_thread(
     num_instances: usize,
 ) {
     use std::collections::BTreeMap;
-    
+
     // ============================================================================
     // DATA STRUCTURES
     // ============================================================================
-    
+
     // Per-instance queues of finalized blocks, keyed by view number (from block.view, not proof)
     // - Some(block) = view that has a finalized block from consensus (directly finalized view)
     // - None = view marked as finalized without a block (indirectly finalized view) to fill gaps when instances skip views
     // Note: All blocks are finalized with the same event - what differs is how VIEWS are finalized (directly vs indirectly)
-    let mut instance_queues: Vec<BTreeMap<u64, Option<alto_types::Block>>> = 
+    let mut instance_queues: Vec<BTreeMap<u64, Option<alto_types::Block>>> =
         (0..num_instances).map(|_| BTreeMap::new()).collect();
-    
+
     // Per-instance highest directly finalized view (only tracks views with actual blocks from consensus)
     // Used to track progress: if finalized_up_to[k] >= v, then all views <= v for instance k are already finalized
     let mut finalized_up_to: Vec<u64> = vec![0; num_instances];
-    
+
     // Global cursor position: always points to the next top-leftmost unfinalized cell
     // Cursor moves lexicographically: (view, instance) = (1,0), (1,1), ..., (1,K-1), (2,0), ...
     let mut cursor_view: u64 = 1;
     let mut cursor_instance: usize = 0;
-    
-    info!("[gatling] Gatling thread started for {} instances", num_instances);
-    
+
+    info!(
+        "[gatling] Gatling thread started for {} instances",
+        num_instances
+    );
+
     // ============================================================================
     // MAIN EVENT LOOP: Process finalized blocks from all instances
     // ============================================================================
-    
+
     while let Some(event) = rx.next().await {
         // Convert 1-based instance ID to 0-based index
         let instance_idx = event.instance_id - 1;
-        
+
         // Get view number directly from the block (not from finalization proof)
         let view = event.block.view;
-        
+
         // ========================================================================
         // STEP 1: Insert the new block and fill any gaps
         // ========================================================================
-        
+
         // Find the highest view we've seen for this instance (either finalized or queued)
         let highest_queued_view = instance_queues[instance_idx]
             .keys()
@@ -105,7 +108,7 @@ async fn gatling_thread(
             .copied()
             .unwrap_or(0);
         let highest_seen_view = finalized_up_to[instance_idx].max(highest_queued_view);
-        
+
         // If the new block creates a gap (e.g., we have view V and now receive view V+3),
         // mark the intermediate views as indirectly finalized (no blocks, but views are finalized)
         if view > highest_seen_view + 1 && highest_seen_view > 0 {
@@ -115,20 +118,20 @@ async fn gatling_thread(
                 }
             }
         }
-        
+
         // Insert the block into the queue at this view (view is directly finalized with a block)
         instance_queues[instance_idx].insert(view, Some(event.block));
-        
+
         // ========================================================================
         // STEP 2: Try to finalize as much as possible using cursor-based algorithm
         // ========================================================================
-        
+
         loop {
             // Safety check: ensure cursor is within valid bounds
             if cursor_view == 0 || cursor_instance >= num_instances {
                 break;
             }
-            
+
             // Check if this view has already been finalized
             // Since finalized_up_to tracks the highest directly finalized view, and finalizing a view
             // at V implies all views <= V are finalized, we can skip if cursor_view <= finalized_up_to
@@ -136,14 +139,14 @@ async fn gatling_thread(
                 advance_cursor(&mut cursor_view, &mut cursor_instance, num_instances);
                 continue;
             }
-            
+
             // Check what's at the cursor position (view cursor_view for instance cursor_instance)
             match instance_queues[cursor_instance].remove(&cursor_view) {
                 Some(Some(block)) => {
                     // ============================================================
                     // Directly finalized view: view has a block from consensus - finalize it with logging
                     // ============================================================
-                    
+
                     finalize_block_at_view(
                         &block,
                         cursor_view,
@@ -152,7 +155,7 @@ async fn gatling_thread(
                         &mut instance_queues[cursor_instance],
                         &mut finalized_up_to[cursor_instance],
                     );
-                    
+
                     advance_cursor(&mut cursor_view, &mut cursor_instance, num_instances);
                     continue;
                 }
@@ -161,7 +164,7 @@ async fn gatling_thread(
                     // Indirectly finalized view: view is marked as finalized but has no block
                     // Just advance cursor (no logging, no update to finalized_up_to)
                     // ============================================================
-                    
+
                     advance_cursor(&mut cursor_view, &mut cursor_instance, num_instances);
                     continue;
                 }
@@ -170,15 +173,15 @@ async fn gatling_thread(
                     let has_higher_view = instance_queues[cursor_instance]
                         .keys()
                         .any(|&v| v > cursor_view);
-                    
+
                     if has_higher_view {
                         // Instance has moved past cursor_view, so cursor_view is a gap
                         // Mark this view as indirectly finalized (no block, but view is finalized)
                         instance_queues[cursor_instance].insert(cursor_view, None);
-                        
+
                         advance_cursor(&mut cursor_view, &mut cursor_instance, num_instances);
                         continue;
-                        } else {
+                    } else {
                         // Cannot make progress: waiting for block at cursor_view or evidence
                         // that this instance has moved past it
                         break;
@@ -187,7 +190,7 @@ async fn gatling_thread(
             }
         }
     }
-    
+
     info!("[gatling] Gatling thread stopped");
 }
 
@@ -216,32 +219,28 @@ fn finalize_block_at_view(
     finalized_up_to: &mut u64,
 ) {
     let instance_id = instance_idx + 1; // Convert to 1-based for display
-                let tx_count = block.transactions.len();
-                
+    let tx_count = block.transactions.len();
+
     // Log the globally finalized block (all blocks are finalized the same way)
-                info!(
-                    "[gatling] Validator {} finalized block {} from instance {} (view {}) with {} transactions",
+    info!(
+        "[gatling] Validator {} finalized block {} from instance {} (view {}) with {} transactions",
         validator_index, block.height, instance_id, view, tx_count
-                );
-                
-                // Log each transaction in the block
-                for tx in &block.transactions {
-                    let tx_id = tx.digest();
-                    info!(
+    );
+
+    // Log each transaction in the block
+    for tx in &block.transactions {
+        let tx_id = tx.digest();
+        info!(
                         "[gatling] Transaction {:?} (timestamp: {} ms) is now final in block {} from instance {} (view {})",
             tx_id, tx.timestamp, block.height, instance_id, view
         );
     }
-    
+
     // Update highest directly finalized view (only when a view has a block from consensus)
     *finalized_up_to = view;
-    
+
     // Clean up: remove any entries for views < view (they've already been processed)
-    let views_to_remove: Vec<u64> = queue
-        .keys()
-        .copied()
-        .filter(|&v| v < view)
-        .collect();
+    let views_to_remove: Vec<u64> = queue.keys().copied().filter(|&v| v < view).collect();
     for view_to_remove in views_to_remove {
         queue.remove(&view_to_remove);
     }
@@ -300,11 +299,15 @@ fn main() {
     );
 
     // Parse consensus instances count
-    let consensus_instances: usize = matches.get_one::<String>("consensus-instances")
+    let consensus_instances: usize = matches
+        .get_one::<String>("consensus-instances")
         .unwrap()
         .parse()
         .expect("Invalid consensus instances count");
-    assert!(consensus_instances > 0, "Number of consensus instances must be at least 1");
+    assert!(
+        consensus_instances > 0,
+        "Number of consensus instances must be at least 1"
+    );
 
     // Parse gossip flag (default: enabled if neither flag is specified)
     let gossip_enabled = if matches.get_flag("no-gossip-txs") {
@@ -317,23 +320,28 @@ fn main() {
     let gatling_enabled = matches.get_flag("gatling");
 
     // Parse submit-tx arguments (optional)
-    let submit_tx_config: Option<(f64, u64, u64)> = if let Some(values) = matches.get_many::<String>("submit-tx") {
-        let values: Vec<&String> = values.collect();
-        if values.len() == 3 {
-            let rate: f64 = values[0].parse().expect("Invalid rate (must be a number)");
-            let start_delay: u64 = values[1].parse().expect("Invalid start delay (must be a positive integer)");
-            let duration: u64 = values[2].parse().expect("Invalid duration (must be a positive integer)");
-            
-            assert!(rate > 0.0, "Rate must be greater than 0");
-            assert!(duration > 0, "Duration must be greater than 0");
-            
-            Some((rate, start_delay, duration))
+    let submit_tx_config: Option<(f64, u64, u64)> =
+        if let Some(values) = matches.get_many::<String>("submit-tx") {
+            let values: Vec<&String> = values.collect();
+            if values.len() == 3 {
+                let rate: f64 = values[0].parse().expect("Invalid rate (must be a number)");
+                let start_delay: u64 = values[1]
+                    .parse()
+                    .expect("Invalid start delay (must be a positive integer)");
+                let duration: u64 = values[2]
+                    .parse()
+                    .expect("Invalid duration (must be a positive integer)");
+
+                assert!(rate > 0.0, "Rate must be greater than 0");
+                assert!(duration > 0, "Duration must be greater than 0");
+
+                Some((rate, start_delay, duration))
+            } else {
+                None
+            }
         } else {
             None
-        }
-    } else {
-        None
-    };
+        };
 
     // Load config
     let config_file = matches.get_one::<String>("config").unwrap();
