@@ -18,7 +18,7 @@ bash "${SCRIPT_DIR}/extract_gatling_logs.sh"
 echo "Step 3/4: Computing latency..."
 python3 "${SCRIPT_DIR}/generate_csv.py"
 
-echo "Step 3/4: Generating plots..."
+echo "Step 4/4: Generating plots..."
 python3 "${SCRIPT_DIR}/plots.py"
 
 echo "Postprocessing completed."

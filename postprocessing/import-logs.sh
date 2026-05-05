@@ -5,7 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 IPS_FILE="${SCRIPT_DIR}/../remote-runs/ips.txt"
 LOG_DIR="${SCRIPT_DIR}/../logs/validator"
-REMOTE_LOG_DIR="/root/alto/logs/validator"
+REMOTE_LOG_DIR="/root/Gatling/logs/validator"
 
 # SSH options
 SSH_OPTS=(
