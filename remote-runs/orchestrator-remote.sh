@@ -5,7 +5,7 @@ set -euo pipefail
 # =============================================================================
 # Remote Orchestrator
 # - Iterates over INSTANCES (explicit list of consensus instance counts)
-# - For each instance count, runs RUNS_PER_INSTANCE repetitions
+# - For each instance count, runs one experiment
 # - Before each run: re-run setup (fresh configs)
 # - Deploys configs + per-validator peers.yaml to each remote
 # - Starts validators on remotes with --submit-tx (built-in transaction generation)
@@ -44,7 +44,7 @@ set -euo pipefail
 #
 # Environment variables (override defaults)
 #   - V: number of validators (must match ips.txt line count)
-#   - RUN_DURATION_SECONDS, INSTANCES, RUNS_PER_INSTANCE
+#   - RUN_DURATION_SECONDS, INSTANCES
 #   - SUBMIT_TX_RATE, SUBMIT_TX_START, SUBMIT_TX_DURATION (computed if not set)
 #   - REMOTE_REPO_DIR, REMOTE_BASE_DIR, REMOTE_LOG_DIR, REMOTE_STORAGE_DIR
 #   - CRASH_VALIDATOR_INDEX, CRASH_DELAY_SECONDS (alternatives to flags)
@@ -53,8 +53,6 @@ set -euo pipefail
 # -----------------------------
 # Configuration (overridable)
 # -----------------------------
-RUNS_PER_INSTANCE="${RUNS_PER_INSTANCE:-1}"
-
 # Explicit consensus instances sweep (space or comma separated).
 INSTANCES="${INSTANCES:-1 10 20 30 40 50}"
 
@@ -69,7 +67,7 @@ CRASH_DELAY_SECONDS="${CRASH_DELAY_SECONDS:-0}"      # delay after readiness bef
 RUN_DURATION_SECONDS="${RUN_DURATION_SECONDS:-1200}"
 SETTLE_SECONDS="${SETTLE_SECONDS:-4}"
 READINESS_TIMEOUT="${READINESS_TIMEOUT:-300}"    # seconds to wait for first finalized block per validator
-MAX_RUN_RETRIES="${MAX_RUN_RETRIES:-2}"          # total attempts per (instances, run_idx) before giving up
+MAX_RUN_RETRIES="${MAX_RUN_RETRIES:-2}"          # total attempts per instance value before giving up
 
 # Transaction submission parameters (built into validators via --submit-tx)
 SUBMIT_TX_RATE="${SUBMIT_TX_RATE:-100}"          # Transactions per second
@@ -136,7 +134,7 @@ load_remote_hosts
 # Setup parameters (mirrors run-remote.sh)
 SETUP_PEERS="${V}"
 SETUP_BOOTSTRAPPERS="1"
-SETUP_WORKER_THREADS=3
+SETUP_WORKER_THREADS=8
 SETUP_LOG_LEVEL="info"
 SETUP_MESSAGE_BACKLOG=16384
 SETUP_MAILBOX_SIZE=16384
@@ -208,12 +206,12 @@ Usage: $(basename "$0") [options]
 Options:
   -t, --duration SECONDS    Max run time per experiment before kill (default: ${RUN_DURATION_SECONDS})
       --instances LIST      Explicit instances list (comma/space separated, default: ${INSTANCES})
-      --runs-per-instance N Number of runs per instance (default: ${RUNS_PER_INSTANCE})
+
       --crash-validator-index N  After readiness, crash validator at 0-based index N (default: disabled)
       --crash-delay SECONDS      Delay after readiness before crashing (default: ${CRASH_DELAY_SECONDS})
 
 You can also set environment variables:
-  RUN_DURATION_SECONDS, INSTANCES, RUNS_PER_INSTANCE,
+  RUN_DURATION_SECONDS, INSTANCES,
   SUBMIT_TX_RATE, SUBMIT_TX_START, SUBMIT_TX_DURATION,
   CRASH_VALIDATOR_INDEX, CRASH_DELAY_SECONDS, etc.
 EOF
@@ -231,11 +229,6 @@ parse_args() {
         shift
         [[ $# -gt 0 ]] || { err "Missing value for --instances"; exit 2; }
         INSTANCES="$1"
-        ;;
-      --runs-per-instance)
-        shift
-        [[ $# -gt 0 ]] || { err "Missing value for --runs-per-instance"; exit 2; }
-        RUNS_PER_INSTANCE="$1"
         ;;
       --crash-validator-index)
         shift
@@ -262,7 +255,7 @@ parse_args() {
 }
 
 crash_one_validator() {
-  local instances="$1" run_idx="$2"
+  local instances="$1"
   [[ -n "${CRASH_VALIDATOR_INDEX}" ]] || return 0
 
   if [[ ! "${CRASH_VALIDATOR_INDEX}" =~ ^[0-9]+$ ]]; then
@@ -281,10 +274,10 @@ crash_one_validator() {
   fi
 
   if [[ "${CRASH_DELAY_SECONDS}" -gt 0 ]]; then
-    log "Crash injection armed: will kill validator idx=${CRASH_VALIDATOR_INDEX} after ${CRASH_DELAY_SECONDS}s (instances=${instances}, run=${run_idx})..."
+    log "Crash injection armed: will kill validator idx=${CRASH_VALIDATOR_INDEX} after ${CRASH_DELAY_SECONDS}s (instances=${instances})..."
     sleep "${CRASH_DELAY_SECONDS}"
   else
-    log "Crash injection armed: killing validator idx=${CRASH_VALIDATOR_INDEX} now (instances=${instances}, run=${run_idx})..."
+    log "Crash injection armed: killing validator idx=${CRASH_VALIDATOR_INDEX} now (instances=${instances})..."
   fi
 
   local host="${REMOTE_HOSTS[CRASH_VALIDATOR_INDEX]}"
@@ -423,7 +416,7 @@ generate_peers_yaml() {
 # Phase: Wait for all validators to produce their first finalized block
 # ---------------------------------
 wait_for_readiness() {
-  local instances="$1" run_idx="$2"
+  local instances="$1"
   local deadline=$(( $(date +%s) + READINESS_TIMEOUT ))
   log "Waiting for all validators to finalize their first block (timeout: ${READINESS_TIMEOUT}s)..."
 
@@ -433,7 +426,7 @@ wait_for_readiness() {
     local idx
     for idx in "${!REMOTE_HOSTS[@]}"; do
       local host="${REMOTE_HOSTS[idx]}"
-      local log_file="${REMOTE_LOG_DIR}/val_${PUBLIC_KEYS[idx]}_i${instances}_r${run_idx}.log"
+      local log_file="${REMOTE_LOG_DIR}/val_i${instances}_${PUBLIC_KEYS[idx]}.log"
       if ! remote_cmd "${host}" "grep -qF '[gatling] Validator' '${log_file}'" 2>/dev/null; then
         all_ready=false
         not_ready+=("${idx}")
@@ -451,7 +444,7 @@ wait_for_readiness() {
       for idx in "${not_ready[@]}"; do
         local ip="${REMOTE_IPS[idx]:-unknown}"
         local ident="${PUBLIC_KEYS[idx]:-unknown}"
-        local log_file="${REMOTE_LOG_DIR}/val_${ident}_i${instances}_r${run_idx}.log"
+        local log_file="${REMOTE_LOG_DIR}/val_i${instances}_${ident}.log"
         err "  - ip=${ip} ident=${ident} log=${log_file}"
       done
       return 1
@@ -591,7 +584,6 @@ clear_storage_directories() {
 # ---------------------------------
 start_validators() {
   local instances="$1"
-  local run_idx="$2"
   ACTIVE_VALIDATOR_SSH_PIDS=()
 
   # Pre-run cleanup: kill any existing validators
@@ -611,7 +603,7 @@ start_validators() {
   for idx in "${!REMOTE_HOSTS[@]}"; do
     local host="${REMOTE_HOSTS[idx]}"
     local public_key="${PUBLIC_KEYS[idx]}"
-    local log_name="val_${public_key}_i${instances}_r${run_idx}.log"
+    local log_name="val_i${instances}_${public_key}.log"
     local cmd="
 export PATH=\"/root/.cargo/bin:\$PATH\" && \
 [ -f /root/.cargo/env ] && source /root/.cargo/env || true && \
@@ -629,7 +621,7 @@ cd '${REMOTE_REPO_DIR}' && \
     ssh "${SSH_OPTS[@]}" "${host}" "${cmd}" &
     ACTIVE_VALIDATOR_SSH_PIDS+=("$!")
   done
-  log "Started validators for instance=${instances}, run=${run_idx}"
+  log "Started validators for instance=${instances}"
 }
 
 # ---------------------------------
@@ -683,52 +675,50 @@ main() {
   done
   wait 2>/dev/null || true
 
-  local instances run_idx
+  local instances
   for instances in "${instances_list[@]}"; do
-    for run_idx in $(seq 1 "${RUNS_PER_INSTANCE}"); do
-      log "===== RUN START: instances=${instances}, run=${run_idx} ====="
-      export CONSENSUS_INSTANCES="${instances}"
+    log "===== RUN START: instances=${instances} ====="
+    export CONSENSUS_INSTANCES="${instances}"
 
-      local attempt run_ok
-      run_ok=0
-      for attempt in $(seq 1 $((MAX_RUN_RETRIES + 1))); do
-        [[ ${attempt} -gt 1 ]] && log "Retrying run (attempt ${attempt}/$(( MAX_RUN_RETRIES + 1 )))..."
-        if (
-          set +e
-          generate_configs
-          collect_validator_info
-          clear_storage_directories
-          deploy_to_vms
-          start_validators "${instances}" "${run_idx}"
-          log "Validators configured with --submit-tx ${SUBMIT_TX_RATE} ${SUBMIT_TX_START} ${SUBMIT_TX_DURATION}"
+    local attempt run_ok
+    run_ok=0
+    for attempt in $(seq 1 $((MAX_RUN_RETRIES + 1))); do
+      [[ ${attempt} -gt 1 ]] && log "Retrying run (attempt ${attempt}/$(( MAX_RUN_RETRIES + 1 )))..."
+      if (
+        set +e
+        generate_configs
+        collect_validator_info
+        clear_storage_directories
+        deploy_to_vms
+        start_validators "${instances}"
+        log "Validators configured with --submit-tx ${SUBMIT_TX_RATE} ${SUBMIT_TX_START} ${SUBMIT_TX_DURATION}"
 
-          if ! wait_for_readiness "${instances}" "${run_idx}"; then
-            kill_everything || true
-            exit 1
-          fi
-
-          crash_one_validator "${instances}" "${run_idx}"
-
-          local kill_at sleep_for
-          kill_at=$(( GENESIS_TS + RUN_DURATION_SECONDS ))
-          sleep_for=$(( kill_at - $(date +%s) ))
-          [[ ${sleep_for} -lt 0 ]] && sleep_for=0
-          log "Sleeping ${sleep_for}s (kill at genesis+${RUN_DURATION_SECONDS}s)..."
-          sleep "${sleep_for}"
+        if ! wait_for_readiness "${instances}"; then
           kill_everything || true
-        ); then
-          run_ok=1
-          break
-        else
-          err "Attempt ${attempt} failed for instances=${instances}, run=${run_idx}"
+          exit 1
         fi
-      done
-      [[ ${run_ok} -eq 1 ]] || err "All attempts exhausted for instances=${instances}, run=${run_idx}, skipping"
 
-      log "Settle ${SETTLE_SECONDS}s..."
-      sleep "${SETTLE_SECONDS}"
-      log "===== RUN END: instances=${instances}, run=${run_idx} ====="
+        crash_one_validator "${instances}"
+
+        local kill_at sleep_for
+        kill_at=$(( GENESIS_TS + RUN_DURATION_SECONDS ))
+        sleep_for=$(( kill_at - $(date +%s) ))
+        [[ ${sleep_for} -lt 0 ]] && sleep_for=0
+        log "Sleeping ${sleep_for}s (kill at genesis+${RUN_DURATION_SECONDS}s)..."
+        sleep "${sleep_for}"
+        kill_everything || true
+      ); then
+        run_ok=1
+        break
+      else
+        err "Attempt ${attempt} failed for instances=${instances}"
+      fi
     done
+    [[ ${run_ok} -eq 1 ]] || err "All attempts exhausted for instances=${instances}, skipping"
+
+    log "Settle ${SETTLE_SECONDS}s..."
+    sleep "${SETTLE_SECONDS}"
+    log "===== RUN END: instances=${instances} ====="
   done
 
   trap - INT TERM
