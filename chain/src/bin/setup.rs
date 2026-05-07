@@ -281,12 +281,12 @@ fn generate_local(
 
     // Generate instance configurations
     let mut port = start_port;
-    // Compute genesis timestamp (seconds) rounded up to the next minute + 2 once for all peers
+    // Compute genesis timestamp (seconds) rounded up to the next minute + 4 once for all peers
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    let genesis_timestamp = ((now_secs / 60) + 3) * 60;
+    let genesis_timestamp = ((now_secs / 60) + 4) * 60;
     println!("genesis timestamp: {}", genesis_timestamp);
     let mut addresses = HashMap::new();
     let mut configurations = Vec::new();
