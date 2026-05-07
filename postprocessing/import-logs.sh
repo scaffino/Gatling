@@ -5,8 +5,6 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 IPS_FILE="${SCRIPT_DIR}/../remote-runs/ips.txt"
 LOG_DIR="${SCRIPT_DIR}/../logs/validator"
 REMOTE_LOG_DIR="/root/Gatling/logs/validator"
-LOCAL_METRICS_DIR="${LOG_DIR}/metrics"
-REMOTE_METRICS_DIR="${REMOTE_LOG_DIR}/metrics"
 
 SSH_OPTS=(
   -o BatchMode=yes
@@ -16,7 +14,6 @@ SSH_OPTS=(
 )
 
 mkdir -p "${LOG_DIR}"
-mkdir -p "${LOCAL_METRICS_DIR}"
 
 load_hosts() {
   local hosts=()
@@ -99,21 +96,6 @@ download_from_host() {
       }
     fi
   done
-
-  # Download metrics tree (K*/...) if present.
-  local host_metrics_dir="${LOCAL_METRICS_DIR}/${host_id}"
-  mkdir -p "${host_metrics_dir}"
-
-  ssh "${SSH_OPTS[@]}" "${host}" "ls -d ${REMOTE_METRICS_DIR}/K* 2>/dev/null" | while read -r kdir; do
-    [[ -n "${kdir}" ]] || continue
-    local kname
-    kname="$(basename "${kdir}")" # e.g., K35
-    echo "  [${host_id}] Downloading metrics ${kname}/ ..."
-    mkdir -p "${host_metrics_dir}/${kname}"
-    scp -r "${SSH_OPTS[@]}" "${host}:${kdir}/" "${host_metrics_dir}/" || {
-      echo "  [${host_id}] Warning: Failed to download metrics ${kname}" >&2
-    }
-  done
 }
 
 echo "Loading hosts from ${IPS_FILE}..."
@@ -137,4 +119,3 @@ if [[ ${failed} -gt 0 ]]; then
 fi
 echo "Import complete."
 echo "  Logs saved to:    ${LOG_DIR}"
-echo "  Metrics saved to: ${LOCAL_METRICS_DIR}"

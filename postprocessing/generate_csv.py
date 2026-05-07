@@ -112,6 +112,17 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Exclude transactions created after this Unix ms timestamp",
     )
+    parser.add_argument(
+        "--tx-window-duration",
+        dest="tx_window_duration",
+        type=int,
+        default=None,
+        help=(
+            "Per-instance-count tx window length in milliseconds. "
+            "For each instance count the window is [first_tx_ts, first_tx_ts + duration]. "
+            "Takes precedence over --tx-window-start/--tx-window-end when set."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -197,16 +208,62 @@ def parse_latency_occurrences(
         return
 
 
+def find_tx_window_start_per_instance(dir_path: str) -> Dict[int, int]:
+    """Scan all files to find the minimum tx_ts_ms per instance count.
+
+    This is the first pass used when --tx-window-duration is set. It detects
+    the actual tx submission start time per instance count from the data,
+    avoiding any dependency on stored genesis timestamps.
+    """
+    min_tx_ts: Dict[int, int] = {}
+    for file_path, instances, _ in iter_gatling_files(dir_path):
+        try:
+            with open(file_path, "r") as f:
+                for line in f:
+                    fin_m = FINALIZE_RE.search(line)
+                    if not fin_m:
+                        continue
+                    tx_ts = int(fin_m.group(2))
+                    if instances not in min_tx_ts or tx_ts < min_tx_ts[instances]:
+                        min_tx_ts[instances] = tx_ts
+        except IOError:
+            continue
+    return min_tx_ts
+
+
 def aggregate_by_instances(
     dir_path: str,
     tx_window_start: Optional[int] = None,
     tx_window_end: Optional[int] = None,
+    tx_window_duration: Optional[int] = None,
 ) -> Dict[int, Dict[str, List[int]]]:
     """
     Returns mapping: instances -> { tx_hash -> [latency_ms, ...] }
     For each transaction, collects the first finalization event from each
     validator file (one latency value per validator).
+
+    When tx_window_duration is set the window is computed per instance count
+    as [first_tx_ts, first_tx_ts + tx_window_duration] where first_tx_ts is
+    the earliest transaction timestamp seen for that instance count. This
+    correctly handles different genesis timestamps across runs without
+    requiring any external metadata.
+
+    tx_window_start / tx_window_end (global absolute bounds) are applied as a
+    fallback when tx_window_duration is not set.
     """
+    # First pass: if tx_window_duration is given, detect per-instance tx start
+    per_instance_start: Dict[int, int] = {}
+    if tx_window_duration is not None:
+        per_instance_start = find_tx_window_start_per_instance(dir_path)
+        print("\nDetected tx window per instance count ({0}s window):".format(
+            tx_window_duration // 1000
+        ))
+        for k in sorted(per_instance_start):
+            start = per_instance_start[k]
+            end = start + tx_window_duration
+            print("  instances={0}: first_tx={1}ms  end={2}ms".format(k, start, end))
+
+    # Second pass: aggregate latencies with effective per-instance window
     by_instances: Dict[int, Dict[str, List[int]]] = defaultdict(
         lambda: defaultdict(list)
     )
@@ -215,8 +272,16 @@ def aggregate_by_instances(
 
     for file_path, instances, validator in iter_gatling_files(dir_path):
         any_file = True
+
+        if tx_window_duration is not None and instances in per_instance_start:
+            eff_start: Optional[int] = per_instance_start[instances]
+            eff_end: Optional[int] = per_instance_start[instances] + tx_window_duration
+        else:
+            eff_start = tx_window_start
+            eff_end = tx_window_end
+
         for tx_hash, latency_ms in parse_latency_occurrences(
-            file_path, tx_window_start, tx_window_end
+            file_path, eff_start, eff_end
         ):
             file_key = (instances, validator, tx_hash)
             if file_key not in seen_per_file:
@@ -398,7 +463,7 @@ def main() -> None:
     args = parse_args()
     check_consistency(args.dir)
     by_instances = aggregate_by_instances(
-        args.dir, args.tx_window_start, args.tx_window_end
+        args.dir, args.tx_window_start, args.tx_window_end, args.tx_window_duration
     )
     stats = compute_instance_stats(by_instances)
 
