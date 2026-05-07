@@ -578,7 +578,8 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                                         String::new()
                                     };
                                     info!("[{}] Validator {} proposed block {} (view {}) with {} transactions at {} (computed {}){}{}", 
-                                          engine_id, validator_idx, block_height, view, final_tx_count, cast_time_utc, computed_time_utc, catchup_msg, second_pickup_msg);
+                                          engine_id, validator_idx, block_height, view, final_tx_count, cast_time_utc, computed_time_utc, catchup_msg, 
+                                          second_pickup_msg);
                                 },
                                 _ = response_closed => {
                                     // The response was cancelled
@@ -966,7 +967,7 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                         // Log each finalized transaction
                         for tx in &block.transactions {
                             let tx_id = tx.digest();
-                            info!("[{}] Transaction {:?} (timestamp: {} ms) is now final in block {} (view {})", 
+                            debug!("[{}] Transaction {:?} (timestamp: {} ms) is now final in block {} (view {})", 
                                   engine_id, tx_id, tx.timestamp, block.height, block.view);
                         }
                     }
@@ -1019,9 +1020,14 @@ pub async fn run_buffer(
 
         loop {
             if let Some(b) = pending.remove(&next_expected_height) {
+                let finalized_at_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
                 let event = crate::engine::GatlingEvent {
                     instance_id,
                     view: b.view as u64,
+                    finalized_at_ms,
                     block: b,
                 };
                 // Ignore send errors (receiver may be gone)

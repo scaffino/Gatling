@@ -47,6 +47,9 @@ LOG_TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z)")
 FINALIZE_RE = re.compile(
     r"Transaction ([a-f0-9]+) \(timestamp: (\d+) ms\) is now final in block"
 )
+# New format: includes finalized_at captured by run_buffer before Gatling thread lag.
+# Falls back to log timestamp for old log files that lack the field.
+FINALIZED_AT_RE = re.compile(r"finalized_at: (\d+) ms")
 
 
 def get_repo_root() -> str:
@@ -144,19 +147,32 @@ def check_consistency(dir_path: str) -> None:
 
 
 def parse_log_line(line: str) -> Optional[Tuple[int, str, int]]:
-    """Returns (log_ts_ms, tx_hash, tx_ts_ms) or None."""
-    ts_m = LOG_TS_RE.search(line)
+    """Returns (finalized_at_ms, tx_hash, tx_ts_ms) or None.
+
+    Uses the embedded finalized_at field when present (written by run_buffer,
+    immune to Gatling thread scheduling lag). Falls back to the log line's
+    leading ISO timestamp for old log files that pre-date this field.
+    """
     fin_m = FINALIZE_RE.search(line)
-    if not ts_m or not fin_m:
+    if not fin_m:
         return None
-    log_ts_str = ts_m.group(1).rstrip("Z")
-    log_dt = datetime.strptime(log_ts_str, "%Y-%m-%dT%H:%M:%S.%f")
-    base_seconds_ms = calendar.timegm(log_dt.timetuple()) * 1000
-    micros_ms = int(log_dt.microsecond / 1000.0)
-    log_ts_ms = base_seconds_ms + micros_ms
     tx_hash = fin_m.group(1)
     tx_ts_ms = int(fin_m.group(2))
-    return log_ts_ms, tx_hash, tx_ts_ms
+
+    at_m = FINALIZED_AT_RE.search(line)
+    if at_m:
+        finalized_at_ms = int(at_m.group(1))
+    else:
+        ts_m = LOG_TS_RE.search(line)
+        if not ts_m:
+            return None
+        log_ts_str = ts_m.group(1).rstrip("Z")
+        log_dt = datetime.strptime(log_ts_str, "%Y-%m-%dT%H:%M:%S.%f")
+        base_seconds_ms = calendar.timegm(log_dt.timetuple()) * 1000
+        micros_ms = int(log_dt.microsecond / 1000.0)
+        finalized_at_ms = base_seconds_ms + micros_ms
+
+    return finalized_at_ms, tx_hash, tx_ts_ms
 
 
 def parse_latency_occurrences(
@@ -171,12 +187,12 @@ def parse_latency_occurrences(
                 parsed = parse_log_line(line)
                 if not parsed:
                     continue
-                log_ts_ms, tx_hash, tx_ts_ms = parsed
+                finalized_at_ms, tx_hash, tx_ts_ms = parsed
                 if tx_window_start is not None and tx_ts_ms < tx_window_start:
                     continue
                 if tx_window_end is not None and tx_ts_ms > tx_window_end:
                     continue
-                yield tx_hash, log_ts_ms - tx_ts_ms
+                yield tx_hash, finalized_at_ms - tx_ts_ms
     except IOError:
         return
 

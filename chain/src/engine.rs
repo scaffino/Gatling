@@ -32,6 +32,9 @@ pub struct GatlingEvent {
     pub instance_id: usize,
     pub view: View,
     pub block: Block,
+    /// Wall-clock ms (Unix epoch) when this validator's run_buffer processed the finalization.
+    /// Used as the finalization timestamp in latency measurements to avoid Gatling thread lag.
+    pub finalized_at_ms: u64,
 }
 
 /// Reporter type for [threshold_simplex::Engine].

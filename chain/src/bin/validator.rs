@@ -66,10 +66,10 @@ async fn gatling_thread(
     // ============================================================================
 
     // Per-instance queues of finalized blocks, keyed by view number (from block.view, not proof)
-    // - Some(block) = view that has a finalized block from consensus (directly finalized view)
+    // - Some((block, finalized_at_ms)) = view that has a finalized block from consensus (directly finalized view)
     // - None = view marked as finalized without a block (indirectly finalized view) to fill gaps when instances skip views
     // Note: All blocks are finalized with the same event - what differs is how VIEWS are finalized (directly vs indirectly)
-    let mut instance_queues: Vec<BTreeMap<u64, Option<alto_types::Block>>> =
+    let mut instance_queues: Vec<BTreeMap<u64, Option<(alto_types::Block, u64)>>> =
         (0..num_instances).map(|_| BTreeMap::new()).collect();
 
     // Per-instance highest directly finalized view (only tracks views with actual blocks from consensus)
@@ -120,7 +120,7 @@ async fn gatling_thread(
         }
 
         // Insert the block into the queue at this view (view is directly finalized with a block)
-        instance_queues[instance_idx].insert(view, Some(event.block));
+        instance_queues[instance_idx].insert(view, Some((event.block, event.finalized_at_ms)));
 
         // ========================================================================
         // STEP 2: Try to finalize as much as possible using cursor-based algorithm
@@ -152,13 +152,14 @@ async fn gatling_thread(
 
             // Check what's at the cursor position (view cursor_view for instance cursor_instance)
             match instance_queues[cursor_instance].remove(&cursor_view) {
-                Some(Some(block)) => {
+                Some(Some((block, finalized_at_ms))) => {
                     // ============================================================
                     // Directly finalized view: view has a block from consensus - finalize it with logging
                     // ============================================================
 
                     finalize_block_at_view(
                         &block,
+                        finalized_at_ms,
                         cursor_view,
                         cursor_instance,
                         validator_index,
@@ -222,10 +223,11 @@ fn advance_cursor(cursor_view: &mut u64, cursor_instance: &mut usize, num_instan
 /// This view has a block from consensus (directly finalized view), so we log it and update finalized_up_to.
 fn finalize_block_at_view(
     block: &alto_types::Block,
+    finalized_at_ms: u64,
     view: u64,
     instance_idx: usize,
     validator_index: usize,
-    queue: &mut std::collections::BTreeMap<u64, Option<alto_types::Block>>,
+    queue: &mut std::collections::BTreeMap<u64, Option<(alto_types::Block, u64)>>,
     finalized_up_to: &mut u64,
 ) {
     let instance_id = instance_idx + 1; // Convert to 1-based for display
@@ -237,12 +239,13 @@ fn finalize_block_at_view(
         validator_index, block.height, instance_id, view, tx_count
     );
 
-    // Log each transaction in the block
+    // Log each transaction with the finalization timestamp captured by run_buffer (not the Gatling
+    // thread's log timestamp, which can lag by seconds under CPU pressure).
     for tx in &block.transactions {
         let tx_id = tx.digest();
         info!(
-                        "[gatling] Transaction {:?} (timestamp: {} ms) is now final in block {} from instance {} (view {})",
-            tx_id, tx.timestamp, block.height, instance_id, view
+            "[gatling] Transaction {:?} (timestamp: {} ms) is now final in block {} from instance {} (view {}) finalized_at: {} ms",
+            tx_id, tx.timestamp, block.height, instance_id, view, finalized_at_ms
         );
     }
 
