@@ -35,8 +35,8 @@ const BACKFILL_BY_DIGEST_CHANNEL: u32 = 4;
 const TRANSACTION_CHANNEL: u32 = 5;
 const ANCESTOR_CHANNEL: u32 = 6;
 
-const LEADER_TIMEOUT: Duration = Duration::from_millis(4800);
-const NOTARIZATION_TIMEOUT: Duration = Duration::from_millis(5500);
+const LEADER_TIMEOUT: Duration = Duration::from_millis(5500);
+const NOTARIZATION_TIMEOUT: Duration = Duration::from_millis(6500);
 const NULLIFY_RETRY: Duration = Duration::from_secs(10);
 const ACTIVITY_TIMEOUT: u64 = 256;
 const SKIP_TIMEOUT: u64 = 32;
@@ -126,7 +126,17 @@ async fn gatling_thread(
         // STEP 2: Try to finalize as much as possible using cursor-based algorithm
         // ========================================================================
 
+        let mut steps = 0u32;
         loop {
+            // Yield every 64 steps so consensus and P2P tasks can be scheduled
+            // on this thread between cursor advancements. Without this the tight
+            // loop monopolises a tokio worker thread, starving BFT voting tasks
+            // and causing verify/propose aborts under high instance counts.
+            steps += 1;
+            if steps % 64 == 0 {
+                ::tokio::task::yield_now().await;
+            }
+
             // Safety check: ensure cursor is within valid bounds
             if cursor_view == 0 || cursor_instance >= num_instances {
                 break;
