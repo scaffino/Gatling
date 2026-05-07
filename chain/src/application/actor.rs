@@ -506,7 +506,7 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                                     let validator_idx = self.validator_index;
                                     for tx in &transactions {
                                         let tx_id = tx.digest();
-                                        info!("[{}] Validator {} included transaction {:?} (timestamp: {}) in block {} (view {})", 
+                                        debug!("[{}] Validator {} included transaction {:?} (timestamp: {}) in block {} (view {})", 
                                               engine_id, validator_idx, tx_id, tx.timestamp, block_height, view);
                                     }
                                     
@@ -547,7 +547,7 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                                         let validator_idx = self.validator_index;
                                         for tx in &transactions[initial_tx_count_clone..] {
                                             let tx_id = tx.digest();
-                                            info!("[{}] Validator {} included transaction {:?} (timestamp: {}) in block {} (view {}) [second pickup]", 
+                                            debug!("[{}] Validator {} included transaction {:?} (timestamp: {}) in block {} (view {}) [second pickup]", 
                                                   engine_id, validator_idx, tx_id, tx.timestamp, block_height, view);
                                         }
                                         
@@ -980,7 +980,7 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                         let latency_ms = now_ms.saturating_sub(block.timestamp);
                         self.block_latency_ms_histogram.observe(latency_ms as f64);
                     }
-                    info!("[{}] Validator {} finalized block {} (view {}) with {} transactions",
+                    debug!("[{}] Validator {} finalized block {} (view {}) with {} transactions",
                           engine_id, self.validator_index, block.height, block.view, tx_count);
                 }
                 Message::SubmitTransaction { transaction } => {
