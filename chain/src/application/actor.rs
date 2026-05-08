@@ -206,7 +206,7 @@ pub struct Actor<R: Rng + CryptoRng + Spawner + Metrics + Clock> {
     // Time offset within each second for proposal timing (0-999ms)
     proposal_offset_ms: u64,
     // Channel to send finalized blocks to the gatling thread (if enabled)
-    gatling_tx: Option<futures::channel::mpsc::UnboundedSender<crate::engine::GatlingEvent>>,
+    gatling_tx: Option<std::sync::mpsc::Sender<crate::engine::GatlingEvent>>,
     // Per-instance channel to buffer finalized blocks before forwarding to gatling (if enabled)
     buffer_tx: Option<futures::channel::mpsc::UnboundedSender<Block>>,
     // Instance ID for this consensus engine (1-based, used for gatling ordering)
@@ -1003,7 +1003,7 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
 /// and only forwards a block when all lower heights have been forwarded for this instance.
 pub async fn run_buffer(
     mut rx: mpsc::UnboundedReceiver<Block>,
-    gatling: futures::channel::mpsc::UnboundedSender<crate::engine::GatlingEvent>,
+    gatling: std::sync::mpsc::Sender<crate::engine::GatlingEvent>,
     instance_id: usize,
 ) {
     let mut next_expected_height: u64 = 1;
@@ -1020,18 +1020,13 @@ pub async fn run_buffer(
 
         loop {
             if let Some(b) = pending.remove(&next_expected_height) {
-                let finalized_at_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64;
                 let event = crate::engine::GatlingEvent {
                     instance_id,
                     view: b.view as u64,
-                    finalized_at_ms,
                     block: b,
                 };
                 // Ignore send errors (receiver may be gone)
-                let _ = gatling.unbounded_send(event);
+                let _ = gatling.send(event);
                 next_expected_height = next_expected_height.saturating_add(1);
                 continue;
             }

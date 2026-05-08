@@ -32,9 +32,6 @@ pub struct GatlingEvent {
     pub instance_id: usize,
     pub view: View,
     pub block: Block,
-    /// Wall-clock ms (Unix epoch) when this validator's run_buffer processed the finalization.
-    /// Used as the finalization timestamp in latency measurements to avoid Gatling thread lag.
-    pub finalized_at_ms: u64,
 }
 
 /// Reporter type for [threshold_simplex::Engine].
@@ -94,7 +91,7 @@ pub struct Config<B: Blocker<PublicKey = PublicKey>, I: Indexer> {
     pub proposal_offset_ms: u64,
     
     /// Channel to send finalized blocks to the gatling thread (if enabled).
-    pub gatling_tx: Option<futures::channel::mpsc::UnboundedSender<GatlingEvent>>,
+    pub gatling_tx: Option<std::sync::mpsc::Sender<GatlingEvent>>,
     
     /// Instance ID for this consensus engine (1-based, used for gatling ordering).
     pub gatling_instance_id: usize,

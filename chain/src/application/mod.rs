@@ -39,8 +39,8 @@ pub struct Config {
     pub proposal_offset_ms: u64,
     
     /// Channel to send finalized blocks to the gatling thread (if enabled).
-    pub gatling_tx: Option<futures::channel::mpsc::UnboundedSender<crate::engine::GatlingEvent>>,
-    
+    pub gatling_tx: Option<std::sync::mpsc::Sender<crate::engine::GatlingEvent>>,
+
     /// Per-instance channel to buffer finalized blocks before forwarding to gatling (if enabled).
     /// When present, application and ancestor finalizer forward blocks here instead of directly to gatling.
     pub buffer_tx: Option<futures::channel::mpsc::UnboundedSender<alto_types::Block>>,

@@ -13,7 +13,6 @@ use commonware_p2p::authenticated::discovery as authenticated;
 use commonware_runtime::{tokio, Clock, Metrics, Runner, Spawner};
 use commonware_utils::{from_hex_formatted, quorum, union_unique};
 use futures::future::try_join_all;
-use futures::StreamExt;
 use governor::Quota;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::{
@@ -54,8 +53,8 @@ const FINALIZED_FREEZER_TABLE_INITIAL_SIZE: u32 = 2u32.pow(21); // 100MB
 /// Uses a cursor-based algorithm to finalize blocks strictly in ascending order of (view, instance).
 /// The algorithm maintains a cursor that always points to the top-leftmost unfinalized cell in the
 /// matrix of instances (rows) × views (columns), ensuring strict ordering guarantees.
-async fn gatling_thread(
-    mut rx: futures::channel::mpsc::UnboundedReceiver<engine::GatlingEvent>,
+fn gatling_thread(
+    rx: std::sync::mpsc::Receiver<engine::GatlingEvent>,
     validator_index: usize,
     num_instances: usize,
 ) {
@@ -66,10 +65,10 @@ async fn gatling_thread(
     // ============================================================================
 
     // Per-instance queues of finalized blocks, keyed by view number (from block.view, not proof)
-    // - Some((block, finalized_at_ms)) = view that has a finalized block from consensus (directly finalized view)
+    // - Some(block) = view that has a finalized block from consensus (directly finalized view)
     // - None = view marked as finalized without a block (indirectly finalized view) to fill gaps when instances skip views
     // Note: All blocks are finalized with the same event - what differs is how VIEWS are finalized (directly vs indirectly)
-    let mut instance_queues: Vec<BTreeMap<u64, Option<(alto_types::Block, u64)>>> =
+    let mut instance_queues: Vec<BTreeMap<u64, Option<alto_types::Block>>> =
         (0..num_instances).map(|_| BTreeMap::new()).collect();
 
     // Per-instance highest directly finalized view (only tracks views with actual blocks from consensus)
@@ -90,7 +89,7 @@ async fn gatling_thread(
     // MAIN EVENT LOOP: Process finalized blocks from all instances
     // ============================================================================
 
-    while let Some(event) = rx.next().await {
+    while let Ok(event) = rx.recv() {
         // Convert 1-based instance ID to 0-based index
         let instance_idx = event.instance_id - 1;
 
@@ -120,23 +119,13 @@ async fn gatling_thread(
         }
 
         // Insert the block into the queue at this view (view is directly finalized with a block)
-        instance_queues[instance_idx].insert(view, Some((event.block, event.finalized_at_ms)));
+        instance_queues[instance_idx].insert(view, Some(event.block));
 
         // ========================================================================
         // STEP 2: Try to finalize as much as possible using cursor-based algorithm
         // ========================================================================
 
-        let mut steps = 0u32;
         loop {
-            // Yield every 64 steps so consensus and P2P tasks can be scheduled
-            // on this thread between cursor advancements. Without this the tight
-            // loop monopolises a tokio worker thread, starving BFT voting tasks
-            // and causing verify/propose aborts under high instance counts.
-            steps += 1;
-            if steps % 64 == 0 {
-                ::tokio::task::yield_now().await;
-            }
-
             // Safety check: ensure cursor is within valid bounds
             if cursor_view == 0 || cursor_instance >= num_instances {
                 break;
@@ -152,14 +141,13 @@ async fn gatling_thread(
 
             // Check what's at the cursor position (view cursor_view for instance cursor_instance)
             match instance_queues[cursor_instance].remove(&cursor_view) {
-                Some(Some((block, finalized_at_ms))) => {
+                Some(Some(block)) => {
                     // ============================================================
                     // Directly finalized view: view has a block from consensus - finalize it with logging
                     // ============================================================
 
                     finalize_block_at_view(
                         &block,
-                        finalized_at_ms,
                         cursor_view,
                         cursor_instance,
                         validator_index,
@@ -223,24 +211,27 @@ fn advance_cursor(cursor_view: &mut u64, cursor_instance: &mut usize, num_instan
 /// This view has a block from consensus (directly finalized view), so we log it and update finalized_up_to.
 fn finalize_block_at_view(
     block: &alto_types::Block,
-    finalized_at_ms: u64,
     view: u64,
     instance_idx: usize,
     validator_index: usize,
-    queue: &mut std::collections::BTreeMap<u64, Option<(alto_types::Block, u64)>>,
+    queue: &mut std::collections::BTreeMap<u64, Option<alto_types::Block>>,
     finalized_up_to: &mut u64,
 ) {
+    // Stamp here: all three Gatling ordering requirements (run_buffer height ordering,
+    // cross-view cursor wait, cross-instance cursor wait) are satisfied at this point.
+    let finalized_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
     let instance_id = instance_idx + 1; // Convert to 1-based for display
     let tx_count = block.transactions.len();
 
-    // Log the globally finalized block (all blocks are finalized the same way)
     info!(
         "[gatling] Validator {} finalized block {} from instance {} (view {}) with {} transactions",
         validator_index, block.height, instance_id, view, tx_count
     );
 
-    // Log each transaction with the finalization timestamp captured by run_buffer (not the Gatling
-    // thread's log timestamp, which can lag by seconds under CPU pressure).
     for tx in &block.transactions {
         let tx_id = tx.digest();
         info!(
@@ -553,7 +544,7 @@ fn main() {
         
         // Create gatling event channel if gatling is enabled
         let (gatling_tx, gatling_rx) = if gatling_enabled {
-            let (tx, rx) = futures::channel::mpsc::unbounded();
+            let (tx, rx) = std::sync::mpsc::channel();
             (Some(tx), Some(rx))
         } else {
             (None, None)
@@ -838,16 +829,15 @@ fn main() {
             started_consensus.push(started_engine);
         }
 
-        // Spawn gatling thread if enabled
-        let gatling_task = if let Some(gatling_rx) = gatling_rx {
-            // Calculate validator index from sorted peers list
+        // Spawn gatling OS thread if enabled (dedicated thread avoids Tokio scheduling delays)
+        let gatling_join = if let Some(gatling_rx) = gatling_rx {
             let validator_index = peers
                 .iter()
                 .position(|p| p == &public_key)
                 .expect("Public key not found in peers");
-            
-            Some(context.with_label("gatling").spawn(move |_| async move {
-                gatling_thread(gatling_rx, validator_index, consensus_instances).await
+
+            Some(std::thread::spawn(move || {
+                gatling_thread(gatling_rx, validator_index, consensus_instances)
             }))
         } else {
             None
@@ -857,14 +847,16 @@ fn main() {
         let mut all_tasks = vec![p2p, http_server];
         all_tasks.extend(gossip_tasks);
         all_tasks.extend(started_consensus);
-        if let Some(task) = gatling_task {
-            all_tasks.push(task);
-        }
         if let Some(task) = submit_tx_task {
             all_tasks.push(task);
         }
         if let Err(e) = try_join_all(all_tasks).await {
             error!(?e, "task failed");
+        }
+
+        // Join the gatling OS thread after all async tasks finish
+        if let Some(handle) = gatling_join {
+            let _ = handle.join();
         }
     });
 }
