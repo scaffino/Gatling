@@ -33,7 +33,7 @@ except ImportError:
 # CONFIGURATION
 # ============================================================================
 
-INPUT_DIR = "logs/gatling"
+INPUT_DIR = "logs-1val-crashed-r3/gatling"
 OUTPUT_DIR = None  # None → same as INPUT_DIR
 
 OUTPUT_STATS_CSV_NAME = "stats.csv"
@@ -47,8 +47,8 @@ LOG_TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z)")
 FINALIZE_RE = re.compile(
     r"Transaction ([a-f0-9]+) \(timestamp: (\d+) ms\) is now final in block"
 )
-# New format: includes finalized_at captured by run_buffer before Gatling thread lag.
-# Falls back to log timestamp for old log files that lack the field.
+# finalized_at is stamped by the Gatling OS thread at cursor advancement, capturing all three
+# Gatling ordering requirements. Falls back to log timestamp for old log files that lack the field.
 FINALIZED_AT_RE = re.compile(r"finalized_at: (\d+) ms")
 
 
@@ -160,9 +160,9 @@ def check_consistency(dir_path: str) -> None:
 def parse_log_line(line: str) -> Optional[Tuple[int, str, int]]:
     """Returns (finalized_at_ms, tx_hash, tx_ts_ms) or None.
 
-    Uses the embedded finalized_at field when present (written by run_buffer,
-    immune to Gatling thread scheduling lag). Falls back to the log line's
-    leading ISO timestamp for old log files that pre-date this field.
+    Uses the embedded finalized_at field when present (stamped by the Gatling OS thread
+    at cursor advancement, capturing all three ordering requirements). Falls back to the
+    log line's leading ISO timestamp for old log files that pre-date this field.
     """
     fin_m = FINALIZE_RE.search(line)
     if not fin_m:

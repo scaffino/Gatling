@@ -16,8 +16,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-IN_DIR="${REPO_ROOT}/logs/validator"
-OUT_DIR="${REPO_ROOT}/logs/gatling"
+IN_DIR="${REPO_ROOT}/logs-1val-crashed-r3/validator"
+OUT_DIR="${REPO_ROOT}/logs-1val-crashed-r3/gatling"
 
 process_log_file() {
     local file="$1"

@@ -29,8 +29,11 @@ set -euo pipefail
 #       Number of repetitions per instance value.
 #
 #   --crash-validator-index N
-#       Fault injection: after readiness succeeds, crash exactly one validator by index (0-based).
-#       Index is the line order in remote-runs/ips.txt (and therefore the validator config order).
+#       Fault injection: after readiness succeeds, crash validator(s) by index (0-based).
+#       This flag is repeatable. Index is the line order in remote-runs/ips.txt (and therefore the validator config order).
+#
+#   --crash-validator-indices LIST
+#       Fault injection: crash multiple validators by index list (comma/space separated), e.g. "1,3".
 #
 #   --crash-delay SECONDS
 #       Optional delay (after readiness) before crashing the validator (default: 0).
@@ -47,7 +50,7 @@ set -euo pipefail
 #   - RUN_DURATION_SECONDS, INSTANCES
 #   - SUBMIT_TX_RATE, SUBMIT_TX_START, SUBMIT_TX_DURATION (computed if not set)
 #   - REMOTE_REPO_DIR, REMOTE_BASE_DIR, REMOTE_LOG_DIR, REMOTE_STORAGE_DIR
-#   - CRASH_VALIDATOR_INDEX, CRASH_DELAY_SECONDS (alternatives to flags)
+#   - CRASH_VALIDATOR_INDEX, CRASH_VALIDATOR_INDICES, CRASH_DELAY_SECONDS (alternatives to flags)
 # =============================================================================
 
 # -----------------------------
@@ -61,18 +64,20 @@ V="${V:-10}"
 
 # Fault injection: optionally crash one validator after readiness
 CRASH_VALIDATOR_INDEX="${CRASH_VALIDATOR_INDEX:-}"   # 0-based index into REMOTE_HOSTS/PUBLIC_KEYS
+CRASH_VALIDATOR_INDICES="${CRASH_VALIDATOR_INDICES:-}" # comma/space separated list of indices
 CRASH_DELAY_SECONDS="${CRASH_DELAY_SECONDS:-0}"      # delay after readiness before crashing
 
-# Per-run wall clock (seconds)
-RUN_DURATION_SECONDS="${RUN_DURATION_SECONDS:-1200}"
+# Per-run wall clock is derived: SUBMIT_TX_START + SUBMIT_TX_DURATION + DRAIN_SECONDS
 SETTLE_SECONDS="${SETTLE_SECONDS:-4}"
 READINESS_TIMEOUT="${READINESS_TIMEOUT:-300}"    # seconds to wait for first finalized block per validator
 MAX_RUN_RETRIES="${MAX_RUN_RETRIES:-2}"          # total attempts per instance value before giving up
 
 # Transaction submission parameters (built into validators via --submit-tx)
 SUBMIT_TX_RATE="${SUBMIT_TX_RATE:-100}"          # Transactions per second
-SUBMIT_TX_START="${SUBMIT_TX_START:-600}"        # Start delay in seconds after genesis
-# SUBMIT_TX_DURATION is computed in main() after parse_args so --duration is respected
+SUBMIT_TX_START="${SUBMIT_TX_START:-150}"        # Warm-up: seconds after genesis before tx generation starts
+SUBMIT_TX_DURATION="${SUBMIT_TX_DURATION:-300}"  # Length of the tx generation window in seconds
+DRAIN_SECONDS="${DRAIN_SECONDS:-30}"             # Extra time after tx ends for in-flight txs to finalize
+# RUN_DURATION_SECONDS is computed in main() from the three components above
 
 # SSH/SCP options
 SSH_OPTS=(
@@ -204,16 +209,18 @@ print_usage() {
 Usage: $(basename "$0") [options]
 
 Options:
-  -t, --duration SECONDS    Max run time per experiment before kill (default: ${RUN_DURATION_SECONDS})
+  -t, --duration SECONDS    Length of the tx generation window (default: ${SUBMIT_TX_DURATION})
+                            Total run = SUBMIT_TX_START + DURATION + DRAIN_SECONDS
       --instances LIST      Explicit instances list (comma/space separated, default: ${INSTANCES})
 
-      --crash-validator-index N  After readiness, crash validator at 0-based index N (default: disabled)
+      --crash-validator-index N  After readiness, crash validator at 0-based index N (repeatable)
+      --crash-validator-indices LIST
+                                After readiness, crash validators at 0-based indices in LIST (comma/space separated)
       --crash-delay SECONDS      Delay after readiness before crashing (default: ${CRASH_DELAY_SECONDS})
 
 You can also set environment variables:
-  RUN_DURATION_SECONDS, INSTANCES,
-  SUBMIT_TX_RATE, SUBMIT_TX_START, SUBMIT_TX_DURATION,
-  CRASH_VALIDATOR_INDEX, CRASH_DELAY_SECONDS, etc.
+  SUBMIT_TX_START, SUBMIT_TX_DURATION, DRAIN_SECONDS, INSTANCES,
+  SUBMIT_TX_RATE, CRASH_VALIDATOR_INDEX, CRASH_VALIDATOR_INDICES, CRASH_DELAY_SECONDS, etc.
 EOF
 }
 
@@ -223,7 +230,7 @@ parse_args() {
       -t|--duration)
         shift
         [[ $# -gt 0 ]] || { err "Missing value for --duration"; exit 2; }
-        RUN_DURATION_SECONDS="$1"
+        SUBMIT_TX_DURATION="$1"
         ;;
       --instances)
         shift
@@ -233,7 +240,21 @@ parse_args() {
       --crash-validator-index)
         shift
         [[ $# -gt 0 ]] || { err "Missing value for --crash-validator-index"; exit 2; }
+        if [[ -n "${CRASH_VALIDATOR_INDICES}" ]]; then
+          CRASH_VALIDATOR_INDICES="${CRASH_VALIDATOR_INDICES},$1"
+        else
+          CRASH_VALIDATOR_INDICES="$1"
+        fi
         CRASH_VALIDATOR_INDEX="$1"
+        ;;
+      --crash-validator-indices)
+        shift
+        [[ $# -gt 0 ]] || { err "Missing value for --crash-validator-indices"; exit 2; }
+        if [[ -n "${CRASH_VALIDATOR_INDICES}" ]]; then
+          CRASH_VALIDATOR_INDICES="${CRASH_VALIDATOR_INDICES},$1"
+        else
+          CRASH_VALIDATOR_INDICES="$1"
+        fi
         ;;
       --crash-delay)
         shift
@@ -254,19 +275,39 @@ parse_args() {
   done
 }
 
-crash_one_validator() {
+_crash_indices_list() {
+  # Merge CRASH_VALIDATOR_INDEX (legacy) into CRASH_VALIDATOR_INDICES if set
+  local merged="${CRASH_VALIDATOR_INDICES}"
+  if [[ -z "${merged}" && -n "${CRASH_VALIDATOR_INDEX}" ]]; then
+    merged="${CRASH_VALIDATOR_INDEX}"
+  elif [[ -n "${merged}" && -n "${CRASH_VALIDATOR_INDEX}" ]]; then
+    merged="${merged},${CRASH_VALIDATOR_INDEX}"
+  fi
+
+  # Normalize: split on commas/whitespace, drop empties, de-dup while preserving order
+  local out=()
+  local seen="|"
+  local tok
+  while IFS= read -r tok; do
+    [[ -z "${tok}" ]] && continue
+    if [[ "${seen}" != *"|${tok}|"* ]]; then
+      out+=("${tok}")
+      seen="${seen}${tok}|"
+    fi
+  done < <(printf '%s\n' "${merged}" | tr ',[:space:]' '\n' | sed '/^$/d')
+
+  printf '%s\n' "${out[@]:-}"
+}
+
+crash_validators() {
   local instances="$1"
-  [[ -n "${CRASH_VALIDATOR_INDEX}" ]] || return 0
-
-  if [[ ! "${CRASH_VALIDATOR_INDEX}" =~ ^[0-9]+$ ]]; then
-    err "Invalid --crash-validator-index '${CRASH_VALIDATOR_INDEX}' (must be integer >= 0); skipping crash injection"
-    return 0
-  fi
-
-  if [[ "${CRASH_VALIDATOR_INDEX}" -ge ${#REMOTE_HOSTS[@]} ]]; then
-    err "Crash index ${CRASH_VALIDATOR_INDEX} out of range (hosts=${#REMOTE_HOSTS[@]}); skipping crash injection"
-    return 0
-  fi
+  local crash_indices=()
+  local _idx
+  while IFS= read -r _idx; do
+    [[ -z "${_idx}" ]] && continue
+    crash_indices+=("${_idx}")
+  done < <(_crash_indices_list)
+  [[ ${#crash_indices[@]} -gt 0 ]] || return 0
 
   if [[ ! "${CRASH_DELAY_SECONDS}" =~ ^[0-9]+$ ]]; then
     err "Invalid --crash-delay '${CRASH_DELAY_SECONDS}' (must be integer >= 0); defaulting to 0"
@@ -274,23 +315,36 @@ crash_one_validator() {
   fi
 
   if [[ "${CRASH_DELAY_SECONDS}" -gt 0 ]]; then
-    log "Crash injection armed: will kill validator idx=${CRASH_VALIDATOR_INDEX} after ${CRASH_DELAY_SECONDS}s (instances=${instances})..."
+    log "Crash injection armed: will kill validator idx(s)=${crash_indices[*]} after ${CRASH_DELAY_SECONDS}s (instances=${instances})..."
     sleep "${CRASH_DELAY_SECONDS}"
   else
-    log "Crash injection armed: killing validator idx=${CRASH_VALIDATOR_INDEX} now (instances=${instances})..."
+    log "Crash injection armed: killing validator idx(s)=${crash_indices[*]} now (instances=${instances})..."
   fi
 
-  local host="${REMOTE_HOSTS[CRASH_VALIDATOR_INDEX]}"
-  local public_key="${PUBLIC_KEYS[CRASH_VALIDATOR_INDEX]}"
-  local match="validator --.*--config=${REMOTE_BASE_DIR}/${public_key}.yaml"
+  local idx
+  for idx in "${crash_indices[@]}"; do
+    if [[ ! "${idx}" =~ ^[0-9]+$ ]]; then
+      err "Invalid crash index '${idx}' (must be integer >= 0); skipping"
+      continue
+    fi
+    if [[ "${idx}" -ge ${#REMOTE_HOSTS[@]} ]]; then
+      err "Crash index ${idx} out of range (hosts=${#REMOTE_HOSTS[@]}); skipping"
+      continue
+    fi
 
-  if is_local_idx "${CRASH_VALIDATOR_INDEX}"; then
-    pkill -KILL -f "${match}" 2>/dev/null || true
-  else
-    remote_cmd "${host}" "pkill -KILL -f '${match}' || true" || true
-  fi
+    local host="${REMOTE_HOSTS[idx]}"
+    local public_key="${PUBLIC_KEYS[idx]}"
+    local ip
+    ip="$(extract_ip "${host}")"
+    local match="validator --.*--config=${REMOTE_BASE_DIR}/${public_key}.yaml"
 
-  log "Crash injection complete (killed idx=${CRASH_VALIDATOR_INDEX} ident=${public_key} host=${host})"
+    if is_local_idx "${idx}"; then
+      pkill -KILL -f "${match}" 2>/dev/null || true
+    else
+      remote_cmd "${host}" "pkill -KILL -f '${match}' || true" || true
+    fi
+    log "Crash injection complete (crashed validator ip=${ip} idx=${idx} ident=${public_key})"
+  done
 }
 
 # ---------------------------------
@@ -644,8 +698,8 @@ main() {
 
   parse_args "$@"
 
-  # Compute SUBMIT_TX_DURATION after parse_args so --duration is respected
-  SUBMIT_TX_DURATION="${SUBMIT_TX_DURATION:-$(( RUN_DURATION_SECONDS - SUBMIT_TX_START ))}"
+  # Derive total run duration from its three components (all settable via env or --duration)
+  RUN_DURATION_SECONDS=$(( SUBMIT_TX_START + SUBMIT_TX_DURATION + DRAIN_SECONDS ))
 
   # Build instances list from INSTANCES (comma/space separated)
   local instances_list=()
@@ -662,10 +716,16 @@ main() {
     [[ "${i}" -ge 1 ]] || fatal "Invalid instance value '${i}' (must be >= 1)."
   done
 
-  log "Run duration per experiment: ${RUN_DURATION_SECONDS}s"
+  log "Run structure: ${SUBMIT_TX_START}s warm-up + ${SUBMIT_TX_DURATION}s tx + ${DRAIN_SECONDS}s drain = ${RUN_DURATION_SECONDS}s total"
   log "Instances sweep: ${instances_list[*]}"
-  if [[ -n "${CRASH_VALIDATOR_INDEX}" ]]; then
-    log "Fault injection: crash validator idx=${CRASH_VALIDATOR_INDEX} after readiness (delay=${CRASH_DELAY_SECONDS}s)"
+  if [[ -n "${CRASH_VALIDATOR_INDICES}" || -n "${CRASH_VALIDATOR_INDEX}" ]]; then
+    local _crash_list_print=()
+    local _ci
+    while IFS= read -r _ci; do
+      [[ -z "${_ci}" ]] && continue
+      _crash_list_print+=("${_ci}")
+    done < <(_crash_indices_list)
+    log "Fault injection: crash validator idx(s)=${_crash_list_print[*]} after readiness (delay=${CRASH_DELAY_SECONDS}s)"
   fi
 
   # Clear log directory on all VMs once at the beginning (parallel)
@@ -698,7 +758,7 @@ main() {
           exit 1
         fi
 
-        crash_one_validator "${instances}"
+        crash_validators "${instances}"
 
         local kill_at sleep_for
         kill_at=$(( GENESIS_TS + RUN_DURATION_SECONDS ))
