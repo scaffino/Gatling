@@ -23,7 +23,7 @@ use futures::future::try_join_all;
 use governor::clock::Clock as GClock;
 use governor::Quota;
 use rand::{CryptoRng, Rng};
-use std::{num::NonZero, sync::{Arc, Mutex, atomic::AtomicU64}, time::Duration};
+use std::{num::NonZero, sync::{Arc, Mutex, atomic::AtomicU64}, time::{Duration, SystemTime, UNIX_EPOCH}};
 use tracing::{error, warn};
 
 /// Event sent to the gatling thread when a block is finalized.
@@ -86,9 +86,18 @@ pub struct Config<B: Blocker<PublicKey = PublicKey>, I: Indexer> {
 
     pub indexer: Option<I>,
     
-    /// Time offset within each second (in milliseconds, 0-999) for when this engine should send proposals.
-    /// For example: 0 means X.000s, 500 means X.500s. This allows staggering multiple consensus instances.
+    /// Time between proposal slots in milliseconds.
+    pub proposal_interval_ms: u64,
+
+    /// Time offset within the proposal interval for when this engine should send proposals.
+    /// This allows staggering multiple consensus instances.
     pub proposal_offset_ms: u64,
+
+    /// Optional grace after the scheduled proposal slot before voting to skip.
+    pub proposal_skip_grace_ms: Option<u64>,
+
+    /// Optional grace after the scheduled proposal slot before voting to advance.
+    pub proposal_advance_grace_ms: Option<u64>,
     
     /// Channel to send finalized blocks to the gatling thread (if enabled).
     pub gatling_tx: Option<std::sync::mpsc::Sender<GatlingEvent>>,
@@ -173,6 +182,7 @@ impl<
                 mailbox_size: cfg.mailbox_size,
                 engine_id: cfg.partition_prefix.clone(),
                 public_key: cfg.signer.public_key(),
+                proposal_interval_ms: cfg.proposal_interval_ms,
                 proposal_offset_ms: cfg.proposal_offset_ms,
                 gatling_tx: gatling_sender_opt.clone(),
                 buffer_tx: app_buffer_tx_opt.clone(),
@@ -262,6 +272,27 @@ impl<
         )
             .into();
 
+        let slot_deadline = |grace_ms: u64| {
+            let genesis_ms = (cfg.genesis_timestamp_secs as u128) * 1000;
+            let proposal_interval_ms = cfg.proposal_interval_ms as u128;
+            let proposal_offset_ms = cfg.proposal_offset_ms as u128;
+            Arc::new(move |view: View, entered_at: SystemTime| {
+                let deadline_ms = genesis_ms
+                    + (view as u128) * proposal_interval_ms
+                    + proposal_offset_ms
+                    + grace_ms as u128;
+                let deadline =
+                    UNIX_EPOCH + Duration::from_millis(deadline_ms.min(u64::MAX as u128) as u64);
+                if deadline > entered_at {
+                    deadline
+                } else {
+                    entered_at
+                }
+            }) as Arc<dyn Fn(View, SystemTime) -> SystemTime + Send + Sync>
+        };
+        let leader_deadline = cfg.proposal_skip_grace_ms.map(slot_deadline);
+        let advance_deadline = cfg.proposal_advance_grace_ms.map(slot_deadline);
+
         // Create the consensus engine
         let consensus = Consensus::new(
             context.with_label("consensus"),
@@ -275,7 +306,9 @@ impl<
                 partition: format!("{}-consensus", cfg.partition_prefix),
                 mailbox_size: cfg.mailbox_size,
                 leader_timeout: cfg.leader_timeout,
+                leader_deadline,
                 notarization_timeout: cfg.notarization_timeout,
+                advance_deadline,
                 nullify_retry: cfg.nullify_retry,
                 fetch_timeout: cfg.fetch_timeout,
                 activity_timeout: cfg.activity_timeout,

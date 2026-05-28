@@ -203,7 +203,9 @@ pub struct Actor<R: Rng + CryptoRng + Spawner + Metrics + Clock> {
     block_latency_ms_histogram: PromHistogram,
     // Track finalized blocks we've already recorded to avoid double-counting
     finalized_seen: Arc<Mutex<HashSet<Vec<u8>>>>,
-    // Time offset within each second for proposal timing (0-999ms)
+    // Time between proposal slots in milliseconds
+    proposal_interval_ms: u64,
+    // Time offset within the proposal interval for proposal timing
     proposal_offset_ms: u64,
     // Channel to send finalized blocks to the gatling thread (if enabled)
     gatling_tx: Option<std::sync::mpsc::Sender<crate::engine::GatlingEvent>>,
@@ -229,16 +231,17 @@ pub struct Actor<R: Rng + CryptoRng + Spawner + Metrics + Clock> {
 }
 
 impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
-    /// Compute absolute proposal time in milliseconds for given view and instance.
-    /// tproposal = genesis_timestamp + (v + (k-1)/K) * delta_ibt_ms
-    pub fn tproposal(genesis_ts_secs: u64, k_total: u64, k: u64, v: u64) -> u128 {
+    /// Compute absolute proposal time in milliseconds.
+    /// tproposal = genesis_timestamp + v * proposal_interval_ms + proposal_offset_ms
+    pub fn tproposal(
+        genesis_ts_secs: u64,
+        v: u64,
+        proposal_interval_ms: u64,
+        proposal_offset_ms: u64,
+    ) -> u128 {
         let genesis_ms = (genesis_ts_secs as u128) * 1000;
-        let view_ms = (v as u128) * 3000;
-        let slot_ms = if k_total == 0 {
-            0
-        } else {
-            ((k.saturating_sub(1)) as u128 * 3000) / (k_total as u128)
-        };
+        let view_ms = (v as u128) * proposal_interval_ms as u128;
+        let slot_ms = proposal_offset_ms as u128;
         genesis_ms + view_ms + slot_ms
     }
     /// Create a new application actor.
@@ -276,6 +279,7 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                 finalized_blocks_counter,
                 block_latency_ms_histogram,
                 finalized_seen: Arc::new(Mutex::new(HashSet::new())),
+                proposal_interval_ms: config.proposal_interval_ms,
                 proposal_offset_ms: config.proposal_offset_ms,
                 gatling_tx: config.gatling_tx,
                 buffer_tx: config.buffer_tx,
@@ -483,9 +487,9 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                     self.context.with_label("propose").spawn({
                         let built = built.clone();
                         let engine_id = self.engine_id.clone();
-                        let total_instances = self.total_instances as u64;
-                        let instance_number = self.gatling_instance_id as u64;
                         let genesis_ts_secs = self.genesis_timestamp_secs;
+                        let proposal_interval_ms = self.proposal_interval_ms;
+                        let proposal_offset_ms = self.proposal_offset_ms;
                         move |context| async move {
                             let response_closed = OneshotClosedFut::new(&mut response);
                             select! {
@@ -516,7 +520,7 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                                     }
 
                                     // Timely proposal: wait until tproposal if in the future, else propose immediately upon entering view
-                                    let target_ms = Self::tproposal(genesis_ts_secs, total_instances, instance_number, view as u64);
+                                    let target_ms = Self::tproposal(genesis_ts_secs, view as u64, proposal_interval_ms, proposal_offset_ms);
                                     let now_ms = context.current().epoch_millis() as u128;
                                     let is_catchup = now_ms >= target_ms;
                                     if !is_catchup {

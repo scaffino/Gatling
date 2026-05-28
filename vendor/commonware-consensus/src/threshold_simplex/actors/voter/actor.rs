@@ -454,7 +454,9 @@ pub struct Actor<
     namespace: Vec<u8>,
 
     leader_timeout: Duration,
+    leader_deadline: Option<Arc<dyn Fn(View, SystemTime) -> SystemTime + Send + Sync>>,
     notarization_timeout: Duration,
+    advance_deadline: Option<Arc<dyn Fn(View, SystemTime) -> SystemTime + Send + Sync>>,
     nullify_retry: Duration,
     activity_timeout: View,
 
@@ -561,7 +563,9 @@ impl<
                 namespace: cfg.namespace,
 
                 leader_timeout: cfg.leader_timeout,
+                leader_deadline: cfg.leader_deadline,
                 notarization_timeout: cfg.notarization_timeout,
+                advance_deadline: cfg.advance_deadline,
                 nullify_retry: cfg.nullify_retry,
 
                 activity_timeout: cfg.activity_timeout,
@@ -1050,8 +1054,15 @@ impl<
             self.recover_latency.clone(),
             view,
         ));
-        round.leader_deadline = Some(self.context.current() + self.leader_timeout);
-        round.advance_deadline = Some(self.context.current() + self.notarization_timeout);
+        let now = self.context.current();
+        round.leader_deadline = Some(match &self.leader_deadline {
+            Some(deadline) => deadline(view, now),
+            None => now + self.leader_timeout,
+        });
+        round.advance_deadline = Some(match &self.advance_deadline {
+            Some(deadline) => deadline(view, now),
+            None => now + self.notarization_timeout,
+        });
         round.set_leader(seed);
         self.view = view;
 

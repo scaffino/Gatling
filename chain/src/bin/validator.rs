@@ -265,6 +265,25 @@ fn main() {
                 .default_value("1")
         )
         .arg(
+            Arg::new("proposal-interval-ms")
+                .long("proposal-interval-ms")
+                .value_name("MILLISECONDS")
+                .help("Time between proposal slots for each consensus instance")
+                .default_value("3000")
+        )
+        .arg(
+            Arg::new("proposal-skip-grace-ms")
+                .long("proposal-skip-grace-ms")
+                .value_name("MILLISECONDS")
+                .help("If set, skip deadline is scheduled proposal time plus this grace")
+        )
+        .arg(
+            Arg::new("proposal-advance-grace-ms")
+                .long("proposal-advance-grace-ms")
+                .value_name("MILLISECONDS")
+                .help("If set, advance deadline is scheduled proposal time plus this grace")
+        )
+        .arg(
             Arg::new("gossip-txs")
                 .long("gossip-txs")
                 .help("Enable transaction gossiping to other validators")
@@ -312,6 +331,38 @@ fn main() {
         consensus_instances > 0,
         "Number of consensus instances must be at least 1"
     );
+    let proposal_interval_ms: u64 = matches
+        .get_one::<String>("proposal-interval-ms")
+        .unwrap()
+        .parse()
+        .expect("Invalid proposal interval");
+    assert!(
+        proposal_interval_ms > 0,
+        "Proposal interval must be greater than 0"
+    );
+    let proposal_skip_grace_ms: Option<u64> = matches
+        .get_one::<String>("proposal-skip-grace-ms")
+        .map(|value| value.parse().expect("Invalid proposal skip grace"));
+    if let Some(grace_ms) = proposal_skip_grace_ms {
+        assert!(grace_ms > 0, "Proposal skip grace must be greater than 0");
+    }
+    let proposal_advance_grace_ms: Option<u64> = matches
+        .get_one::<String>("proposal-advance-grace-ms")
+        .map(|value| value.parse().expect("Invalid proposal advance grace"));
+    if let Some(grace_ms) = proposal_advance_grace_ms {
+        assert!(
+            grace_ms > 0,
+            "Proposal advance grace must be greater than 0"
+        );
+    }
+    if let (Some(skip_grace_ms), Some(advance_grace_ms)) =
+        (proposal_skip_grace_ms, proposal_advance_grace_ms)
+    {
+        assert!(
+            skip_grace_ms <= advance_grace_ms,
+            "Proposal skip grace must be less than or equal to proposal advance grace"
+        );
+    }
 
     // Parse gossip flag (default: enabled if neither flag is specified)
     let gossip_enabled = if matches.get_flag("no-gossip-txs") {
@@ -557,7 +608,8 @@ fn main() {
             (0..consensus_instances).map(|i| {
                 let chain_id = i + 1;
                 let namespace = format!("{}_{}", std::str::from_utf8(NAMESPACE).unwrap(), chain_id).into_bytes();
-                let proposal_offset_ms = (i * 3000 / consensus_instances) as u64;
+                let proposal_offset_ms =
+                    (i as u64 * proposal_interval_ms) / consensus_instances as u64;
                 let engine_config = engine::Config {
                     blocker: oracle.clone(),
                     partition_prefix: format!("consensus_{}", chain_id),
@@ -582,7 +634,10 @@ fn main() {
                     fetch_concurrent: FETCH_CONCURRENT,
                     fetch_rate_per_peer: resolver_limit,
                     indexer: indexer.clone(),
+                    proposal_interval_ms,
                     proposal_offset_ms,
+                    proposal_skip_grace_ms,
+                    proposal_advance_grace_ms,
                     gatling_tx: gatling_tx.clone(),
                     gatling_instance_id: chain_id,
                     instance_views: instance_views.clone(),

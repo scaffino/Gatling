@@ -34,8 +34,11 @@ pub struct Config {
     /// Public key of this validator (for determining validator index).
     pub public_key: PublicKey,
     
-    /// Time offset within each second (in milliseconds, 0-999) for when this engine should send proposals.
-    /// For example: 0 means X.000s, 500 means X.500s. This allows staggering multiple consensus instances.
+    /// Time between proposal slots in milliseconds.
+    pub proposal_interval_ms: u64,
+
+    /// Time offset within the proposal interval for when this engine should send proposals.
+    /// This allows staggering multiple consensus instances.
     pub proposal_offset_ms: u64,
     
     /// Channel to send finalized blocks to the gatling thread (if enabled).

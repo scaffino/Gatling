@@ -7,7 +7,7 @@ use commonware_cryptography::{
 use commonware_p2p::Blocker;
 use commonware_runtime::buffer::PoolRef;
 use governor::Quota;
-use std::{num::NonZeroUsize, time::Duration};
+use std::{num::NonZeroUsize, sync::Arc, time::{Duration, SystemTime}};
 
 /// Configuration for the consensus engine.
 pub struct Config<
@@ -69,9 +69,22 @@ pub struct Config<
     /// in a view.
     pub leader_timeout: Duration,
 
+    /// Optional absolute leader deadline calculator.
+    ///
+    /// When unset, leader timeout is measured from view entry. When set, the
+    /// returned deadline is used directly. Implementations can make timeout
+    /// decisions aware of externally scheduled proposal slots.
+    pub leader_deadline: Option<Arc<dyn Fn(View, SystemTime) -> SystemTime + Send + Sync>>,
+
     /// Amount of time to wait for a quorum of notarizations in a view
     /// before attempting to skip the view.
     pub notarization_timeout: Duration,
+
+    /// Optional absolute advance deadline calculator.
+    ///
+    /// When unset, notarization timeout is measured from view entry. When set,
+    /// the returned deadline is used directly.
+    pub advance_deadline: Option<Arc<dyn Fn(View, SystemTime) -> SystemTime + Send + Sync>>,
 
     /// Amount of time to wait before retrying a nullify broadcast if
     /// stuck in a view.
