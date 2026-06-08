@@ -119,6 +119,9 @@ pub struct Config<B: Blocker<PublicKey = PublicKey>, I: Indexer> {
 
     /// Shared mempool — all consensus instances on this validator read from one pool.
     pub shared_mempool: Arc<Mutex<crate::application::mempool::Mempool>>,
+
+    /// Optional synthetic transaction process injected directly into leader proposals.
+    pub synthetic_leader_tx: Option<crate::application::SyntheticLeaderTxConfig>,
 }
 
     /// The engine that drives the [application].
@@ -194,6 +197,7 @@ impl<
                 ancestor_fetch_concurrent: cfg.ancestor_fetch_concurrent,
                 ancestor_fetch_rate_per_peer: cfg.ancestor_fetch_rate_per_peer,
                 shared_mempool: cfg.shared_mempool,
+                synthetic_leader_tx: cfg.synthetic_leader_tx,
             },
         );
 

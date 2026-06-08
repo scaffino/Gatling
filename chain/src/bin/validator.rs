@@ -311,6 +311,15 @@ fn main() {
                 .num_args(3)
                 .value_delimiter(' ')
         )
+        .arg(
+            Arg::new("synthetic-leader-tx")
+                .long("synthetic-leader-tx")
+                .value_name("TOTAL_RATE START_DELAY DURATION")
+                .help("Generate synthetic transactions directly in the slot leader's proposal path at total rate R tx/sec across all instances")
+                .num_args(3)
+                .value_delimiter(' ')
+                .conflicts_with("submit-tx")
+        )
         .get_matches();
 
     // Load ip file
@@ -391,6 +400,31 @@ fn main() {
                 assert!(duration > 0, "Duration must be greater than 0");
 
                 Some((rate, start_delay, duration))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+    let synthetic_leader_tx_config: Option<(f64, u64, u64)> =
+        if let Some(values) = matches.get_many::<String>("synthetic-leader-tx") {
+            let values: Vec<&String> = values.collect();
+            if values.len() == 3 {
+                let total_rate: f64 = values[0]
+                    .parse()
+                    .expect("Invalid synthetic tx rate (must be a number)");
+                let start_delay: u64 = values[1]
+                    .parse()
+                    .expect("Invalid synthetic tx start delay (must be a positive integer)");
+                let duration: u64 = values[2]
+                    .parse()
+                    .expect("Invalid synthetic tx duration (must be a positive integer)");
+
+                assert!(total_rate > 0.0, "Synthetic tx rate must be greater than 0");
+                assert!(duration > 0, "Synthetic tx duration must be greater than 0");
+
+                Some((total_rate, start_delay, duration))
             } else {
                 None
             }
@@ -610,6 +644,17 @@ fn main() {
                 let namespace = format!("{}_{}", std::str::from_utf8(NAMESPACE).unwrap(), chain_id).into_bytes();
                 let proposal_offset_ms =
                     (i as u64 * proposal_interval_ms) / consensus_instances as u64;
+                let synthetic_leader_tx = synthetic_leader_tx_config.map(
+                    |(total_rate, start_delay_secs, duration_secs)| {
+                        alto_chain::application::SyntheticLeaderTxConfig {
+                            total_rate,
+                            start_delay_secs,
+                            duration_secs,
+                            signer: signer.clone(),
+                            receiver: public_key.clone(),
+                        }
+                    },
+                );
                 let engine_config = engine::Config {
                     blocker: oracle.clone(),
                     partition_prefix: format!("consensus_{}", chain_id),
@@ -647,6 +692,7 @@ fn main() {
                     ancestor_fetch_concurrent: ANCESTOR_FETCH_CONCURRENT,
                     ancestor_fetch_rate_per_peer: resolver_limit,
                     shared_mempool: shared_mempool.clone(),
+                    synthetic_leader_tx,
                 };
                 engine::Engine::new(
                     context.with_label(&format!("consensus_{}", chain_id)),
