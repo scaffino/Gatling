@@ -8,6 +8,8 @@
 Gatling is an atomic broadcast protocol that achieves arbitrarily small inter-proposal times  under rotating leader schedules; in particular, smaller than the network delay. Gatling runs multiple parallel instances of a black-box atomic broadcast protocol and staggers their proposal schedules to generate proposals in faster succession than state-of-the-art protocols.
 A deterministic interleaving rule merges the outputs of these instances into a single global log.
 
+For more details, check out the paper [Gatling: Rapid-Fire Consensus from Parallel Composition](https://arxiv.org/abs/2606.18220)
+
 ## Extending the `alto` chain
 
 Our implementation extends Commonware's `alto` blockchain, a minimal but complete Rust implementation of a blockchain that relies on the [Commonware Monorepo](https://github.com/commonwarexyz/monorepo), a collection of production-grade primitives including consensus, networking, and cryptographic libraries. 
