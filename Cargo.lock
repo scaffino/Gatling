@@ -598,8 +598,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-consensus"
-version = "0.0.62"
-source = "git+https://github.com/scaffino/monorepo.git?tag=v0.0.62#9e9e8b47606b1263dc627854616041d3f8f86c97"
+version = "0.0.14"
 dependencies = [
  "bytes",
  "cfg-if",
@@ -619,6 +618,7 @@ dependencies = [
  "rand_distr",
  "thiserror 2.0.17",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

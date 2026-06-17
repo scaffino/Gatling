@@ -4,6 +4,7 @@ members = [
     "client",
     "inspector",
     "types",
+    "vendor/commonware-consensus",
 ]
 resolver = "2"
 
@@ -11,13 +12,14 @@ resolver = "2"
 version = "0.0.14"
 edition = "2021"
 license = "MIT OR Apache-2.0"
+homepage = "https://alto.commonware.xyz"
 
 [workspace.dependencies]
 alto-client = { version = "0.0.14", path = "client" }
 alto-types = { version = "0.0.14", path = "types" }
 commonware-broadcast = { git = "https://github.com/scaffino/monorepo.git", tag = "v0.0.62" }
 commonware-codec = { git = "https://github.com/scaffino/monorepo.git", tag = "v0.0.62" }
-commonware-consensus = { git = "https://github.com/scaffino/monorepo.git", tag = "v0.0.62" }
+commonware-consensus = { path = "vendor/commonware-consensus" }
 commonware-cryptography = { git = "https://github.com/scaffino/monorepo.git", tag = "v0.0.62" }
 commonware-deployer = { git = "https://github.com/scaffino/monorepo.git", tag = "v0.0.62", default-features = false }
 commonware-macros = { git = "https://github.com/scaffino/monorepo.git", tag = "v0.0.62" }
@@ -29,7 +31,9 @@ commonware-stream = { git = "https://github.com/scaffino/monorepo.git", tag = "v
 commonware-utils = { git = "https://github.com/scaffino/monorepo.git", tag = "v0.0.62" }
 thiserror = "2.0.12"
 bytes = "1.7.1"
+cfg-if = "1.0.0"
 rand = "0.8.5"
+rand_distr = "0.4.3"
 prost = "0.13.5"
 prost-build = "0.13.5"
 futures = "0.3.31"
