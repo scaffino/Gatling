@@ -4,7 +4,7 @@ use super::{
     Config,
 };
 use crate::{supervisor::Supervisor, utils::OneshotClosedFut};
-use alto_types::{Block, MAX_BLOCK_TRANSACTIONS};
+use alto_types::{Block, MAX_BLOCK_TRANSACTIONS, Transaction};
 use commonware_codec::DecodeExt;
 use commonware_consensus::{marshal, threshold_simplex::types::View};
 use commonware_cryptography::{
@@ -191,6 +191,68 @@ const GENESIS: &[u8] = b"commonware is neat";
 /// Milliseconds in the future to allow for block timestamps.
 const SYNCHRONY_BOUND: u64 = 500;
 
+fn proposal_offset_for_instance(
+    instance_idx: usize,
+    proposal_interval_ms: u64,
+    total_instances: usize,
+) -> u64 {
+    if total_instances == 0 {
+        return 0;
+    }
+    (instance_idx as u64 * proposal_interval_ms) / total_instances as u64
+}
+
+fn proposal_window(
+    genesis_ts_secs: u64,
+    view: View,
+    proposal_interval_ms: u64,
+    instance_idx: usize,
+    total_instances: usize,
+) -> (u64, u64) {
+    let proposal_offset_ms =
+        proposal_offset_for_instance(instance_idx, proposal_interval_ms, total_instances);
+    let slot_end = Actor::<commonware_runtime::deterministic::Context>::tproposal(
+        genesis_ts_secs,
+        view as u64,
+        proposal_interval_ms,
+        proposal_offset_ms,
+    ) as u64;
+
+    if total_instances <= 1 {
+        return (slot_end.saturating_sub(proposal_interval_ms), slot_end);
+    }
+
+    let slot_start = if instance_idx > 0 {
+        let previous_offset_ms =
+            proposal_offset_for_instance(instance_idx - 1, proposal_interval_ms, total_instances);
+        Actor::<commonware_runtime::deterministic::Context>::tproposal(
+            genesis_ts_secs,
+            view as u64,
+            proposal_interval_ms,
+            previous_offset_ms,
+        ) as u64
+    } else {
+        let previous_offset_ms = proposal_offset_for_instance(
+            total_instances - 1,
+            proposal_interval_ms,
+            total_instances,
+        );
+        if view > 0 {
+            Actor::<commonware_runtime::deterministic::Context>::tproposal(
+                genesis_ts_secs,
+                (view - 1) as u64,
+                proposal_interval_ms,
+                previous_offset_ms,
+            ) as u64
+        } else {
+            let wrap_gap_ms = proposal_interval_ms.saturating_sub(previous_offset_ms);
+            slot_end.saturating_sub(wrap_gap_ms)
+        }
+    };
+
+    (slot_start, slot_end)
+}
+
 /// Application actor.
 pub struct Actor<R: Rng + CryptoRng + Spawner + Metrics + Clock> {
     context: R,
@@ -228,6 +290,8 @@ pub struct Actor<R: Rng + CryptoRng + Spawner + Metrics + Clock> {
     participants: Vec<commonware_cryptography::ed25519::PublicKey>,
     // Shared mempool for all consensus instances on this validator
     mempool: Arc<Mutex<Mempool>>,
+    // Synthetic leader-arrival transaction process for controlled landing measurements
+    synthetic_leader_tx: Option<super::SyntheticLeaderTxConfig>,
 }
 
 impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
@@ -244,6 +308,79 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
         let slot_ms = proposal_offset_ms as u128;
         genesis_ms + view_ms + slot_ms
     }
+
+    fn sample_poisson(rng: &mut impl Rng, lambda: f64) -> u64 {
+        if lambda <= 0.0 {
+            return 0;
+        }
+
+        let limit = (-lambda).exp();
+        let mut product = 1.0;
+        let mut count = 0u64;
+        loop {
+            count += 1;
+            product *= rng.gen::<f64>();
+            if product <= limit {
+                return count - 1;
+            }
+        }
+    }
+
+    fn synthetic_leader_transactions(
+        rng: &mut impl Rng,
+        config: &super::SyntheticLeaderTxConfig,
+        genesis_ts_secs: u64,
+        view: View,
+        proposal_interval_ms: u64,
+        instance_idx: usize,
+        total_instances: usize,
+        engine_id: &str,
+        validator_index: usize,
+    ) -> Vec<Transaction> {
+        if total_instances == 0 {
+            return Vec::new();
+        }
+
+        let (slot_start, slot_end) = proposal_window(
+            genesis_ts_secs,
+            view,
+            proposal_interval_ms,
+            instance_idx,
+            total_instances,
+        );
+        let generation_start = genesis_ts_secs
+            .saturating_add(config.start_delay_secs)
+            .saturating_mul(1000);
+        let generation_end =
+            generation_start.saturating_add(config.duration_secs.saturating_mul(1000));
+
+        let active_start = slot_start.max(generation_start);
+        let active_end = slot_end.min(generation_end);
+        if active_start >= active_end {
+            return Vec::new();
+        }
+
+        let active_ms = active_end - active_start;
+        let lambda = config.total_rate * (active_ms as f64 / 1000.0);
+        let count = Self::sample_poisson(rng, lambda).min(MAX_BLOCK_TRANSACTIONS as u64);
+        let mut transactions = Vec::with_capacity(count as usize);
+
+        for offset in 0..count {
+            let arrival_ms = active_start + rng.gen_range(0..active_ms);
+            let amount = offset + 1;
+            let tx = Transaction::sign(&config.signer, config.receiver.clone(), amount, arrival_ms);
+            let tx_id = tx.digest();
+            info!(
+                "[{}] Validator {} synthetic leader transaction {:?} arrival_ms={} view={} amount={}",
+                engine_id, validator_index, tx_id, arrival_ms, view, amount
+            );
+            transactions.push(tx);
+        }
+
+        transactions.sort_by_key(|tx| tx.timestamp);
+        transactions
+    }
+
     /// Create a new application actor.
     pub fn new(context: R, config: Config) -> (Self, Supervisor, Mailbox) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
@@ -292,6 +429,7 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                 ancestor_fetch_rate_per_peer: config.ancestor_fetch_rate_per_peer,
                 participants: config.participants.clone(),
                 mempool: config.shared_mempool,
+                synthetic_leader_tx: config.synthetic_leader_tx,
             },
             Supervisor::new(config.polynomial, config.participants, config.share),
             Mailbox::new(sender),
@@ -459,8 +597,25 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                     parent,
                     mut response,
                 } => {
+                    let synthetic_transactions = self
+                        .synthetic_leader_tx
+                        .as_ref()
+                        .map(|config| {
+                            Self::synthetic_leader_transactions(
+                                &mut self.context,
+                                config,
+                                self.genesis_timestamp_secs,
+                                view,
+                                self.proposal_interval_ms,
+                                self.gatling_instance_id.saturating_sub(1),
+                                self.total_instances,
+                                &self.engine_id,
+                                self.validator_index,
+                            )
+                        })
+                        .unwrap_or_default();
                     // First pickup: Collect transactions from mempool immediately
-                    let mut transactions = Vec::new();
+                    let mut transactions = synthetic_transactions;
                     {
                         let mut mempool_guard = self.mempool.lock().unwrap();
                         while transactions.len() < MAX_BLOCK_TRANSACTIONS {
@@ -999,6 +1154,68 @@ impl<R: Rng + CryptoRng + Spawner + Metrics + Clock> Actor<R> {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{proposal_window, Actor};
+    use commonware_cryptography::{ed25519::PrivateKey, PrivateKeyExt, Signer};
+    use rand::{rngs::StdRng, SeedableRng};
+
+    #[test]
+    fn synthetic_leader_transactions_arrive_before_next_leader_proposal() {
+        let genesis_ts_secs = 1_000;
+        let proposal_interval_ms = 500;
+        let total_instances = 5;
+        let view = 10;
+        let instance_idx = 0;
+
+        let (slot_start, slot_end) = proposal_window(
+            genesis_ts_secs,
+            view,
+            proposal_interval_ms,
+            instance_idx,
+            total_instances,
+        );
+        assert_eq!(
+            slot_start,
+            genesis_ts_secs * 1000 + 9 * proposal_interval_ms + 400
+        );
+        assert_eq!(slot_end, genesis_ts_secs * 1000 + 10 * proposal_interval_ms);
+
+        let signer = PrivateKey::from_seed(1);
+        let receiver = PrivateKey::from_seed(2).public_key();
+        let config = super::super::SyntheticLeaderTxConfig {
+            total_rate: 1_000.0,
+            start_delay_secs: 0,
+            duration_secs: 60,
+            signer,
+            receiver,
+        };
+        let mut rng = StdRng::seed_from_u64(7);
+
+        let transactions =
+            Actor::<commonware_runtime::deterministic::Context>::synthetic_leader_transactions(
+                &mut rng,
+                &config,
+                genesis_ts_secs,
+                view,
+                proposal_interval_ms,
+                instance_idx,
+                total_instances,
+                "test",
+                0,
+            );
+
+        assert!(!transactions.is_empty());
+        assert!(transactions
+            .iter()
+            .all(|tx| tx.timestamp >= slot_start && tx.timestamp < slot_end));
+        assert!(transactions
+            .windows(2)
+            .all(|pair| pair[0].timestamp <= pair[1].timestamp));
+        assert!(transactions.iter().all(|tx| tx.verify()));
     }
 }
 

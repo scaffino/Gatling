@@ -1,7 +1,7 @@
 use alto_types::Evaluation;
 use commonware_cryptography::{
     bls12381::primitives::{group, poly::Poly},
-    ed25519::PublicKey,
+    ed25519::{self, PublicKey},
 };
 
 mod actor;
@@ -12,6 +12,25 @@ pub use ingress::{FinalizationPusher, Mailbox};
 pub mod mempool;
 
 use std::sync::{Arc, Mutex, atomic::AtomicU64};
+
+/// Configuration for synthetic transactions that arrive directly at the slot leader.
+#[derive(Clone)]
+pub struct SyntheticLeaderTxConfig {
+    /// Total target transaction rate across all consensus instances.
+    pub total_rate: f64,
+
+    /// Seconds after genesis at which synthetic arrivals start.
+    pub start_delay_secs: u64,
+
+    /// Number of seconds to generate synthetic arrivals.
+    pub duration_secs: u64,
+
+    /// Key used to sign synthetic transactions.
+    pub signer: ed25519::PrivateKey,
+
+    /// Receiver used for synthetic transactions.
+    pub receiver: ed25519::PublicKey,
+}
 
 /// Configuration for the application.
 pub struct Config {
@@ -70,4 +89,7 @@ pub struct Config {
 
     /// Shared mempool — all consensus instances on this validator read from and write to the same pool.
     pub shared_mempool: Arc<Mutex<mempool::Mempool>>,
+
+    /// Optional synthetic transaction process injected directly into leader proposals.
+    pub synthetic_leader_tx: Option<SyntheticLeaderTxConfig>,
 }

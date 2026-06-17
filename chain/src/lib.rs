@@ -241,6 +241,7 @@ mod tests {
                     total_instances: 1,
                     genesis_timestamp_secs: 0,
                     shared_mempool: Arc::new(Mutex::new(Mempool::new(context.with_label("mempool")))),
+                    synthetic_leader_tx: None,
                 };
                 let engine = Engine::new(context.with_label(&uid), config).await;
 
@@ -432,6 +433,7 @@ mod tests {
                     total_instances: 1,
                     genesis_timestamp_secs: 0,
                     shared_mempool: Arc::new(Mutex::new(Mempool::new(context.with_label("mempool")))),
+                    synthetic_leader_tx: None,
                 };
                 let engine = Engine::new(context.with_label(&uid), config).await;
 
@@ -534,6 +536,7 @@ mod tests {
                 total_instances: 1,
                 genesis_timestamp_secs: 0,
                 shared_mempool: Arc::new(Mutex::new(Mempool::new(context.with_label("mempool")))),
+                synthetic_leader_tx: None,
             };
             let engine = Engine::new(context.with_label(&uid), config).await;
 
@@ -686,6 +689,7 @@ mod tests {
                         total_instances: 1,
                         genesis_timestamp_secs: 0,
                         shared_mempool: Arc::new(Mutex::new(Mempool::new(context.with_label("mempool")))),
+                        synthetic_leader_tx: None,
                     };
                     let engine = Engine::new(context.with_label(&uid), config).await;
 
@@ -874,6 +878,7 @@ mod tests {
                     total_instances: 1,
                     genesis_timestamp_secs: 0,
                     shared_mempool: Arc::new(Mutex::new(Mempool::new(context.with_label("mempool")))),
+                    synthetic_leader_tx: None,
                 };
                 let engine = Engine::new(context.with_label(&uid), config).await;
 
