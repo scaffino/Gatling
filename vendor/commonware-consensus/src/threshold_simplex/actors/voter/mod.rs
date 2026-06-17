@@ -13,7 +13,7 @@ use commonware_cryptography::{
 use commonware_p2p::Blocker;
 use commonware_runtime::buffer::PoolRef;
 pub use ingress::{Mailbox, Message};
-use std::{num::NonZeroUsize, time::Duration};
+use std::{num::NonZeroUsize, sync::Arc, time::{Duration, SystemTime}};
 
 pub struct Config<
     C: Signer,
@@ -36,7 +36,9 @@ pub struct Config<
     pub namespace: Vec<u8>,
     pub mailbox_size: usize,
     pub leader_timeout: Duration,
+    pub leader_deadline: Option<Arc<dyn Fn(View, SystemTime) -> SystemTime + Send + Sync>>,
     pub notarization_timeout: Duration,
+    pub advance_deadline: Option<Arc<dyn Fn(View, SystemTime) -> SystemTime + Send + Sync>>,
     pub nullify_retry: Duration,
     pub activity_timeout: View,
     pub replay_buffer: NonZeroUsize,
